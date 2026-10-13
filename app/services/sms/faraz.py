@@ -1,0 +1,246 @@
+"""Standalone FarazSMS (IranPayamak) client for pattern SMS.
+
+Adapted from SMS_Panel/app/services/sms/faraz.py (source blob 23825ee).
+"""
+
+from __future__ import annotations
+
+import json
+import math
+import os
+import re
+from dataclasses import dataclass, field
+from http.client import HTTPException
+from pathlib import Path
+from typing import Any, Mapping
+from urllib.error import HTTPError, URLError
+from urllib.request import Request, urlopen
+
+from dotenv import load_dotenv
+
+PATTERN_PATH = "/ws/v1/sms/pattern"
+PERSIAN_DIGITS = str.maketrans("۰۱۲۳۴۵۶۷۸۹", "0123456789")
+ENV_FILE = Path(__file__).resolve().parents[3] / ".env"
+
+
+class SmsServiceError(RuntimeError):
+    """Base error raised by the SMS provider client."""
+
+
+class SmsConfigurationError(SmsServiceError):
+    """Provider credentials/defaults are missing."""
+
+
+class SmsValidationError(SmsServiceError):
+    """A provider request is invalid before it is sent."""
+
+
+class SmsProviderError(SmsServiceError):
+    """The provider rejected a request or could not be reached."""
+
+    def __init__(self, message: str, *, status_code: int | None = None, body: Any = None):
+        super().__init__(message)
+        self.status_code = status_code
+        self.body = body
+
+
+@dataclass(frozen=True)
+class FarazSmsConfig:
+    """Pattern code and credentials are required when sending."""
+
+    api_key: str = field(repr=False)
+    base_url: str = "https://api.iranpayamak.com"
+    line_number: str = ""
+    timeout_seconds: float = 15.0
+    pattern_code: str = ""
+
+    @classmethod
+    def from_environment(cls) -> "FarazSmsConfig":
+        # Match app.config: root .env, UTF-8, existing environment takes priority.
+        load_dotenv(ENV_FILE, encoding="utf-8")
+        try:
+            timeout = float(os.getenv("FARAZ_TIMEOUT_SECONDS", "15"))
+        except ValueError as exc:
+            raise SmsConfigurationError("FARAZ_TIMEOUT_SECONDS must be numeric.") from exc
+        if not math.isfinite(timeout) or timeout <= 0:
+            raise SmsConfigurationError("FARAZ_TIMEOUT_SECONDS must be finite and greater than zero.")
+        return cls(
+            api_key=os.getenv("FARAZ_API_KEY", "").strip(),
+            base_url=os.getenv("FARAZ_API_URL", "https://api.iranpayamak.com").strip(),
+            line_number=os.getenv("FARAZ_LINE_NUMBER", "").strip(),
+            timeout_seconds=timeout,
+            pattern_code=os.getenv("FARAZ_PATTERN_CODE", "").strip(),
+        )
+
+
+@dataclass(frozen=True)
+class FarazSmsResponse:
+    """Successful Pattern response; data is the provider's numeric result."""
+
+    status_code: int
+    body: Any
+
+    @property
+    def data(self) -> int | float:
+        return self.body["data"]
+
+
+def normalize_recipient(value: str) -> str:
+    """Normalize +989.../989.../09... to provider form 09xxxxxxxxx."""
+
+    if not isinstance(value, str):
+        raise SmsValidationError("Recipient must be a string.")
+    phone = value.translate(PERSIAN_DIGITS).replace(" ", "").replace("-", "")
+    if phone.startswith("+98"):
+        phone = "0" + phone[3:]
+    elif phone.startswith("98"):
+        phone = "0" + phone[2:]
+    if not re.fullmatch(r"09\d{9}", phone):
+        raise SmsValidationError("Recipient must be a valid Iranian mobile number.")
+    return phone
+
+
+class FarazSmsClient:
+    """Synchronous client for one pattern recipient per request."""
+
+    def __init__(self, config: FarazSmsConfig | None = None):
+        self.config = config or FarazSmsConfig.from_environment()
+
+    def send_pattern(
+        self,
+        *,
+        recipient: str,
+        attributes: Mapping[str, str | int | float],
+        line_number: str | None = None,
+        number_format: str = "english",
+    ) -> FarazSmsResponse:
+        """POST /ws/v1/sms/pattern for a single recipient."""
+
+        return self._post(
+            PATTERN_PATH,
+            self.build_pattern_payload(
+                recipient=recipient,
+                attributes=attributes,
+                line_number=line_number,
+                number_format=number_format,
+            ),
+        )
+
+    def build_pattern_payload(
+        self,
+        *,
+        recipient: str,
+        attributes: Mapping[str, str | int | float],
+        line_number: str | None = None,
+        number_format: str = "english",
+    ) -> dict[str, Any]:
+        """Build a pattern body without issuing a request."""
+
+        code = self.config.pattern_code
+        if not isinstance(code, str) or not code.strip():
+            raise SmsConfigurationError("FARAZ_PATTERN_CODE must be a non-empty string.")
+        if not isinstance(attributes, Mapping):
+            raise SmsValidationError("Pattern attributes must be a mapping.")
+        for name, value in attributes.items():
+            if not isinstance(name, str) or not re.fullmatch(r"[a-zA-Z_][a-zA-Z0-9_]*", name):
+                raise SmsValidationError("Pattern attribute names must be valid variable names.")
+            if not isinstance(value, (str, int, float)) or isinstance(value, bool):
+                raise SmsValidationError("Pattern attribute values must be strings or numbers.")
+            if isinstance(value, float) and not math.isfinite(value):
+                raise SmsValidationError("Numeric pattern attributes must be finite.")
+        return {
+            "code": code.strip(),
+            "attributes": dict(attributes),
+            "recipient": normalize_recipient(recipient),
+            "line_number": self._line_number(line_number),
+            "number_format": self._number_format(number_format),
+        }
+
+    def _line_number(self, line_number: str | None) -> str:
+        value = (line_number or "").strip() or self.config.line_number.strip()
+        if not value:
+            raise SmsConfigurationError("A FarazSMS line number is required.")
+        return value
+
+    @staticmethod
+    def _number_format(value: str) -> str:
+        if not isinstance(value, str) or value not in {"english", "persian"}:
+            raise SmsValidationError("number_format must be english or persian.")
+        return value
+
+    def _post(
+        self,
+        path: str,
+        payload: Mapping[str, Any],
+    ) -> FarazSmsResponse:
+        if not self.config.api_key:
+            raise SmsConfigurationError("FARAZ_API_KEY is not configured.")
+        if not self.config.base_url:
+            raise SmsConfigurationError("FARAZ_API_URL is not configured.")
+
+        url = f"{self.config.base_url.rstrip('/')}{path}"
+        payload_bytes = json.dumps(
+            payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        request = Request(
+            url,
+            data=payload_bytes,
+            headers={
+                "Api-Key": self.config.api_key,
+                "Accept": "application/json",
+                "Content-Type": "application/json; charset=utf-8",
+            },
+            method="POST",
+        )
+
+        # Never log requests, provider bodies or transport exceptions: they can
+        # contain credentials, customer numbers, message text or link tokens.
+        try:
+            with urlopen(request, timeout=self.config.timeout_seconds) as response:
+                status_code = response.getcode()
+                body = self._decode_response(response.read())
+        except HTTPError as exc:
+            raise SmsProviderError(
+                "FarazSMS rejected the request.",
+                status_code=exc.code,
+                body=self._decode_response(exc.read()),
+            ) from None
+        except (URLError, TimeoutError, ConnectionError, HTTPException):
+            raise SmsProviderError(
+                "FarazSMS connection failed before a reliable response was received."
+            ) from None
+
+        if not 200 <= status_code < 300:
+            raise SmsProviderError(
+                "FarazSMS returned an unsuccessful response.",
+                status_code=status_code,
+                body=body,
+            )
+        if not isinstance(body, Mapping) or body.get("status") != "success":
+            raise SmsProviderError(
+                "FarazSMS did not report a successful pattern send.",
+                status_code=status_code,
+                body=body,
+            )
+        data = body.get("data")
+        if not isinstance(data, (int, float)) or isinstance(data, bool) or (
+            isinstance(data, float) and not math.isfinite(data)
+        ):
+            raise SmsProviderError(
+                "FarazSMS returned an invalid pattern response.",
+                status_code=status_code,
+                body=body,
+            )
+        return FarazSmsResponse(status_code=status_code, body=body)
+
+    @staticmethod
+    def _decode_response(raw: bytes) -> Any:
+        text = raw.decode("utf-8", errors="replace")
+        try:
+            return json.loads(text)
+        except json.JSONDecodeError:
+            return {"raw": text}
+
