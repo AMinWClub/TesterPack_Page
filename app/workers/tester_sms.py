@@ -59,6 +59,8 @@ class WorkerSettings:
     selection_base_url: str = ""
     link_attribute: str = "link"
     token_secret: str = field(default="", repr=False)
+    retry_delay_minutes: int = 5
+    max_attempts: int = 3
 
     @classmethod
     def from_environment(cls, *, require_delivery: bool = False) -> WorkerSettings:
@@ -84,6 +86,17 @@ class WorkerSettings:
         enabled = os.getenv("TESTER_SMS_ENABLED", "false").strip().lower()
         if enabled not in {"true", "false"}:
             raise WorkerConfigurationError("TESTER_SMS_ENABLED must be true or false.")
+        retry_settings = {}
+        for name, default in (("TESTER_SMS_RETRY_DELAY_MINUTES", "5"), ("TESTER_SMS_MAX_ATTEMPTS", "3")):
+            raw = os.getenv(name, default).strip()
+            if not re.fullmatch(r"[0-9]+", raw):
+                raise WorkerConfigurationError(f"{name} must be a positive integer.")
+            try:
+                retry_settings[name] = int(raw)
+            except ValueError:
+                raise WorkerConfigurationError(f"{name} must be a positive integer.") from None
+            if retry_settings[name] <= 0:
+                raise WorkerConfigurationError(f"{name} must be a positive integer.")
         settings = cls(
             orders_collection=collection,
             product_id=product_id,
@@ -93,6 +106,8 @@ class WorkerSettings:
             selection_base_url=os.getenv("TESTER_SELECTION_BASE_URL", "").strip().rstrip("/"),
             link_attribute=os.getenv("TESTER_PATTERN_LINK_ATTRIBUTE", "link").strip(),
             token_secret=os.getenv("TESTER_TOKEN_SECRET", ""),
+            retry_delay_minutes=retry_settings["TESTER_SMS_RETRY_DELAY_MINUTES"],
+            max_attempts=retry_settings["TESTER_SMS_MAX_ATTEMPTS"],
         )
         if not re.fullmatch(r"[a-zA-Z_][a-zA-Z0-9_]*", settings.link_attribute):
             raise WorkerConfigurationError("TESTER_PATTERN_LINK_ATTRIBUTE must be a valid pattern variable name.")
@@ -158,12 +173,22 @@ def order_filter(settings: WorkerSettings) -> dict:
     }
 
 
-def eligible_pipeline(match: dict, limit: int) -> list[dict]:
+def eligible_pipeline(match: dict, limit: int, max_attempts: int = 3, now: datetime | None = None) -> list[dict]:
+    now = now or datetime.now(timezone.utc)
     return [
         {"$match": match},
         {"$sort": {ORDER_DATE_FIELD: 1, "_id": 1}},
         {"$lookup": {"from": NOTIFICATIONS, "localField": "_id", "foreignField": "order_id", "as": "notification"}},
-        {"$match": {"$or": [{"notification": {"$size": 0}}, {"notification.status": "prepared"}]}},
+        {"$match": {"$or": [
+            {"notification": {"$size": 0}},
+            {"notification": {"$elemMatch": {
+                "$or": [{"attempt_count": {"$exists": False}}, {"attempt_count": {"$lt": max_attempts}}],
+                "status": "prepared",
+            }}},
+            {"notification": {"$elemMatch": {
+                "status": "retry_pending", "attempt_count": {"$lt": max_attempts}, "next_retry_at": {"$lte": now},
+            }}},
+        ]}},
         {"$limit": limit},
         {"$project": {"_id": 1, ORDER_MOBILE_FIELD: 1}},
     ]
@@ -176,6 +201,7 @@ async def create_indexes(collections: dict) -> None:
     )
     await collections["notifications"].create_index("order_id", unique=True, name="tester_notification_order_unique")
     await collections["notifications"].create_index([("status", 1), ("lease_expires_at", 1)], name="tester_notification_recovery")
+    await collections["notifications"].create_index([("status", 1), ("next_retry_at", 1)], name="tester_notification_retry")
     await collections["notifications"].create_index([("status", 1), ("order_synced", 1), ("accepted_at", 1)], name="tester_notification_repair")
     await collections["selections"].create_index("order_id", unique=True, name="tester_selection_order_unique")
     await collections["selections"].create_index("token_hash", unique=True, name="tester_selection_token_unique")
@@ -187,6 +213,7 @@ async def check_indexes(collections: dict) -> None:
         "notifications": [
             (True, [("order_id", 1)]), (False, [("status", 1), ("lease_expires_at", 1)]),
             (False, [("status", 1), ("order_synced", 1), ("accepted_at", 1)]),
+            (False, [("status", 1), ("next_retry_at", 1)]),
         ],
         "selections": [(True, [("order_id", 1)]), (True, [("token_hash", 1)])],
     }
@@ -244,39 +271,74 @@ async def prepare_notification(notifications, order_id):
     try:
         await notifications.update_one({"order_id": order_id}, {"$setOnInsert": {
             "order_id": order_id, "status": "prepared", "created_at": now, "updated_at": now,
+            "attempt_count": 0, "attempts": [], "next_retry_at": None, "last_attempt_at": None,
+            "last_error_code": None, "lease_expires_at": None, "attempt_id": None,
+            "accepted_at": None, "order_synced": False,
         }}, upsert=True)
     except DuplicateKeyError:
         pass
     return await notifications.find_one({"order_id": order_id})
 
 
-async def claim_notification(notifications, order_id, timeout_seconds: float):
+async def claim_notification(notifications, order_id, timeout_seconds: float, max_attempts: int = 3):
     now = datetime.now(timezone.utc)
+    attempt_id = uuid4().hex
     return await notifications.find_one_and_update(
-        {"order_id": order_id, "status": "prepared"},
-        {"$set": {
-            "status": "sending", "attempt_id": uuid4().hex,
-            "sending_started_at": now, "updated_at": now,
+        {"order_id": order_id,
+         "$expr": {"$lt": [{"$ifNull": ["$attempt_count", 0]}, max_attempts]},
+         "$or": [{"status": "prepared"}, {"status": "retry_pending", "next_retry_at": {"$lte": now}}]},
+        [{"$set": {
+            "status": "sending", "attempt_id": attempt_id,
+            "attempt_count": {"$add": [{"$ifNull": ["$attempt_count", 0]}, 1]},
+            "last_attempt_at": now, "sending_started_at": now, "updated_at": now, "next_retry_at": None,
             "lease_expires_at": now + timedelta(seconds=timeout_seconds + 300),
-        }}, return_document=ReturnDocument.AFTER,
+        }}, {"$set": {"attempts": {"$concatArrays": [{"$ifNull": ["$attempts", []]}, [{
+            "attempt_number": "$attempt_count", "attempt_id": attempt_id,
+            "started_at": now, "finished_at": None, "result": "sending", "http_status": None, "error_code": None,
+        }]]}}}], return_document=ReturnDocument.AFTER,
     )
 
 
-async def finish_notification(notifications, claim: dict, status: str, **details) -> bool:
-    result = await notifications.update_one({
+async def finish_notification(notifications, claim: dict, status: str, *, expired_at: datetime | None = None, **details) -> bool:
+    now = datetime.now(timezone.utc)
+    allowed = ["sending", "retry_pending", "exhausted"] if status == "accepted" else ["sending"]
+    error_code = details.pop("error_code", None)
+    history = {"$map": {
+        "input": {"$ifNull": ["$attempts", []]}, "as": "attempt",
+        "in": {"$cond": [{"$eq": ["$$attempt.attempt_id", claim["attempt_id"]]},
+            {"$mergeObjects": ["$$attempt", {
+                "finished_at": now, "result": status, "http_status": details.get("response_status_code"), "error_code": error_code,
+            }]}, "$$attempt"]},
+    }}
+    match = {
         "order_id": claim["order_id"], "attempt_id": claim["attempt_id"],
-        "status": {"$in": ["sending", "submission_unknown"]},
-    }, {"$set": {"status": status, "updated_at": datetime.now(timezone.utc), **details}})
+        "status": {"$in": allowed},
+    }
+    if expired_at is not None:
+        match["lease_expires_at"] = {"$lte": expired_at}
+    result = await notifications.update_one(match, [{"$set": {"status": status, "updated_at": now, "last_error_code": error_code,
+                   "lease_expires_at": None, "next_retry_at": None, "attempts": history, **details}}])
     return result.matched_count == 1
 
 
-def submission_failure(error: SmsProviderError) -> tuple[str, str]:
+def submission_failure(error: SmsProviderError) -> str:
     status_code = error.status_code
     if status_code is not None and 400 <= status_code < 500 and status_code != 408:
-        return "failed", "provider_rejected"
+        return "provider_rejected"
     if status_code is not None and 200 <= status_code < 300 and isinstance(error.body, dict) and error.body.get("status") == "error":
-        return "failed", "provider_rejected"
-    return "submission_unknown", "provider_outcome_unknown"
+        return "provider_rejected"
+    return "provider_outcome_unknown"
+
+
+async def schedule_retry(notifications, claim: dict, settings: WorkerSettings, code: str,
+                         status_code: int | None = None) -> str:
+    status = "exhausted" if claim["attempt_count"] >= settings.max_attempts else "retry_pending"
+    next_retry = None if status == "exhausted" else datetime.now(timezone.utc) + timedelta(minutes=settings.retry_delay_minutes)
+    changed = await finish_notification(notifications, claim, status, error_code=code,
+                                        response_status_code=status_code, next_retry_at=next_retry)
+    if changed and status == "exhausted":
+        logger.warning("SMS attempts exhausted; inspect the exhausted report.")
+    return status if changed else "skipped"
 
 
 async def sync_accepted_order(collections: dict, notification: dict, order_filter: dict) -> bool:
@@ -299,19 +361,81 @@ async def sync_accepted_order(collections: dict, notification: dict, order_filte
     return True
 
 
-async def recover_notifications(collections: dict, order_filter: dict, limit: int) -> dict:
-    counts = {"recovered_unknown": 0, "repaired": 0, "repair_errors": 0}
+def notification_scope_pipeline(collections: dict, match: dict, status_match: dict) -> list[dict]:
+    return [
+        {"$match": status_match},
+        {"$lookup": {
+            "from": collections["orders"].name, "localField": "order_id", "foreignField": "_id",
+            "pipeline": [{"$match": match}, {"$project": {"_id": 1}}], "as": "_eligible_order",
+        }},
+        {"$match": {"_eligible_order.0": {"$exists": True}}},
+        {"$project": {"_eligible_order": 0}},
+    ]
+
+
+async def recover_notifications(collections: dict, order_filter: dict, limit: int,
+                                settings: WorkerSettings) -> dict:
+    counts = {"recovered_retry": 0, "repaired": 0, "repair_errors": 0}
     notifications = collections["notifications"]
     now = datetime.now(timezone.utc)
-    cursor = notifications.find({"status": "sending", "lease_expires_at": {"$lte": now}}).sort("lease_expires_at", 1).limit(limit)
+    criteria = {"$or": [
+        {"status": "sending", "lease_expires_at": {"$lte": now}},
+        {"status": {"$in": ["prepared", "retry_pending"]}, "attempt_count": {"$gte": settings.max_attempts}},
+        {"status": "submission_unknown"},
+        {"status": "failed", "error_code": {"$ne": "invalid_order_data"}},
+    ]}
+    cursor = await notifications.aggregate(
+        notification_scope_pipeline(collections, order_filter, criteria) + [{"$limit": limit}],
+        collation=Collation(locale="simple"),
+    )
     async for notification in cursor:
-        result = await notifications.update_one({
-            "order_id": notification["order_id"], "status": "sending", "lease_expires_at": {"$lte": now},
-        }, {"$set": {"status": "submission_unknown", "error_code": "interrupted_submission", "updated_at": now}})
-        counts["recovered_unknown"] += result.modified_count
-    cursor = notifications.find({
+        # Legacy sends predate attempt_count: conservatively count their one send.
+        count = notification.get("attempt_count", 1)
+        if notification["status"] == "sending":
+            status = "exhausted" if count >= settings.max_attempts else "retry_pending"
+            claim = {**notification, "attempt_count": count}
+            if not notification.get("attempts"):
+                # Only old-format sending documents need this compatibility step.
+                history = [{
+                    "attempt_number": count, "attempt_id": notification.get("attempt_id"),
+                    "started_at": notification.get("sending_started_at", notification.get("created_at")),
+                    "finished_at": None, "result": "sending", "http_status": None, "error_code": None,
+                }]
+                await notifications.update_one(
+                    {"order_id": notification["order_id"], "status": "sending",
+                     "attempt_id": notification.get("attempt_id"), "attempt_count": {"$exists": False},
+                     "lease_expires_at": {"$lte": now}},
+                    {"$set": {"attempt_count": count, "attempts": history}},
+                )
+            changed = await finish_notification(
+                notifications, claim, status, expired_at=now, error_code="interrupted_submission",
+                next_retry_at=now + timedelta(minutes=settings.retry_delay_minutes) if status == "retry_pending" else None,
+            )
+        else:
+            status = "exhausted" if count >= settings.max_attempts else "retry_pending"
+            last_at = notification.get("last_attempt_at") or notification.get("sending_started_at") or notification.get("updated_at") or now
+            last_at = last_at.replace(tzinfo=timezone.utc) if last_at.tzinfo is None else last_at
+            attempt_id = notification.get("attempt_id") or uuid4().hex
+            code = notification.get("last_error_code") or notification.get("error_code") or "legacy_unconfirmed_submission"
+            history = notification.get("attempts") or [{
+                "attempt_number": count, "attempt_id": attempt_id, "started_at": last_at, "finished_at": last_at,
+                "result": "unconfirmed", "http_status": notification.get("response_status_code"), "error_code": code,
+            }]
+            result = await notifications.update_one({
+                "order_id": notification["order_id"], "status": notification["status"],
+                "attempt_id": notification.get("attempt_id"),
+            }, {"$set": {
+                "status": status, "attempt_count": count, "attempts": history, "attempt_id": attempt_id,
+                "last_attempt_at": last_at, "last_error_code": code, "lease_expires_at": None,
+                "next_retry_at": last_at + timedelta(minutes=settings.retry_delay_minutes) if status == "retry_pending" else None,
+                "updated_at": now,
+            }})
+            changed = bool(result.matched_count)
+        counts["recovered_retry"] += int(changed)
+    accepted_match = {key: value for key, value in order_filter.items() if key != "sms_sent"}
+    cursor = await notifications.aggregate(notification_scope_pipeline(collections, accepted_match, {
         "status": "accepted", "order_synced": {"$ne": True}, "order_sync_blocked": {"$exists": False},
-    }).sort("accepted_at", 1).limit(limit)
+    }) + [{"$limit": limit}], collation=Collation(locale="simple"))
     async for notification in cursor:
         try:
             if await sync_accepted_order(collections, notification, order_filter):
@@ -322,55 +446,92 @@ async def recover_notifications(collections: dict, order_filter: dict, limit: in
     return counts
 
 
+async def exhausted_report(collections: dict, match: dict, limit: int) -> dict:
+    match = {key: value for key, value in match.items() if key != "sms_sent"}
+    pipeline = notification_scope_pipeline(collections, match, {"status": "exhausted"})
+    totals = await collections["notifications"].aggregate(pipeline + [{"$count": "total"}])
+    total = sum([item["total"] async for item in totals])
+    if limit == 0:
+        return {"exhausted_total": total, "orders": []}
+    records = await collections["notifications"].aggregate(pipeline + [
+        {"$limit": limit},
+        {"$project": {"_id": 0, "order_id": 1, "attempt_count": 1, "last_attempt_at": 1, "last_error_code": 1}},
+    ])
+    return {"exhausted_total": total, "orders": [item async for item in records]}
+
+
+async def send_with_lease(sms, recipient, attributes, notifications, claim):
+    # Keep an active request leased even if reading a response takes longer than
+    # one socket timeout. A dead process cannot renew; its lease will expire.
+    task = asyncio.create_task(asyncio.to_thread(sms.send_pattern, recipient=recipient, attributes=attributes))
+    while True:
+        done, _ = await asyncio.wait({task}, timeout=min(sms.config.timeout_seconds, 30))
+        if done:
+            return await task
+        try:
+            await notifications.update_one({
+                "order_id": claim["order_id"], "attempt_id": claim["attempt_id"], "status": "sending",
+            }, {"$set": {"lease_expires_at": datetime.now(timezone.utc) + timedelta(seconds=sms.config.timeout_seconds + 300)}})
+        except PyMongoError:
+            logger.warning("MongoDB lease renewal failed; request result will remain fenced by attempt id.")
+
+
 async def process_order(order: dict, collections: dict, settings: WorkerSettings, sms: FarazSmsClient,
-                        order_filter: dict) -> str:
+                        order_filter: dict) -> tuple[str, int | None]:
     current = await collections["orders"].find_one(
         {**order_filter, "_id": order["_id"]}, collation=Collation(locale="simple"),
     )
     if not current:
-        return "skipped"
+        return "skipped", None
     order = current
     notifications = collections["notifications"]
     notification = await prepare_notification(notifications, order["_id"])
-    if not notification or notification["status"] != "prepared":
-        return "skipped"
+    if not notification or notification["status"] not in {"prepared", "retry_pending"}:
+        return "skipped", None
     try:
         recipient = normalize_recipient(order.get(ORDER_MOBILE_FIELD))
         link = await ensure_selection(collections["selections"], order["_id"], settings)
         attributes = {settings.link_attribute: link}
         sms.build_pattern_payload(recipient=recipient, attributes=attributes)
     except (SmsValidationError, SmsConfigurationError):
-        result = await notifications.update_one({"order_id": order["_id"], "status": "prepared"}, {
-            "$set": {"status": "failed", "error_code": "invalid_order_data", "updated_at": datetime.now(timezone.utc)},
-        })
-        return "failed" if result.matched_count else "skipped"
-    claim = await claim_notification(notifications, order["_id"], sms.config.timeout_seconds)
+        result = await notifications.update_one({
+            "order_id": order["_id"], "status": notification["status"], "attempt_id": notification.get("attempt_id"),
+        }, {"$set": {"status": "failed", "error_code": "invalid_order_data",
+                    "last_error_code": "invalid_order_data", "updated_at": datetime.now(timezone.utc)}})
+        return ("failed" if result.matched_count else "skipped"), None
+    claim = await claim_notification(notifications, order["_id"], sms.config.timeout_seconds, settings.max_attempts)
     if not claim:
-        return "skipped"
+        return "skipped", None
     try:
-        response = await asyncio.to_thread(sms.send_pattern, recipient=recipient, attributes=attributes)
+        response = await send_with_lease(sms, recipient, attributes, notifications, claim)
     except SmsProviderError as error:
-        status, code = submission_failure(error)
-        await finish_notification(notifications, claim, status, error_code=code, response_status_code=error.status_code)
-        return status
+        stop_code = error.status_code if error.status_code in {401, 403, 429} else None
+        try:
+            status = await schedule_retry(notifications, claim, settings, submission_failure(error), error.status_code)
+        except PyMongoError:
+            if stop_code is None:
+                raise
+            status = "database_errors"
+        if stop_code:
+            logger.warning("Faraz returned HTTP %s; stopping this run with future retry preserved.", stop_code)
+        return status, stop_code
     except (SmsValidationError, SmsConfigurationError):
-        await finish_notification(notifications, claim, "failed", error_code="invalid_send_configuration")
-        return "failed"
+        await finish_notification(notifications, claim, "failed", error_code="invalid_order_data")
+        return "failed", None
     except Exception:
-        await finish_notification(notifications, claim, "submission_unknown", error_code="unexpected_submission_error")
-        return "submission_unknown"
+        return await schedule_retry(notifications, claim, settings, "unexpected_submission_error"), None
     accepted = await finish_notification(
         notifications, claim, "accepted", accepted_at=datetime.now(timezone.utc),
         response_status_code=response.status_code, provider_data=response.data,
     )
     if not accepted:
-        return "submission_unknown"
+        # A newer attempt owns the notification: never overwrite it or sync the order.
+        return "skipped", None
     try:
         await sync_accepted_order(collections, claim, order_filter)
     except PyMongoError:
         logger.warning("SMS accepted; order flag update is pending a later repair.")
-    return "accepted"
-
+    return "accepted", None
 
 async def run_once(db, settings: WorkerSettings, *, limit: int | None = None,
                    dry_run: bool = False, sms: FarazSmsClient | None = None) -> dict:
@@ -380,7 +541,7 @@ async def run_once(db, settings: WorkerSettings, *, limit: int | None = None,
     collections = worker_collections(db, settings)
     match = order_filter(settings)
     readonly = dry_run or not settings.sms_enabled
-    summary = {"eligible": 0, "accepted": 0, "failed": 0, "submission_unknown": 0, "skipped": 0, "database_errors": 0}
+    summary = {"eligible": 0, "accepted": 0, "failed": 0, "retry_pending": 0, "exhausted": 0, "skipped": 0, "database_errors": 0}
     if not readonly:
         settings.validate_delivery()
         sms = sms or FarazSmsClient()
@@ -400,9 +561,9 @@ async def run_once(db, settings: WorkerSettings, *, limit: int | None = None,
         # Validate global pattern settings without generating a token or sending.
         sms.build_pattern_payload(recipient="09120000000", attributes={settings.link_attribute: "https://validation.invalid/s"})
         await check_indexes(collections)
-        summary.update(await recover_notifications(collections, match, limit))
+        summary.update(await recover_notifications(collections, match, limit, settings))
     cursor = await collections["orders"].aggregate(
-        eligible_pipeline(match, limit), batchSize=min(limit, settings.batch_size),
+        eligible_pipeline(match, limit, settings.max_attempts), batchSize=min(limit, settings.batch_size),
         allowDiskUse=True, collation=Collation(locale="simple"),
         hint={"product_id": 1, ORDER_DATE_FIELD: 1, "_id": 1},
     )
@@ -411,12 +572,16 @@ async def run_once(db, settings: WorkerSettings, *, limit: int | None = None,
         if readonly:
             continue
         try:
-            status = await process_order(order, collections, settings, sms, match)
+            status, stop_code = await process_order(order, collections, settings, sms, match)
             summary[status] += 1
+            if stop_code:
+                summary["halted_http_status"] = stop_code
+                break
         except PyMongoError:
             # If dispatch already began, a durable sending claim remains fenced.
             summary["database_errors"] += 1
-            logger.warning("Order database operation failed; any pending submission will not be retried.")
+            logger.warning("Order database operation failed; unfinished attempts will recover after lease expiry.")
+    summary["exhausted_total"] = (await exhausted_report(collections, match, 0))["exhausted_total"]
     summary["read_only"] = readonly
     return summary
 
@@ -438,6 +603,8 @@ async def run_command(args) -> dict:
         if args.create_indexes:
             await create_indexes(worker_collections(db, settings))
             return {"indexes": "ready"}
+        if getattr(args, "report_exhausted", False):
+            return await exhausted_report(worker_collections(db, settings), order_filter(settings), args.limit or settings.batch_size)
         return await run_once(db, settings, limit=args.limit, dry_run=args.dry_run)
     finally:
         await client.close()
@@ -448,24 +615,26 @@ def main() -> int:
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--once", action="store_true")
     mode.add_argument("--create-indexes", action="store_true")
+    mode.add_argument("--report-exhausted", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--limit", type=int)
     args = parser.parse_args()
-    if not (args.once or args.dry_run or args.create_indexes):
-        parser.error("Choose --once, --dry-run or --create-indexes.")
+    if not (args.once or args.dry_run or args.create_indexes or args.report_exhausted):
+        parser.error("Choose --once, --dry-run, --create-indexes or --report-exhausted.")
     if args.create_indexes and (args.dry_run or args.limit is not None):
         parser.error("--create-indexes cannot be combined with --dry-run or --limit.")
     if args.limit is not None and args.limit <= 0:
         parser.error("--limit must be positive.")
     try:
-        print(json.dumps(asyncio.run(run_command(args)), sort_keys=True))
-        return 0
+        summary = asyncio.run(run_command(args))
+        print(json.dumps(summary, sort_keys=True, default=str))
+        return 1 if summary.get("halted_http_status") else 0
     except (WorkerConfigurationError, SmsConfigurationError) as error:
         # Our configuration errors never include setting values or credentials.
         print(f"Worker configuration error: {error}", file=sys.stderr)
         return 1
     except PyMongoError:
-        print("Worker MongoDB operation failed; no automatic SMS resubmission will occur.", file=sys.stderr)
+        print("Worker MongoDB operation failed; unfinished sends can retry after lease expiry.", file=sys.stderr)
         return 1
 
 

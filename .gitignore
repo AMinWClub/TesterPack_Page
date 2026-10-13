@@ -29,3 +29,6 @@ htmlcov/
 .DS_Store
 Thumbs.db
 *.log
+
+# Generated integration test reports
+test-artifacts/
