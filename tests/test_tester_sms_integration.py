@@ -245,6 +245,34 @@ class MongoWorkerIntegrationTests(unittest.IsolatedAsyncioTestCase):
         report = await worker.exhausted_report(self.collections, worker.order_filter(self.settings), 10)
         self.assertEqual(report["orders"][0]["order_id"], "order-1")
 
+    async def test_permanent_failed_codes_in_either_field_are_excluded(self):
+        variants = [
+            {"error_code": "invalid_order_data"}, {"last_error_code": "invalid_order_data"},
+            {"error_code": "provider_rejected", "last_error_code": "invalid_order_data"},
+            {"error_code": "invalid_order_data", "last_error_code": "provider_rejected"},
+        ]
+        await self.collections["orders"].insert_many([self.order(f"bad-{index}") for index in range(len(variants))])
+        await self.collections["notifications"].insert_many([
+            {"order_id": f"bad-{index}", "status": "failed", **fields} for index, fields in enumerate(variants)
+        ])
+        before = await self.collections["notifications"].find({"status": "failed"}).sort("order_id", 1).to_list(length=None)
+        await worker.recover_notifications(self.collections, worker.order_filter(self.settings), 50, self.settings)
+        after = await self.collections["notifications"].find({"status": "failed"}).sort("order_id", 1).to_list(length=None)
+        self.assertEqual(before, after)
+        self.http.assert_not_called()
+
+    async def test_secret_mismatch_preserves_notification_and_stops_sends(self):
+        from dataclasses import replace
+        await worker.ensure_selection(self.collections["selections"], "order-1", self.settings)
+        await worker.prepare_notification(self.collections["notifications"], "order-1")
+        before = await self.notification()
+        self.settings = replace(self.settings, token_secret="changed-secret-" + "y" * 40)
+        with self.assertRaisesRegex(worker.WorkerConfigurationError, "TESTER_TOKEN_SECRET"):
+            await self.run_worker()
+        self.assertEqual(await self.notification(), before)
+        self.assertNotIn("sms_sent", await self.collections["orders"].find_one({"_id": "order-1"}))
+        self.http.assert_not_called()
+
     async def test_dry_run_does_not_change_real_database(self):
         before = {name: await self.db[name].find({}).to_list(length=None) for name in await self.db.list_collection_names()}
         await self.run_worker(dry_run=True)

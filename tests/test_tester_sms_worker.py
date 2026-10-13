@@ -16,7 +16,7 @@ from urllib.error import HTTPError, URLError
 from bson import ObjectId
 from pymongo.errors import AutoReconnect, DuplicateKeyError
 
-from app.services.sms import FarazSmsClient, FarazSmsConfig
+from app.services.sms import FarazSmsClient, FarazSmsConfig, SmsValidationError
 from app.workers import tester_sms as worker
 from tests.test_sms_faraz import FakeHttpResponse
 
@@ -364,9 +364,33 @@ class TesterWorkerTests(unittest.IsolatedAsyncioTestCase):
     async def test_changed_token_secret_does_not_send_an_inconsistent_selection(self):
         await worker.ensure_selection(self.db[worker.SELECTIONS], "order-1", self.settings)
         self.settings = replace(self.settings, token_secret="new-random-secret-" + "y" * 32)
-        await self.run_worker()
-        self.assertEqual(self.notification()["status"], "failed")
+        self.db["preprocess_orders"].documents.append(order("order-2"))
+        with self.assertRaisesRegex(worker.WorkerConfigurationError, "TESTER_TOKEN_SECRET") as caught:
+            await self.run_worker()
+        self.assertNotIn(self.settings.token_secret, str(caught.exception))
+        self.assertEqual(self.notification()["status"], "prepared")
+        self.assertEqual(self.notification()["attempt_count"], 0)
+        self.assertEqual(self.notification()["attempts"], [])
+        self.assertEqual(len(self.db[worker.NOTIFICATIONS].documents), 1)
+        self.assertNotIn("sms_sent", self.db["preprocess_orders"].documents[0])
         self.sms.send_pattern.assert_not_called()
+
+    async def test_token_secret_mismatch_preserves_pending_retry_and_can_resume_after_fix(self):
+        original_settings = self.settings
+        self.http.side_effect = TimeoutError("timeout")
+        await self.run_worker()
+        self.make_retry_due()
+        before = copy.deepcopy(self.notification())
+        self.settings = replace(self.settings, token_secret="changed-secret-" + "y" * 32)
+        self.http.side_effect = None
+        with self.assertRaisesRegex(worker.WorkerConfigurationError, "TESTER_TOKEN_SECRET"):
+            await self.run_worker()
+        self.assertEqual(self.notification(), before)
+        self.assertEqual(self.sms.send_pattern.call_count, 1)
+        self.settings = original_settings
+        await self.run_worker()
+        self.assertEqual(self.notification()["status"], "accepted")
+        self.assertEqual(self.notification()["attempt_count"], 2)
 
     async def test_late_response_can_finalize_same_expired_attempt_without_resubmission(self):
         notifications = self.db[worker.NOTIFICATIONS]
@@ -655,6 +679,52 @@ class TesterWorkerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.db[worker.NOTIFICATIONS].documents[1]["status"], "failed")
         self.assertEqual(self.db[worker.NOTIFICATIONS].documents[2], before_old)
 
+    async def test_permanent_failed_is_not_recovered_if_either_error_field_marks_invalid_data(self):
+        variants = [
+            {"error_code": "invalid_order_data"},
+            {"last_error_code": "invalid_order_data"},
+            {"error_code": "provider_rejected", "last_error_code": "invalid_order_data"},
+            {"error_code": "invalid_order_data", "last_error_code": "provider_rejected"},
+            {"error_code": None, "last_error_code": "invalid_order_data"},
+        ]
+        self.db["preprocess_orders"].documents = [order(f"bad-{index}") for index in range(len(variants))]
+        self.db[worker.NOTIFICATIONS].documents = [
+            {"order_id": f"bad-{index}", "status": "failed", **fields} for index, fields in enumerate(variants)
+        ]
+        before = copy.deepcopy(self.db[worker.NOTIFICATIONS].documents)
+        await self.run_worker()
+        self.assertEqual(self.db[worker.NOTIFICATIONS].documents, before)
+        self.sms.send_pattern.assert_not_called()
+
+    async def test_permanent_error_after_claim_sets_both_codes_and_never_retries(self):
+        self.sms.send_pattern.side_effect = SmsValidationError("invalid order")
+        await self.run_worker()
+        self.assertEqual(self.notification()["status"], "failed")
+        self.assertEqual(self.notification()["error_code"], "invalid_order_data")
+        self.assertEqual(self.notification()["last_error_code"], "invalid_order_data")
+        await self.run_worker()
+        self.sms.send_pattern.assert_called_once()
+
+    async def test_error_fields_match_across_retry_recovery_and_success(self):
+        self.http.side_effect = TimeoutError("timeout")
+        await self.run_worker()
+        self.assertEqual(self.notification()["error_code"], self.notification()["last_error_code"])
+        self.make_retry_due()
+        self.http.side_effect = None
+        await self.run_worker()
+        self.assertIsNone(self.notification()["error_code"])
+        self.assertIsNone(self.notification()["last_error_code"])
+        self.db["preprocess_orders"].documents.append(order("legacy"))
+        self.db[worker.NOTIFICATIONS].documents.append({
+            "order_id": "legacy", "status": "failed", "last_error_code": "provider_rejected",
+            "updated_at": datetime.now(timezone.utc),
+        })
+        await self.run_worker()
+        legacy = self.db[worker.NOTIFICATIONS].documents[1]
+        self.assertEqual(legacy["status"], "retry_pending")
+        self.assertEqual(legacy["error_code"], "provider_rejected")
+        self.assertEqual(legacy["last_error_code"], "provider_rejected")
+
     async def test_lowered_max_attempts_marks_retry_exhausted(self):
         self.http.side_effect = TimeoutError("timeout")
         await self.run_worker()
@@ -676,6 +746,15 @@ class WorkerSettingsAndTokenTests(unittest.TestCase):
             settings = worker.WorkerSettings.from_environment()
         self.assertEqual(settings.start_at, datetime(2026, 10, 13, 20, 30, tzinfo=timezone.utc))
         self.assertFalse(settings.sms_enabled)
+
+    def test_configuration_error_is_reported_by_cli_without_secret_values(self):
+        message = "TESTER_TOKEN_SECRET is incompatible with the existing Selection token hash/version; restore the original secret."
+        stderr = io.StringIO()
+        with patch("sys.argv", ["tester_sms", "--once"]), patch("sys.stderr", stderr), \
+             patch.object(worker, "run_command", new=AsyncMock(side_effect=worker.WorkerConfigurationError(message))):
+            self.assertEqual(worker.main(), 1)
+        self.assertIn("TESTER_TOKEN_SECRET", stderr.getvalue())
+        self.assertIn("Worker configuration error", stderr.getvalue())
 
     def test_missing_or_invalid_settings_fail_with_setting_name(self):
         for key, invalid in (("TESTER_PACK_PRODUCT_ID", ""), ("TESTER_SMS_START_AT", "invalid"),

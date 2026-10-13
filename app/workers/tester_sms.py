@@ -262,7 +262,9 @@ async def ensure_selection(selections, order_id, settings: WorkerSettings) -> st
     if not selection or selection.get("token_version") != TOKEN_VERSION or not hmac.compare_digest(
         selection.get("token_hash", ""), token_hash,
     ):
-        raise SmsValidationError("Selection token configuration does not match the stored selection.")
+        raise WorkerConfigurationError(
+            "TESTER_TOKEN_SECRET is incompatible with the existing Selection token hash/version; restore the original secret."
+        )
     return f"{settings.selection_base_url}/{token}"
 
 
@@ -272,7 +274,7 @@ async def prepare_notification(notifications, order_id):
         await notifications.update_one({"order_id": order_id}, {"$setOnInsert": {
             "order_id": order_id, "status": "prepared", "created_at": now, "updated_at": now,
             "attempt_count": 0, "attempts": [], "next_retry_at": None, "last_attempt_at": None,
-            "last_error_code": None, "lease_expires_at": None, "attempt_id": None,
+            "error_code": None, "last_error_code": None, "lease_expires_at": None, "attempt_id": None,
             "accepted_at": None, "order_synced": False,
         }}, upsert=True)
     except DuplicateKeyError:
@@ -316,7 +318,8 @@ async def finish_notification(notifications, claim: dict, status: str, *, expire
     }
     if expired_at is not None:
         match["lease_expires_at"] = {"$lte": expired_at}
-    result = await notifications.update_one(match, [{"$set": {"status": status, "updated_at": now, "last_error_code": error_code,
+    result = await notifications.update_one(match, [{"$set": {"status": status, "updated_at": now,
+                   "error_code": error_code, "last_error_code": error_code,
                    "lease_expires_at": None, "next_retry_at": None, "attempts": history, **details}}])
     return result.matched_count == 1
 
@@ -382,7 +385,8 @@ async def recover_notifications(collections: dict, order_filter: dict, limit: in
         {"status": "sending", "lease_expires_at": {"$lte": now}},
         {"status": {"$in": ["prepared", "retry_pending"]}, "attempt_count": {"$gte": settings.max_attempts}},
         {"status": "submission_unknown"},
-        {"status": "failed", "error_code": {"$ne": "invalid_order_data"}},
+        {"status": "failed", "error_code": {"$ne": "invalid_order_data"},
+         "last_error_code": {"$ne": "invalid_order_data"}},
     ]}
     cursor = await notifications.aggregate(
         notification_scope_pipeline(collections, order_filter, criteria) + [{"$limit": limit}],
@@ -421,12 +425,16 @@ async def recover_notifications(collections: dict, order_filter: dict, limit: in
                 "attempt_number": count, "attempt_id": attempt_id, "started_at": last_at, "finished_at": last_at,
                 "result": "unconfirmed", "http_status": notification.get("response_status_code"), "error_code": code,
             }]
-            result = await notifications.update_one({
+            recovery_match = {
                 "order_id": notification["order_id"], "status": notification["status"],
                 "attempt_id": notification.get("attempt_id"),
-            }, {"$set": {
+            }
+            if notification["status"] == "failed":
+                recovery_match.update({"error_code": {"$ne": "invalid_order_data"},
+                                       "last_error_code": {"$ne": "invalid_order_data"}})
+            result = await notifications.update_one(recovery_match, {"$set": {
                 "status": status, "attempt_count": count, "attempts": history, "attempt_id": attempt_id,
-                "last_attempt_at": last_at, "last_error_code": code, "lease_expires_at": None,
+                "last_attempt_at": last_at, "error_code": code, "last_error_code": code, "lease_expires_at": None,
                 "next_retry_at": last_at + timedelta(minutes=settings.retry_delay_minutes) if status == "retry_pending" else None,
                 "updated_at": now,
             }})
