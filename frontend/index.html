@@ -11,9 +11,10 @@
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Vazirmatn:wght@300;400;500;600;700;800;900&display=swap"
     rel="stylesheet" />
-  <link rel="stylesheet" href="styles.css" />
-  <link rel="stylesheet" href="perfume-details.css" />
-  <script src="app.js" defer></script>
+  <link rel="stylesheet" href="/frontend/styles.css" />
+  <link rel="stylesheet" href="/frontend/perfume-details.css" />
+  <link rel="stylesheet" href="/frontend/catalog.css" />
+  <script src="/frontend/app.js" defer></script>
 </head>
 
 <body>
@@ -58,7 +59,7 @@
       class="topline-diamond">✧</span><span>عطرش با سراد</span></div>
   <header class="site-header wrap">
     <a class="brand" href="#top" aria-label="سوراد، بازگشت به بالای صفحه">
-      <img src="logo.webp" alt="" style="max-width: 135px;">
+      <img src="/frontend/logo.webp" alt="" style="max-width: 135px;">
     </a>
     <div class="header-actions">
       <span class="secure-label"><svg class="ico">
@@ -141,11 +142,13 @@
             </div>
             <span class="result-count"><svg class="ico">
                 <use href="#i-filter" />
-              </svg><span id="resultCount">۱۲ رایحه</span></span>
+              </svg><span id="resultCount">در حال دریافت…</span></span>
           </div>
         </div>
 
-        <div class="product-grid" id="productGrid" aria-live="polite"></div>
+        <div class="catalog-status" id="catalogStatus" role="status" aria-live="polite"></div>
+        <div class="product-grid" id="productGrid" aria-live="polite" aria-busy="true"></div>
+        <button class="catalog-more" id="catalogMore" type="button" hidden>نمایش رایحه‌های بیشتر</button>
         <div class="empty-results" id="emptyResults" hidden><span>✳</span>
           <h3>این رایحه رو پیدا نکردیم</h3>
           <p>اسم دیگه‌ای امتحان کن یا فیلترها رو تغییر بده.</p><button id="resetFilters" type="button">نمایش همه
@@ -153,7 +156,7 @@
         </div>
         <div class="catalog-footnote"><svg class="ico">
             <use href="#i-info" />
-          </svg><span>تصاویر، نام عطرها و اطلاعات سفارش در این نسخه صرفاً نمایشی هستند.</span></div>
+          </svg><span>اطلاعات عطرها از کاتالوگ موجود دریافت می‌شوند؛ اطلاعات سفارش فعلاً نمایشی است.</span></div>
       </section>
 
       <aside class="selection-aside" aria-label="پنل انتخاب تسترها">
@@ -192,7 +195,7 @@
 
   <footer class="footer">
     <div class="wrap footer-content">
-      <img src="logo.webp" alt="" style="max-width: 135px;">
+      <img src="/frontend/logo.webp" alt="" style="max-width: 135px;">
       <p>رایحه‌ها خاطره می‌سازند. انتخابش با تو.</p><span class="footer-demo">v 1.0.0</span>
     </div>
   </footer>
@@ -233,7 +236,7 @@
       </svg></div>
     <div class="section-kicker"><span></span> A PERFECT DISCOVERY <span></span></div>
     <h2 id="modalTitle">انتخاب‌هات تکمیل شد!</h2>
-    <p>هر ۱۰ رایحه رو انتخاب کردی. این صفحه فعلاً فقط نمونه طراحی هست؛ هنوز چیزی برای سفارش شما ثبت یا ارسال نشده.</p>
+    <p>هر ۱۰ رایحه رو انتخاب کردی. انتخاب‌ها فعلاً فقط در همین صفحه نگهداری می‌شوند؛ هنوز چیزی برای سفارش ثبت یا ارسال نشده.</p>
     <div class="modal-selected" id="modalSelected"></div><button id="modalDone" type="button" class="modal-done">بازگشت
       به انتخاب‌ها</button>
   </div>
@@ -248,7 +251,7 @@
       <div class="pd-content" id="perfumeContent" tabindex="0" role="region" aria-label="جزئیات رایحه"></div>
       <footer class="pd-footer">
         <div><strong id="perfumeSelectionStatus" role="status" aria-live="polite"></strong>
-          <small>اطلاعات و شاخص‌های این نسخه نمایشی هستند.</small></div>
+          <small>ویژگی‌ها بر اساس اطلاعات ثبت‌شدهٔ عطر نمایش داده می‌شوند.</small></div>
         <button class="pd-select" id="perfumeSelect" type="button"></button>
       </footer>
     </div>

@@ -1,0 +1,10 @@
+/* Loading/error states only; existing card, hero and panel styles are retained. */
+.catalog-status { padding: 36px 20px; border: 1px solid #e7e3d9; border-radius: 16px; background: #fff; text-align: center; }
+.catalog-status strong { color: var(--navy); font-size: 16px; }
+.catalog-status p { color: #788197; font-size: 12px; line-height: 2; }
+.catalog-status button, .catalog-more { min-height: 44px; border: 1px solid #d9dfea; border-radius: 10px; background: #f8faff; color: var(--navy); padding: 8px 18px; font: inherit; font-size: 12px; }
+.catalog-more { display: block; margin: 20px auto 0; }
+.catalog-status button:focus-visible, .catalog-more:focus-visible { outline: 2px solid var(--gold); outline-offset: 3px; }
+.pd-content[data-state="loading"], .pd-content[data-state="error"] { display: block; }
+.pd-content .catalog-status { background: transparent; border: 0; }
+.product-name, .product-brand { overflow-wrap: anywhere; }
