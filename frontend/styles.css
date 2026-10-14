@@ -6,8 +6,8 @@
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
-  gap: 32px;
-  padding: 24px 40px 66px;
+  gap: 24px;
+  padding: 18px 32px 60px;
   background: linear-gradient(112deg, #071b4d 0%, var(--navy) 65%, #0d3a90 100%);
   color: white;
   border-radius: 26px;
@@ -15,9 +15,9 @@
 }
 .hero-content { min-width: 0; }
 .hero-mini-label { font-size: 10px; color: var(--gold-light); margin-bottom: 4px; }
-.hero h1 { font-size: 32px; font-weight: 800; line-height: 1.6; letter-spacing: -.8px; margin: 0; }
+.hero h1 { font-size: 28px; font-weight: 800; line-height: 1.5; letter-spacing: -.6px; margin: 0; }
 .hero h1 em { font-style: normal; color: var(--gold); }
-.hero-content p { color: #d5def0; font-size: 13px; line-height: 2; max-width: 660px; margin: 8px 0 0; }
+.hero-content p { color: #d5def0; font-size: 13px; line-height: 1.8; max-width: 660px; margin: 4px 0 0; }
 .hero-steps {
   display: flex;
   flex-wrap: wrap;
@@ -54,17 +54,29 @@
 .mobile-drawer.is-open{visibility:visible}
 
 @media (max-width: 940px) {
-  .hero { grid-template-columns: minmax(0, 1fr); gap: 14px; padding-inline: 32px; }
+  .hero { grid-template-columns: minmax(0, 1fr); gap: 8px; padding-inline: 28px; }
   .hero-steps { padding: 0; border: 0; }
 }
 @media (max-width: 680px) {
-  .hero { padding: 20px 20px 44px; border-radius: 20px; }
-  .hero h1 { font-size: 26px; letter-spacing: -.5px; }
-  .hero-content p { font-size: 12px; margin-top: 6px; }
-  .hero-steps { font-size: 11px; gap: 6px; }
-  .hero-steps li { gap: 6px; }
+  .hero { padding: 12px 16px 36px; gap: 6px; border-radius: 16px; }
+  .hero-mini-label { display: none; }
+  .hero h1 { font-size: clamp(20px, 5.5vw, 23px); line-height: 1.5; letter-spacing: -.4px; }
+  .hero-content p { font-size: 12px; line-height: 1.75; margin-top: 4px; }
+  .hero-steps { font-size: 11px; gap: 6px; line-height: 1.7; }
+  .hero-steps li { gap: 6px; min-height: 24px; }
 }
-@media (max-width: 365px) {
-  .hero h1 { font-size: 23px; }
-  .hero-steps { font-size: 10px; }
+
+/* Compact order summary on mobile; values can wrap without clipping. */
+@media (max-width: 680px) {
+  .order-card { margin-inline: 8px; padding: 12px; min-height: 0; border-radius: 13px; }
+  .order-intro { min-width: 0; gap: 8px; margin-bottom: 8px; padding-bottom: 8px; }
+  .order-intro-icon { width: 26px; height: 26px; border-radius: 8px; flex-shrink: 0; }
+  .order-intro-icon .ico { width: 16px; height: 16px; }
+  .order-intro h2 { margin: 0; font-size: 12px; line-height: 1.6; }
+  .order-intro p { display: none; }
+  .order-fields { gap: 6px 14px; }
+  .order-field { min-width: 0; flex-direction: row; align-items: baseline; justify-content: space-between; gap: 6px; padding: 0; border: 0; }
+  .order-field span { flex-shrink: 0; font-size: 9px; line-height: 1.8; }
+  .order-field strong { min-width: 0; font-size: 11px; line-height: 1.8; overflow-wrap: anywhere; }
+  .order-field .gold-number { font-size: 13px; }
 }

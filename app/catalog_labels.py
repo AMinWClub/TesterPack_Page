@@ -116,7 +116,7 @@ NOTES = {
     "roasted coffee beans": "دانه‌های قهوه برشته", "chamomile": "بابونه", "marshmallow": "مارشمالو",
     "cucumber": "خیار", "carnation": "میخک صدپر", "mimosa": "میموزا", "lilac": "یاس بنفش",
     "hyacinth": "سنبل", "hibiscus": "ختمی", "pistachio": "پسته", "chestnut": "شاه‌بلوط",
-    "rhubarb": "ریواس", "toffee": "تافی", "whipped cream": "خامه زده‌شده", "Animal notes": "نت‌های حیوانی"
+    "rhubarb": "ریواس", "toffee": "تافی", "whipped cream": "خامه زده‌شده", "Animal notes": "نت‌های حیوانی", "Quince": "به"
 }
 
 GENDERS = {
