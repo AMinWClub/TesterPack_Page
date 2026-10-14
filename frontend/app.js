@@ -10,19 +10,98 @@ const MAX_TESTERS = 10;
 
 // Names, order data and visuals are fictional samples for design review.
 const PERFUMES = [
-  { id: 1, name: 'رز مخملی', brand: 'MAISON ÉLLE', en: 'VELVET ROSE', gender: 'زنانه', season: 'فصول سرد', scent: 'گرم و شیرین', tone: 'rose', shape: 'classic', tag: 'پرطرفدار' },
-  { id: 2, name: 'آبی بی‌انتها', brand: 'NOVA PARFUMS', en: 'BLUE INFINITY', gender: 'مردانه', season: 'چهار فصل', scent: 'خنک و تلخ', tone: 'blue', shape: 'tall', tag: 'انتخاب خاص' },
-  { id: 3, name: 'طلای کهربا', brand: 'ATELIER AMBRE', en: 'AMBER GOLD', gender: 'یونیسکس', season: 'فصول سرد', scent: 'گرم و شرقی', tone: 'amber', shape: 'square', tag: 'لوکس' },
-  { id: 4, name: 'شکوفه سپید', brand: 'MAISON ÉLLE', en: 'WHITE BLOOM', gender: 'زنانه', season: 'بهار و تابستان', scent: 'ملایم و گلی', tone: 'ivory', shape: 'round', tag: 'لطیف' },
-  { id: 5, name: 'ساحل نقره‌ای', brand: 'NOVA PARFUMS', en: 'SILVER COAST', gender: 'مردانه', season: 'فصول گرم', scent: 'خنک و مرکباتی', tone: 'sage', shape: 'square', tag: 'با‌طراوت' },
-  { id: 6, name: 'عود سلطنتی', brand: 'NOIR COLLECTION', en: 'ROYAL OUD', gender: 'یونیسکس', season: 'پاییز و زمستان', scent: 'تلخ و چوبی', tone: 'noir', shape: 'classic', tag: 'خاص' },
-  { id: 7, name: 'رویای یاس', brand: 'FLEUR D’OR', en: 'JASMINE DREAM', gender: 'زنانه', season: 'بهار', scent: 'شیرین و گلی', tone: 'lilac', shape: 'tall', tag: 'دلنشین' },
-  { id: 8, name: 'ماجراجوی شب', brand: 'NOIR COLLECTION', en: 'NIGHT VOYAGE', gender: 'مردانه', season: 'چهار فصل', scent: 'تلخ و ادویه‌ای', tone: 'slate', shape: 'round', tag: 'جذاب' },
-  { id: 9, name: 'طلوع مرکبات', brand: 'ATELIER AMBRE', en: 'CITRUS SUN', gender: 'یونیسکس', season: 'فصول گرم', scent: 'خنک و ترش', tone: 'citrus', shape: 'classic', tag: 'انرژی‌بخش' },
-  { id: 10, name: 'ابریشم صورتی', brand: 'FLEUR D’OR', en: 'PINK SILK', gender: 'زنانه', season: 'چهار فصل', scent: 'شیرین و پودری', tone: 'peach', shape: 'square', tag: 'محبوب' },
-  { id: 11, name: 'سدر آبی', brand: 'NOVA PARFUMS', en: 'CEDAR BLUE', gender: 'مردانه', season: 'پاییز و بهار', scent: 'چوبی و خنک', tone: 'teal', shape: 'tall', tag: 'مدرن' },
-  { id: 12, name: 'شب طلایی', brand: 'NOIR COLLECTION', en: 'GOLDEN NIGHT', gender: 'یونیسکس', season: 'فصول سرد', scent: 'گرم و ادویه‌ای', tone: 'plum', shape: 'round', tag: 'متمایز' },
+  {
+    id: 1, name: 'رز مخملی', brand: 'MAISON ÉLLE', en: 'VELVET ROSE', gender: 'زنانه', season: 'فصول سرد', scent: 'گرم و شیرین', tone: 'rose', shape: 'classic', tag: 'پرطرفدار', year: 2021,
+    descriptionText: 'رزهای نرم و مخملی با شیرینی لطیف وانیل؛ رایحه‌ای گرم و آرام برای عصرهای خنک و لحظه‌های صمیمی.',
+    mainAccords: [{ name: 'floral', strength: 95, color: '#c88799' }, { name: 'sweet', strength: 82, color: '#d7b781' }, { name: 'powdery', strength: 65, color: '#b5a1c6' }, { name: 'woody', strength: 42, color: '#a88a6d' }],
+    notesTop: ['bergamot', 'rose'], notesMiddle: ['rose', 'jasmine'], notesBase: ['vanilla', 'musk'], longevity: { average: 4.1 }, sillage: { average: 2.8 },
+  },
+  {
+    id: 2, name: 'آبی بی‌انتها', brand: 'NOVA PARFUMS', en: 'BLUE INFINITY', gender: 'مردانه', season: 'چهار فصل', scent: 'خنک و تلخ', tone: 'blue', shape: 'tall', tag: 'انتخاب خاص', year: 2022,
+    descriptionText: 'شروعی شفاف و مرکباتی که آرام‌آرام به چوب سدر می‌رسد؛ انتخابی تمیز و خنک برای همراهی روزمره.',
+    mainAccords: [{ name: 'fresh', strength: 96, color: '#89b8c8' }, { name: 'citrus', strength: 80, color: '#d2bf76' }, { name: 'woody', strength: 68, color: '#a88a6d' }, { name: 'aromatic', strength: 50, color: '#98b19d' }],
+    notesTop: ['bergamot', 'lemon'], notesMiddle: ['lavender', 'pepper'], notesBase: ['cedar', 'musk'], longevity: { average: 3.5 }, sillage: { average: 2.2 },
+  },
+  {
+    id: 3, name: 'طلای کهربا', brand: 'ATELIER AMBRE', en: 'AMBER GOLD', gender: 'یونیسکس', season: 'فصول سرد', scent: 'گرم و شرقی', tone: 'amber', shape: 'square', tag: 'لوکس', year: 2020,
+    descriptionText: 'ترکیبی طلایی از کهربا و وانیل با سایه‌ای چوبی؛ گرم، عمیق و مناسب شب‌های پاییزی.',
+    mainAccords: [{ name: 'amber', strength: 98, color: '#cf9b57' }, { name: 'warm spicy', strength: 84, color: '#bf8b6d' }, { name: 'sweet', strength: 70, color: '#d7b781' }, { name: 'woody', strength: 55, color: '#a88a6d' }],
+    notesTop: ['bergamot', 'pepper'], notesMiddle: ['amber', 'rose'], notesBase: ['vanilla', 'cedar'], longevity: { average: 4.6 }, sillage: { average: 3.4 },
+  },
+  {
+    id: 4, name: 'شکوفه سپید', brand: 'MAISON ÉLLE', en: 'WHITE BLOOM', gender: 'زنانه', season: 'بهار و تابستان', scent: 'ملایم و گلی', tone: 'ivory', shape: 'round', tag: 'لطیف', year: 2023,
+    descriptionText: 'شکوفه‌های روشن و لطیف در کنار مشک نرم؛ رایحه‌ای سبک برای روزهای آفتابی و شروع‌های تازه.',
+    mainAccords: [{ name: 'white floral', strength: 94, color: '#b1bfa0' }, { name: 'fresh', strength: 76, color: '#89b8c8' }, { name: 'musky', strength: 54, color: '#b5b1b0' }],
+    notesTop: ['bergamot'], notesMiddle: ['jasmine', 'rose'], notesBase: ['musk', 'vanilla'], longevity: { average: 2.8 }, sillage: { average: 1.7 },
+  },
+  {
+    id: 5, name: 'ساحل نقره‌ای', brand: 'NOVA PARFUMS', en: 'SILVER COAST', gender: 'مردانه', season: 'فصول گرم', scent: 'خنک و مرکباتی', tone: 'sage', shape: 'square', tag: 'با‌طراوت', year: 2021,
+    descriptionText: 'حس نسیم ساحلی با پوست مرکبات و چوب‌های روشن؛ شفاف و سرزنده برای روزهای گرم.',
+    mainAccords: [{ name: 'citrus', strength: 97, color: '#d2bf76' }, { name: 'aquatic', strength: 85, color: '#8bbac1' }, { name: 'fresh', strength: 75, color: '#89b8c8' }, { name: 'woody', strength: 40, color: '#a88a6d' }],
+    notesTop: ['lemon', 'bergamot'], notesMiddle: ['lavender'], notesBase: ['cedar', 'musk'], longevity: { average: 3.1 }, sillage: { average: 2.1 },
+  },
+  {
+    id: 6, name: 'عود سلطنتی', brand: 'NOIR COLLECTION', en: 'ROYAL OUD', gender: 'یونیسکس', season: 'پاییز و زمستان', scent: 'تلخ و چوبی', tone: 'noir', shape: 'classic', tag: 'خاص', year: 2019,
+    descriptionText: 'عود و چوب سدر با گرمای کهربا؛ رایحه‌ای عمیق و رسمی با شخصیتی آرام و قدرتمند.',
+    mainAccords: [{ name: 'woody', strength: 97, color: '#a88a6d' }, { name: 'oud', strength: 88, color: '#95775d' }, { name: 'amber', strength: 65, color: '#cf9b57' }, { name: 'warm spicy', strength: 52, color: '#bf8b6d' }],
+    notesTop: ['pepper', 'bergamot'], notesMiddle: ['oud', 'rose'], notesBase: ['cedar', 'amber'], longevity: { average: 4.7 }, sillage: { average: 3.6 },
+  },
+  {
+    id: 7, name: 'رویای یاس', brand: 'FLEUR D’OR', en: 'JASMINE DREAM', gender: 'زنانه', season: 'بهار', scent: 'شیرین و گلی', tone: 'lilac', shape: 'tall', tag: 'دلنشین', year: 2022,
+    descriptionText: 'یاس سفید در فضایی لطیف و شیرین؛ سبک و دلنشین، شبیه قدم‌زدن در باغی بهاری.',
+    mainAccords: [{ name: 'white floral', strength: 96, color: '#b1bfa0' }, { name: 'sweet', strength: 73, color: '#d7b781' }, { name: 'powdery', strength: 56, color: '#b5a1c6' }],
+    notesTop: ['bergamot'], notesMiddle: ['jasmine', 'iris'], notesBase: ['vanilla', 'musk'], longevity: { average: 3.3 }, sillage: { average: 2.3 },
+  },
+  {
+    id: 8, name: 'ماجراجوی شب', brand: 'NOIR COLLECTION', en: 'NIGHT VOYAGE', gender: 'مردانه', season: 'چهار فصل', scent: 'تلخ و ادویه‌ای', tone: 'slate', shape: 'round', tag: 'جذاب', year: 2020,
+    descriptionText: 'ادویه‌های تیره در کنار چوب و کهربا؛ رایحه‌ای پرشخصیت برای شب و قرارهای خاص.',
+    mainAccords: [{ name: 'warm spicy', strength: 96, color: '#bf8b6d' }, { name: 'woody', strength: 85, color: '#a88a6d' }, { name: 'amber', strength: 66, color: '#cf9b57' }],
+    notesTop: ['pepper', 'bergamot'], notesMiddle: ['lavender', 'cedar'], notesBase: ['amber', 'musk'], longevity: { average: 4 }, sillage: { average: 3.2 },
+  },
+  {
+    id: 9, name: 'طلوع مرکبات', brand: 'ATELIER AMBRE', en: 'CITRUS SUN', gender: 'یونیسکس', season: 'فصول گرم', scent: 'خنک و ترش', tone: 'citrus', shape: 'classic', tag: 'انرژی‌بخش', year: 2024,
+    descriptionText: 'درخشش لیمو و ترنج با پایانی تمیز و سبک؛ همراهی پرانرژی برای صبح‌های تابستانی.',
+    mainAccords: [{ name: 'citrus', strength: 99, color: '#d2bf76' }, { name: 'fresh', strength: 83, color: '#89b8c8' }, { name: 'green', strength: 63, color: '#99b18b' }],
+    notesTop: ['lemon', 'bergamot'], notesMiddle: ['jasmine'], notesBase: ['musk', 'cedar'], longevity: { average: 2.5 }, sillage: { average: 1.8 },
+  },
+  {
+    id: 10, name: 'ابریشم صورتی', brand: 'FLEUR D’OR', en: 'PINK SILK', gender: 'زنانه', season: 'چهار فصل', scent: 'شیرین و پودری', tone: 'peach', shape: 'square', tag: 'محبوب', year: 2021,
+    descriptionText: 'لطافت زنبق و رز با شیرینی ملایم وانیل؛ رایحه‌ای نزدیک به پوست، نرم و صمیمی.',
+    mainAccords: [{ name: 'powdery', strength: 96, color: '#b5a1c6' }, { name: 'sweet', strength: 84, color: '#d7b781' }, { name: 'floral', strength: 70, color: '#c88799' }, { name: 'musky', strength: 55, color: '#b5b1b0' }],
+    notesTop: ['bergamot', 'rose'], notesMiddle: ['iris', 'jasmine'], notesBase: ['vanilla', 'musk'], longevity: { average: 3.5 }, sillage: { average: 2.2 },
+  },
+  {
+    id: 11, name: 'سدر آبی', brand: 'NOVA PARFUMS', en: 'CEDAR BLUE', gender: 'مردانه', season: 'پاییز و بهار', scent: 'چوبی و خنک', tone: 'teal', shape: 'tall', tag: 'مدرن', year: 2023,
+    descriptionText: 'سدر روشن با طراوت مرکبات و هوایی سبز؛ ترکیبی متعادل برای استفاده روزمره و موقعیت‌های رسمی.',
+    mainAccords: [{ name: 'woody', strength: 95, color: '#a88a6d' }, { name: 'fresh', strength: 82, color: '#89b8c8' }, { name: 'aromatic', strength: 67, color: '#98b19d' }],
+    notesTop: ['bergamot', 'lemon'], notesMiddle: ['lavender', 'pepper'], notesBase: ['cedar', 'musk'], longevity: { average: 3.8 }, sillage: { average: 2.6 },
+  },
+  {
+    id: 12, name: 'شب طلایی', brand: 'NOIR COLLECTION', en: 'GOLDEN NIGHT', gender: 'یونیسکس', season: 'فصول سرد', scent: 'گرم و ادویه‌ای', tone: 'plum', shape: 'round', tag: 'متمایز', year: 2022,
+    descriptionText: 'گرمای ادویه و کهربا با پایانی نرم از وانیل؛ رایحه‌ای درخشان و دلپذیر برای شب‌های سرد.',
+    mainAccords: [{ name: 'amber', strength: 97, color: '#cf9b57' }, { name: 'warm spicy', strength: 85, color: '#bf8b6d' }, { name: 'sweet', strength: 74, color: '#d7b781' }, { name: 'woody', strength: 53, color: '#a88a6d' }],
+    notesTop: ['pepper', 'bergamot'], notesMiddle: ['amber', 'rose'], notesBase: ['vanilla', 'cedar'], longevity: { average: 4.4 }, sillage: { average: 3.3 },
+  },
 ];
+
+// Mock averages use 1–5 for longevity and 1–4 for sillage.
+const SCENT_LABELS = {
+  fruity: 'میوه‌ای', sweet: 'شیرین', powdery: 'پودری', woody: 'چوبی', floral: 'گلی',
+  'white floral': 'گل‌های سفید', fresh: 'تازه', 'warm spicy': 'ادویه‌ای گرم',
+  citrus: 'مرکباتی', amber: 'کهربایی', aromatic: 'معطر و گیاهی', musky: 'مشکی',
+  aquatic: 'آبی', green: 'سبز', oud: 'عود', bergamot: 'ترنج', lemon: 'لیمو',
+  rose: 'رز', jasmine: 'یاس', cedar: 'چوب سدر', vanilla: 'وانیل', musk: 'مشک',
+  pepper: 'فلفل', iris: 'زنبق', lavender: 'اسطوخودوس',
+  female: 'زنانه', male: 'مردانه', unisex: 'یونیسکس', spring: 'بهار', summer: 'تابستان',
+  autumn: 'پاییز', winter: 'زمستان', 'all seasons': 'چهار فصل',
+};
+const NOTE_IMAGES = {
+  rose: 'assets/notes/rose.svg', jasmine: 'assets/notes/jasmine.svg',
+  bergamot: 'assets/notes/citrus.svg', lemon: 'assets/notes/citrus.svg',
+  cedar: 'assets/notes/wood.svg', oud: 'assets/notes/wood.svg',
+  vanilla: 'assets/notes/vanilla.svg', pepper: 'assets/notes/pepper.svg',
+  iris: 'assets/notes/iris.svg', amber: 'assets/notes/amber.svg',
+};
 
 const PALETTES = {
   rose: { bg: '#f2e9e8', glass: '#ae596b', liquid: '#d9a0a2', cap: '#b99458', light: '#fff8f1', accent: '#853f55' },
@@ -47,6 +126,10 @@ let activeFilter = 'all';
 let query = '';
 let toastTimer;
 let lastFocus = null;
+let perfumeId = null;
+let perfumeReturnFocus = null;
+let perfumePreviousOverflow = '';
+let perfumeCloseTimer;
 const bottleImages = new Map();
 
 function escapeHtml(str) {
@@ -100,7 +183,7 @@ function cardTemplate(item) {
   const isSelected = selectedHas(item.id);
   const isFull = selected.length >= MAX_TESTERS && !isSelected;
   const p = PALETTES[item.tone];
-  return `<article class="product-card ${isSelected ? 'is-selected' : ''}" data-id="${item.id}">
+  return `<article class="product-card ${isSelected ? 'is-selected' : ''}" data-id="${item.id}" tabindex="0" aria-haspopup="dialog" aria-controls="perfumeDialog" aria-label="مشاهده جزئیات ${escapeHtml(item.name)}">
     <div class="product-visual" style="--artbg:${p.bg}">
       <span class="product-tag">${escapeHtml(item.tag)}</span>
       <span class="product-selected-mark" aria-label="انتخاب شده"><svg class="ico"><use href="#i-check"/></svg></span>
@@ -169,6 +252,7 @@ function renderSelection() {
   $('#progressTrack').innerHTML = Array.from({ length: MAX_TESTERS }, (_, i) => `<span class="${i < n?'active':''}"></span>`).join('');
   $('#progressTrack').setAttribute('aria-valuenow', String(n));
   $('#mobileProgress').style.setProperty('--mobile-fill', `${n / MAX_TESTERS * 100}%`);
+  syncPerfumeSelection();
 }
 
 function showToast(message) {
@@ -194,10 +278,119 @@ function toggleProduct(id) {
   }
   renderCatalog();
   renderSelection();
-  if (!$('#mobileDrawer').classList.contains('is-open')) {
+  if ($('#perfumeDialog').open) {
+    $('#perfumeSelect').focus({preventScroll:true});
+  } else if (!$('#mobileDrawer').classList.contains('is-open')) {
     const button = $(`[data-toggle="${id}"]`);
     button?.focus({preventScroll:true});
   }
+}
+
+function scentLabel(value) {
+  const text = String(value ?? '').trim();
+  return SCENT_LABELS[text.toLowerCase()] || text;
+}
+
+function accordsTemplate(accords) {
+  const valid = (Array.isArray(accords) ? accords : [])
+    .filter(accord => accord?.name && Number.isFinite(Number(accord.strength)) && Number(accord.strength) > 0)
+    .slice().sort((a, b) => Number(b.strength) - Number(a.strength));
+  if (!valid.length) return '<p class="pd-empty">اطلاعات آکوردها هنوز موجود نیست.</p>';
+  return `<ul class="pd-accords">${valid.map(accord => {
+    const strength = Math.min(100, Number(accord.strength));
+    const color = /^#(?:[0-9a-f]{3}|[0-9a-f]{6})$/i.test(accord.color) ? accord.color : '#c9a961';
+    return `<li class="pd-accord" style="--strength:${strength}%;--accord-color:${color}">
+      <span>${escapeHtml(scentLabel(accord.name))}</span><small>${farsiNumber(Math.round(strength))}٪</small>
+    </li>`;
+  }).join('')}</ul>`;
+}
+
+function notesTemplate(item) {
+  const groups = [['notesTop', 'نت‌های ابتدایی'], ['notesMiddle', 'نت‌های میانی'], ['notesBase', 'نت‌های پایه']];
+  const content = groups.map(([field, label]) => {
+    const notes = (Array.isArray(item[field]) ? item[field] : [])
+      .map(note => typeof note === 'string' ? { name: note, image: NOTE_IMAGES[note] } : note)
+      .filter(note => note?.name);
+    if (!notes.length) return '';
+    return `<section class="pd-note-group"><h4>${label}</h4><ul class="pd-note-list">${notes.map(note =>
+      `<li class="pd-note">${note.image ? `<img src="${escapeHtml(note.image)}" alt="" width="36" height="36" />` : ''}<span>${escapeHtml(scentLabel(note.name))}</span></li>`
+    ).join('')}</ul></section>`;
+  }).join('');
+  return content ? `<section><h3 class="pd-section-title">سفر نت‌ها</h3><div class="pd-notes">${content}</div></section>` : '';
+}
+
+function meterTemplate(title, summary, labels) {
+  const average = Number(summary?.average);
+  const known = Number.isFinite(average) && average >= 1 && average <= labels.length;
+  const level = known ? Math.round(average) : 0;
+  const label = known ? labels[level - 1] : 'هنوز مشخص نیست';
+  return `<section class="pd-meter">
+    <div class="pd-meter-head"><strong>${title}</strong><span>${label}</span></div>
+    ${known ? `<div class="pd-meter-track" role="meter" aria-label="${title}" aria-valuemin="1" aria-valuemax="${labels.length}" aria-valuenow="${average}" aria-valuetext="${label}">
+      ${labels.map((_, index) => `<i aria-hidden="true" class="${index < level ? 'is-active' : ''} ${index === level - 1 ? 'is-current' : ''}"></i>`).join('')}
+    </div><div class="pd-meter-range" aria-hidden="true"><span>${labels[0]}</span><span>${labels.at(-1)}</span></div>` : ''}
+  </section>`;
+}
+
+function renderPerfumeDetails(item) {
+  const meta = [['جنسیت', item.gender], ['فصل', item.season], ['طبع', item.scent]]
+    .filter(([, value]) => value).map(([label, value]) => `<span><small>${label}</small>${escapeHtml(scentLabel(value))}</span>`).join('');
+  $('#perfumeContent').innerHTML = `
+    <section class="pd-intro">
+      <div class="pd-identity">
+        <div class="pd-photo" style="--artbg:${PALETTES[item.tone].bg}"><img src="${bottleArt(item)}" alt="تصویر نمایشی ${escapeHtml(item.name)}" /></div>
+        <div class="pd-heading"><div class="pd-brand" dir="ltr">${escapeHtml(item.brand)}</div>
+          <h2 class="pd-title" id="perfumeTitle">${escapeHtml(item.name)}</h2>
+          ${item.en ? `<div class="pd-english" dir="ltr">${escapeHtml(item.en)}</div>` : ''}
+          ${item.year ? `<span class="pd-year">سال معرفی · ${escapeHtml(Number(item.year).toLocaleString('fa-IR', {useGrouping:false}))}</span>` : ''}
+        </div>
+      </div>
+      ${meta ? `<div class="pd-meta">${meta}</div>` : ''}
+      ${item.descriptionText ? `<p class="pd-description">${escapeHtml(item.descriptionText)}</p>` : ''}
+      <div class="pd-meters">
+        ${meterTemplate('ماندگاری', item.longevity, ['خیلی ضعیف', 'ضعیف', 'متوسط', 'ماندگار', 'بسیار ماندگار'])}
+        ${meterTemplate('پخش بو', item.sillage, ['ملایم', 'متوسط', 'محسوس', 'قوی'])}
+      </div>
+    </section>
+    <div class="pd-analysis">
+      <section><h3 class="pd-section-title">آکوردهای اصلی</h3><p class="pd-section-hint">هویت رایحه، از پررنگ‌ترین تا لطیف‌ترین</p>${accordsTemplate(item.mainAccords)}</section>
+      ${notesTemplate(item)}
+    </div>`;
+}
+
+function syncPerfumeSelection() {
+  if (!$('#perfumeDialog').open || perfumeId === null) return;
+  const item = getProduct(perfumeId);
+  const isSelected = selectedHas(perfumeId);
+  const full = selected.length >= MAX_TESTERS && !isSelected;
+  const button = $('#perfumeSelect');
+  button.disabled = full;
+  button.classList.toggle('is-selected', isSelected);
+  button.setAttribute('aria-pressed', String(isSelected));
+  button.setAttribute('aria-label', `${isSelected ? 'حذف' : 'افزودن'} ${item.name} ${isSelected ? 'از انتخاب‌ها' : 'به تسترهای من'}`);
+  button.innerHTML = `<svg class="ico" aria-hidden="true"><use href="#${isSelected ? 'i-check' : 'i-plus'}"/></svg>${isSelected ? 'حذف از انتخاب‌ها' : full ? 'ظرفیت ۱۰ تستر تکمیل است' : 'افزودن به تسترهای من'}`;
+  $('#perfumeSelectionStatus').textContent = `${isSelected ? 'در انتخاب‌های شما · ' : ''}${farsiNumber(selected.length)} از ${farsiNumber(MAX_TESTERS)} تستر انتخاب شده`;
+}
+
+function openPerfume(id) {
+  const item = getProduct(id);
+  const dialog = $('#perfumeDialog');
+  if (!item || dialog.open) return;
+  perfumeId = id;
+  perfumeReturnFocus = document.activeElement;
+  perfumePreviousOverflow = document.body.style.overflow;
+  renderPerfumeDetails(item);
+  dialog.showModal();
+  document.body.style.overflow = 'hidden';
+  syncPerfumeSelection();
+}
+
+function closePerfume() {
+  const dialog = $('#perfumeDialog');
+  if (!dialog.open || dialog.classList.contains('is-closing')) return;
+  dialog.classList.add('is-closing');
+  const delay = matchMedia('(prefers-reduced-motion: reduce)').matches ? 0 : 160;
+  perfumeCloseTimer = setTimeout(() => dialog.close(), delay);
 }
 
 function openDrawer() {
@@ -242,7 +435,58 @@ function closeModal() {
 
 $('#productGrid').addEventListener('click', e => {
   const button = e.target.closest('[data-toggle]');
-  if (button) toggleProduct(Number(button.dataset.toggle));
+  if (button) {
+    toggleProduct(Number(button.dataset.toggle));
+    return;
+  }
+  const card = e.target.closest('.product-card');
+  if (card) {
+    card.focus({preventScroll:true});
+    openPerfume(Number(card.dataset.id));
+  }
+});
+$('#productGrid').addEventListener('keydown', event => {
+  if (!event.target.matches('.product-card') || !['Enter', ' '].includes(event.key)) return;
+  event.preventDefault();
+  openPerfume(Number(event.target.dataset.id));
+});
+$('#perfumeSelect').addEventListener('click', () => {
+  if (perfumeId !== null) toggleProduct(perfumeId);
+});
+$('#closePerfume').addEventListener('click', closePerfume);
+$('#perfumeDialog').addEventListener('keydown', event => {
+  if (event.key !== 'Tab') return;
+  const controls = $$('button:not(:disabled), [tabindex="0"]', $('#perfumeDialog'));
+  const first = controls[0];
+  const last = controls.at(-1);
+  if (event.shiftKey && document.activeElement === first) {
+    event.preventDefault();
+    last.focus();
+  } else if (!event.shiftKey && document.activeElement === last) {
+    event.preventDefault();
+    first.focus();
+  }
+});
+$('#perfumeDialog').addEventListener('cancel', event => {
+  event.preventDefault();
+  closePerfume();
+});
+$('#perfumeDialog').addEventListener('click', event => {
+  const dialog = $('#perfumeDialog');
+  const rect = dialog.getBoundingClientRect();
+  const outside = event.clientX < rect.left || event.clientX > rect.right || event.clientY < rect.top || event.clientY > rect.bottom;
+  if (event.target === dialog && outside) closePerfume();
+});
+$('#perfumeDialog').addEventListener('error', event => {
+  if (event.target.matches('.pd-note img')) event.target.hidden = true;
+}, true);
+$('#perfumeDialog').addEventListener('close', () => {
+  clearTimeout(perfumeCloseTimer);
+  $('#perfumeDialog').classList.remove('is-closing');
+  document.body.style.overflow = perfumePreviousOverflow;
+  const target = perfumeReturnFocus?.isConnected ? perfumeReturnFocus : $(`.product-card[data-id="${perfumeId}"]`) || $('#searchInput');
+  perfumeId = null;
+  target?.focus({preventScroll:true});
 });
 $('#selectedList').addEventListener('click', e => {
   const button = e.target.closest('[data-remove]');
@@ -277,6 +521,7 @@ $('#modalDone').addEventListener('click', closeModal);
 $('#modalBackdrop').addEventListener('click', closeModal);
 document.addEventListener('keydown', event => {
   if (event.key !== 'Escape') return;
+  if ($('#perfumeDialog').open) return;
   if ($('#demoModal').getAttribute('aria-hidden') === 'false') closeModal();
   else if ($('#mobileDrawer').getAttribute('aria-hidden') === 'false') closeDrawer();
 });

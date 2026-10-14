@@ -1,0 +1,124 @@
+/* Perfume details only. Existing catalog and selection layouts stay independent. */
+.product-card[aria-haspopup="dialog"] { cursor: pointer; }
+.product-card[aria-haspopup="dialog"]:focus-visible { outline: 2px solid var(--gold); outline-offset: 3px; }
+
+.pd-dialog {
+  width: min(940px, calc(100% - 48px));
+  max-width: none;
+  max-height: min(860px, calc(100dvh - 64px));
+  padding: 0;
+  border: 1px solid #e4ded2;
+  border-radius: 25px;
+  background: #fcfbf8;
+  color: var(--ink);
+  box-shadow: 0 32px 100px #03133755;
+  overflow: hidden;
+}
+.pd-dialog::backdrop { background: #051635a6; backdrop-filter: blur(5px); }
+.pd-dialog[open] { animation: pd-enter .22s ease-out; }
+.pd-dialog[open]::backdrop { animation: pd-backdrop-in .22s ease-out; }
+.pd-dialog.is-closing { animation: pd-exit .16s ease-in forwards; }
+.pd-dialog.is-closing::backdrop { animation: pd-backdrop-out .16s ease-in forwards; }
+.pd-shell { display: flex; flex-direction: column; max-height: inherit; }
+.pd-toolbar {
+  display: flex; justify-content: space-between; align-items: center;
+  padding: 12px 24px; border-bottom: 1px solid #ebe6dc; background: #fcfbf8;
+  flex-shrink: 0;
+}
+.pd-toolbar > span { display: flex; align-items: center; gap: 8px; color: #9b7a3c; font-size: 12px; font-weight: 700; }
+.pd-toolbar .ico { width: 17px; height: 17px; }
+.pd-close {
+  width: 44px; height: 44px; border: 1px solid #e6e2db; background: white;
+  color: var(--navy); border-radius: 50%; display: grid; place-items: center;
+}
+.pd-close:hover { background: #f3eee4; border-color: var(--gold); }
+.pd-content {
+  display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.05fr);
+  flex: 1 1 auto; overflow: auto; overscroll-behavior: contain; min-height: 0; padding: 26px; gap: 30px;
+}
+.pd-intro, .pd-analysis { min-width: 0; }
+.pd-content:focus-visible { outline: 2px solid var(--gold); outline-offset: -3px; }
+.pd-identity { display: flex; gap: 18px; align-items: center; }
+.pd-photo {
+  flex: 0 0 130px; height: 156px; display: grid; place-items: center;
+  border: 1px solid #e8e0d4; border-radius: 18px; background: var(--artbg, #f2eee8);
+}
+.pd-photo img { width: 130px; height: 150px; object-fit: contain; filter: drop-shadow(0 8px 6px #192f3b18); }
+.pd-heading { min-width: 0; }
+.pd-brand { font: 700 11px/1.7 Georgia, serif; color: #a28348; letter-spacing: 1.2px; overflow-wrap: anywhere; }
+.pd-title { font-size: 26px; font-weight: 800; line-height: 1.6; margin: 8px 0; color: var(--navy); overflow-wrap: anywhere; }
+.pd-english { font: 11px/1.6 Georgia, serif; color: #798397; letter-spacing: .6px; overflow-wrap: anywhere; }
+.pd-year { display: inline-block; margin-top: 12px; font-size: 11px; color: #8b7552; }
+.pd-meta { display: flex; flex-wrap: wrap; gap: 7px; margin: 22px 0 0; }
+.pd-meta span { max-width: 100%; overflow-wrap: anywhere; padding: 5px 11px; background: white; border: 1px solid #e8e3d9; border-radius: 30px; font-size: 11px; }
+.pd-meta small { color: #8c93a0; margin-inline-end: 5px; font-size: 10px; }
+.pd-description { margin: 18px 0 24px; font-size: 13px; line-height: 2.1; color: #657188; }
+.pd-section-title { display: flex; align-items: center; gap: 8px; font-size: 15px; color: var(--navy); font-weight: 800; margin: 0 0 5px; }
+.pd-section-title::before { content: ""; width: 15px; height: 1px; background: var(--gold); }
+.pd-section-hint { font-size: 11px; color: #818998; margin: 0 0 15px; }
+.pd-accords { display: grid; gap: 7px; list-style: none; padding: 0; margin: 0 0 24px; }
+.pd-accord {
+  position: relative; isolation: isolate; overflow: hidden; border-radius: 8px;
+  background: white; border: 1px solid #eee9e1; display: flex;
+  justify-content: space-between; align-items: center; padding: 6px 12px; gap: 10px; font-size: 12px;
+}
+.pd-accord::before { content: ""; position: absolute; inset: 0 0 0 auto; width: var(--strength); background: var(--accord-color); opacity: .28; z-index: -1; }
+.pd-accord span { min-width: 0; overflow-wrap: anywhere; font-weight: 700; }
+.pd-accord small { flex-shrink: 0; font-size: 11px; color: #54617a; }
+.pd-notes { display: grid; gap: 12px; margin-top: 14px; }
+.pd-note-group { border-top: 1px solid #eae5db; padding-top: 12px; }
+.pd-note-group h4 { font-size: 11px; font-weight: 700; color: #7c6b4b; margin: 0 0 8px; }
+.pd-note-list { display: flex; flex-wrap: wrap; gap: 7px; list-style: none; padding: 0; margin: 0; }
+.pd-note { max-width: 100%; display: flex; align-items: center; gap: 7px; padding: 5px 9px 5px 5px; border: 1px solid #ece6dc; border-radius: 12px; background: white; font-size: 12px; }
+.pd-note span { min-width: 0; overflow-wrap: anywhere; }
+.pd-note img { flex-shrink: 0; height: 36px; width: 36px; object-fit: contain; background: #f8f5ee; border-radius: 8px; }
+.pd-meters { margin-top: 20px; border: 1px solid #e8e2d7; border-radius: 16px; padding: 16px; background: white; display: grid; gap: 18px; }
+.pd-meter-head { display: flex; justify-content: space-between; align-items: center; gap: 10px; font-size: 12px; margin-bottom: 8px; }
+.pd-meter-head strong { color: var(--navy); }
+.pd-meter-head span { color: #a18243; font-size: 11px; }
+.pd-meter-track { display: flex; gap: 5px; }
+.pd-meter-track i { flex: 1; height: 7px; border-radius: 10px; background: #ececf0; }
+.pd-meter-track i.is-active { background: var(--navy); }
+.pd-meter-track i.is-current { background: var(--gold); }
+.pd-meter-range { display: flex; justify-content: space-between; font-size: 9px; color: #8d94a1; margin-top: 7px; }
+.pd-empty { color: #9097a3; font-size: 12px; }
+.pd-footer { display: flex; align-items: center; justify-content: space-between; gap: 16px; border-top: 1px solid #e8e2d7; padding: 16px 24px; background: white; flex-shrink: 0; }
+.pd-footer strong { display: block; font-size: 12px; font-weight: 700; color: var(--navy); }
+.pd-footer small { display: block; font-size: 10px; color: #9299a5; margin-top: 3px; }
+.pd-select { min-height: 46px; border: 1px solid var(--navy); background: var(--navy); color: white; border-radius: 12px; padding: 10px 20px; font-size: 12px; font-weight: 800; display: flex; align-items: center; justify-content: center; gap: 8px; flex-shrink: 0; }
+.pd-select .ico { width: 16px; height: 16px; }
+.pd-select:hover { background: #0b398e; }
+.pd-select.is-selected { color: #947336; background: #f8f4ea; border-color: #d7c495; }
+.pd-select:disabled { background: #e9ebef; color: #8e97a8; border-color: #e9ebef; cursor: not-allowed; }
+.pd-dialog button:focus-visible { outline: 2px solid var(--gold); outline-offset: 3px; }
+@keyframes pd-enter { from { opacity: 0; transform: translateY(12px) scale(.98); } to { opacity: 1; transform: none; } }
+@keyframes pd-exit { to { opacity: 0; transform: translateY(8px) scale(.99); } }
+@keyframes pd-backdrop-in { from { background-color: transparent; backdrop-filter: blur(0); } }
+@keyframes pd-backdrop-out { to { background-color: transparent; backdrop-filter: blur(0); } }
+@media (max-width: 680px) {
+  .pd-dialog { width: 100%; height: 96dvh; max-height: 96dvh; margin: auto 0 0; border-radius: 24px 24px 0 0; border-bottom: 0; }
+  .pd-shell { height: 100%; }
+  .pd-toolbar { padding: 8px 16px; }
+  .pd-content { display: block; padding: 20px; }
+  .pd-photo { flex-basis: 110px; height: 130px; }
+  .pd-photo img { width: 110px; height: 125px; }
+  .pd-title { font-size: 24px; }
+  .pd-brand { font-size: 10px; letter-spacing: .7px; }
+  .pd-identity { gap: 15px; }
+  .pd-meta { margin-top: 16px; }
+  .pd-description { font-size: 12px; margin-bottom: 18px; }
+  .pd-analysis { margin-top: 26px; }
+  .pd-footer { display: grid; gap: 10px; padding: 12px 16px calc(12px + env(safe-area-inset-bottom)); }
+  .pd-footer > div { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 3px 8px; }
+  .pd-footer small { font-size: 9px; margin: 0; }
+  .pd-select { width: 100%; }
+}
+@media (max-width: 365px) {
+  .pd-content { padding: 16px; }
+  .pd-photo { flex-basis: 90px; height: 116px; }
+  .pd-photo img { width: 90px; height: 110px; }
+  .pd-title { font-size: 22px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .pd-dialog[open], .pd-dialog[open]::backdrop, .pd-dialog.is-closing, .pd-dialog.is-closing::backdrop { animation: none; }
+}

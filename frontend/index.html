@@ -12,6 +12,7 @@
   <link href="https://fonts.googleapis.com/css2?family=Vazirmatn:wght@300;400;500;600;700;800;900&display=swap"
     rel="stylesheet" />
   <link rel="stylesheet" href="styles.css" />
+  <link rel="stylesheet" href="perfume-details.css" />
   <script src="app.js" defer></script>
 </head>
 
@@ -236,6 +237,22 @@
     <div class="modal-selected" id="modalSelected"></div><button id="modalDone" type="button" class="modal-done">بازگشت
       به انتخاب‌ها</button>
   </div>
+  <dialog class="pd-dialog" id="perfumeDialog" aria-labelledby="perfumeTitle">
+    <div class="pd-shell">
+      <header class="pd-toolbar">
+        <span><svg class="ico" aria-hidden="true"><use href="#i-sparkle" /></svg> شناخت رایحه</span>
+        <button class="pd-close" id="closePerfume" type="button" aria-label="بستن جزئیات عطر" autofocus>
+          <svg class="ico" aria-hidden="true"><use href="#i-x" /></svg>
+        </button>
+      </header>
+      <div class="pd-content" id="perfumeContent" tabindex="0" role="region" aria-label="جزئیات رایحه"></div>
+      <footer class="pd-footer">
+        <div><strong id="perfumeSelectionStatus" role="status" aria-live="polite"></strong>
+          <small>اطلاعات و شاخص‌های این نسخه نمایشی هستند.</small></div>
+        <button class="pd-select" id="perfumeSelect" type="button"></button>
+      </footer>
+    </div>
+  </dialog>
   <div class="toast" id="toast" role="status" aria-live="polite"></div>
 </body>
 
