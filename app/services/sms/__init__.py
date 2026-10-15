@@ -1,4 +1,4 @@
-"""Pattern FarazSMS integration."""
+"""Single-recipient Simple FarazSMS integration."""
 
 from app.services.sms.faraz import (
     FarazSmsClient,

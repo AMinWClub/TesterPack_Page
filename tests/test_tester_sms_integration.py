@@ -43,9 +43,9 @@ class MongoWorkerIntegrationTests(unittest.IsolatedAsyncioTestCase):
             selection_base_url="https://tester.example.test", token_secret="integration-secret-" + "x" * 40,
         )
         self.sms = FarazSmsClient(FarazSmsConfig(
-            api_key="integration-test-key", base_url="https://provider.example.test", line_number="50001", pattern_code="pattern",
+            api_key="integration-test-key", base_url="https://provider.example.test", line_number="50001",
         ))
-        self.sms.send_pattern = Mock(wraps=self.sms.send_pattern)
+        self.sms.send_simple = Mock(wraps=self.sms.send_simple)
         patcher = patch("app.services.sms.faraz.urlopen", return_value=FakeHttpResponse())
         self.http = patcher.start()
         self.addCleanup(patcher.stop)
@@ -126,8 +126,9 @@ class MongoWorkerIntegrationTests(unittest.IsolatedAsyncioTestCase):
         await self.run_worker()
         self.assertEqual((await self.notification())["status"], "accepted")
         self.assertEqual((await self.notification())["attempt_count"], 2)
-        links = [call.kwargs["attributes"]["link"] for call in self.sms.send_pattern.call_args_list]
-        self.assertEqual(links[0], links[1])
+        texts = [call.kwargs["text"] for call in self.sms.send_simple.call_args_list]
+        link = self.settings.selection_base_url + "/" + worker.token_for_order("order-1", self.settings.token_secret)
+        self.assertEqual(texts, [worker.TESTER_SMS_TEXT.format(link=link)] * 2)
         self.assertEqual(await self.collections["selections"].count_documents({}), 1)
 
     async def test_concurrent_workers_atomic_claim(self):

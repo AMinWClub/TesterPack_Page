@@ -295,8 +295,8 @@ class TesterWorkerTests(unittest.IsolatedAsyncioTestCase):
             start_at=datetime(2026, 10, 13, 20, 30, tzinfo=timezone.utc), sms_enabled=True,
             selection_base_url="https://tester.example.com", token_secret="random-test-secret-" + "x" * 32,
         )
-        self.sms = FarazSmsClient(FarazSmsConfig(api_key="test-key", line_number="50001", pattern_code="pattern"))
-        self.sms.send_pattern = Mock(wraps=self.sms.send_pattern)
+        self.sms = FarazSmsClient(FarazSmsConfig(api_key="test-key", line_number="50001"))
+        self.sms.send_simple = Mock(wraps=self.sms.send_simple)
         self.db = FakeDatabase([order()])
         await worker.create_indexes(worker.worker_collections(self.db, self.settings))
         self.db.writes = 0
@@ -323,7 +323,7 @@ class TesterWorkerTests(unittest.IsolatedAsyncioTestCase):
         ]
         result = await self.run_worker()
         self.assertEqual(result["accepted"], 2)
-        self.assertEqual(self.sms.send_pattern.call_count, 2)
+        self.assertEqual(self.sms.send_simple.call_count, 2)
         changed = {item["_id"] for item in self.db["preprocess_orders"].documents if item.get("sms_sent") is True}
         self.assertEqual(changed, {"boundary", "new", "sent"})
         self.assertNotIn("sms_sent", self.db["preprocess_orders"].documents[0])
@@ -331,13 +331,37 @@ class TesterWorkerTests(unittest.IsolatedAsyncioTestCase):
     async def test_rerun_does_not_duplicate_sms_notification_or_selection(self):
         await self.run_worker()
         await self.run_worker()
-        self.sms.send_pattern.assert_called_once()
+        self.sms.send_simple.assert_called_once()
         self.assertEqual(len(self.db[worker.NOTIFICATIONS].documents), 1)
         self.assertEqual(len(self.db[worker.SELECTIONS].documents), 1)
 
+    async def test_selection_and_claim_exist_before_simple_sms_dispatch(self):
+        def check_before_dispatch(request, **kwargs):
+            selection = self.db[worker.SELECTIONS].documents[0]
+            token = worker.token_for_order("order-1", self.settings.token_secret)
+            self.assertEqual(selection["token_hash"], hashlib.sha256(token.encode("ascii")).hexdigest())
+            self.assertEqual(self.notification()["status"], "sending")
+            self.assertEqual(self.notification()["attempt_count"], 1)
+            self.assertEqual(json.loads(request.data)["text"], worker.TESTER_SMS_TEXT.format(
+                link=self.settings.selection_base_url + "/" + token,
+            ))
+            return FakeHttpResponse()
+
+        self.http.side_effect = check_before_dispatch
+        result = await self.run_worker()
+        self.assertEqual(result["accepted"], 1)
+        self.http.assert_called_once()
+
+    async def test_simple_payload_preflight_failure_does_not_claim_or_write(self):
+        with patch.object(self.sms, "build_simple_payload", side_effect=SmsValidationError("invalid payload")):
+            with self.assertRaises(SmsValidationError):
+                await self.run_worker()
+        self.assertEqual(self.db.writes, 0)
+        self.sms.send_simple.assert_not_called()
+
     async def test_two_concurrent_workers_claim_only_once(self):
         await asyncio.gather(self.run_worker(), self.run_worker())
-        self.sms.send_pattern.assert_called_once()
+        self.sms.send_simple.assert_called_once()
         self.assertEqual(len(self.db[worker.NOTIFICATIONS].documents), 1)
         self.assertEqual(len(self.db[worker.SELECTIONS].documents), 1)
 
@@ -376,7 +400,7 @@ class TesterWorkerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.notification()["attempts"], [])
         self.assertEqual(len(self.db[worker.NOTIFICATIONS].documents), 1)
         self.assertNotIn("sms_sent", self.db["preprocess_orders"].documents[0])
-        self.sms.send_pattern.assert_not_called()
+        self.sms.send_simple.assert_not_called()
 
     async def test_token_secret_mismatch_preserves_pending_retry_and_can_resume_after_fix(self):
         original_settings = self.settings
@@ -389,7 +413,7 @@ class TesterWorkerTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(worker.WorkerConfigurationError, "TESTER_TOKEN_SECRET"):
             await self.run_worker()
         self.assertEqual(self.notification(), before)
-        self.assertEqual(self.sms.send_pattern.call_count, 1)
+        self.assertEqual(self.sms.send_simple.call_count, 1)
         self.settings = original_settings
         await self.run_worker()
         self.assertEqual(self.notification()["status"], "accepted")
@@ -404,7 +428,7 @@ class TesterWorkerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.notification()["status"], "retry_pending")
         self.assertTrue(await worker.finish_notification(notifications, claim, "accepted", provider_data=42))
         self.assertEqual(self.notification()["status"], "accepted")
-        self.sms.send_pattern.assert_not_called()
+        self.sms.send_simple.assert_not_called()
 
     async def test_worker_cli_closes_mongodb_client_after_failure(self):
         mongo = Mock()
@@ -424,7 +448,7 @@ class TesterWorkerTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result["read_only"])
         self.assertEqual(self.db.writes, 0)
         self.assertEqual(before, self.db["preprocess_orders"].documents)
-        self.sms.send_pattern.assert_not_called()
+        self.sms.send_simple.assert_not_called()
         self.assertEqual(self.db[worker.NOTIFICATIONS].documents, [])
 
     async def test_sms_disabled_is_read_only_without_secret_or_faraz_client(self):
@@ -441,40 +465,40 @@ class TesterWorkerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.notification()["status"], "retry_pending")
         self.assertEqual(self.notification()["last_error_code"], "provider_rejected")
         await self.run_worker()
-        self.sms.send_pattern.assert_called_once()
+        self.sms.send_simple.assert_called_once()
 
     async def test_timeout_waits_for_retry(self):
         self.http.side_effect = TimeoutError("private transport details")
         await self.run_worker()
         self.assertEqual(self.notification()["status"], "retry_pending")
         await self.run_worker()
-        self.sms.send_pattern.assert_called_once()
+        self.sms.send_simple.assert_called_once()
 
     async def test_http_500_waits_for_retry(self):
         self.http.side_effect = HTTPError("https://provider.example", 500, "server error", {}, io.BytesIO(b'failure'))
         await self.run_worker()
         self.assertEqual(self.notification()["status"], "retry_pending")
         await self.run_worker()
-        self.sms.send_pattern.assert_called_once()
+        self.sms.send_simple.assert_called_once()
 
     async def test_malformed_success_response_waits_for_retry(self):
         self.http.return_value = FakeHttpResponse(201, b'{"status":"success","data":{"id":42}}')
         await self.run_worker()
         self.assertEqual(self.notification()["status"], "retry_pending")
         await self.run_worker()
-        self.sms.send_pattern.assert_called_once()
+        self.sms.send_simple.assert_called_once()
 
     async def test_crash_after_dispatch_waits_for_lease_then_retry_delay(self):
-        self.sms.send_pattern.side_effect = SimulatedCrash()
+        self.sms.send_simple.side_effect = SimulatedCrash()
         with self.assertRaises(SimulatedCrash):
             await self.run_worker()
         self.assertEqual(self.notification()["status"], "sending")
         await self.run_worker()
-        self.sms.send_pattern.assert_called_once()
+        self.sms.send_simple.assert_called_once()
         self.notification()["lease_expires_at"] = datetime.now(timezone.utc) - timedelta(seconds=1)
         await self.run_worker()
         self.assertEqual(self.notification()["status"], "retry_pending")
-        self.sms.send_pattern.assert_called_once()
+        self.sms.send_simple.assert_called_once()
 
     async def test_database_failure_after_response_waits_for_lease_then_retry_delay(self):
         notifications = self.db[worker.NOTIFICATIONS]
@@ -485,7 +509,7 @@ class TesterWorkerTests(unittest.IsolatedAsyncioTestCase):
         notifications.fail_update = None
         await self.run_worker()
         self.assertEqual(self.notification()["status"], "retry_pending")
-        self.sms.send_pattern.assert_called_once()
+        self.sms.send_simple.assert_called_once()
 
     async def test_accepted_notification_repairs_order_flag_without_resending(self):
         orders = self.db["preprocess_orders"]
@@ -497,31 +521,39 @@ class TesterWorkerTests(unittest.IsolatedAsyncioTestCase):
         result = await self.run_worker()
         self.assertEqual(result["repaired"], 1)
         self.assertTrue(orders.documents[0]["sms_sent"])
-        self.sms.send_pattern.assert_called_once()
+        self.sms.send_simple.assert_called_once()
 
     async def test_repair_never_changes_an_order_before_start(self):
         self.db["preprocess_orders"].documents = [order(date_created="2026-08-26T12:24:27.83444Z")]
         self.db[worker.NOTIFICATIONS].documents = [{"order_id": "order-1", "status": "accepted"}]
         await self.run_worker()
         self.assertNotIn("sms_sent", self.db["preprocess_orders"].documents[0])
-        self.sms.send_pattern.assert_not_called()
+        self.sms.send_simple.assert_not_called()
 
     async def test_invalid_mobile_records_failure_and_continues(self):
         self.db["preprocess_orders"].documents = [order("bad", phone="invalid"), order("good")]
         result = await self.run_worker()
         self.assertEqual((result["failed"], result["accepted"]), (1, 1))
-        self.sms.send_pattern.assert_called_once()
+        self.sms.send_simple.assert_called_once()
 
-    async def test_link_attribute_is_configurable_and_metadata_contains_no_secrets(self):
-        self.settings = replace(self.settings, link_attribute="selection_url")
+    async def test_exact_simple_message_and_metadata_contains_no_secrets(self):
         self.http.return_value = FakeHttpResponse(201, b'{"status":"success","data":42,"messages":"private-token"}')
         with self.assertNoLogs(worker.logger.name, level="DEBUG"):
             await self.run_worker()
-        arguments = self.sms.send_pattern.call_args.kwargs
-        self.assertEqual(set(arguments["attributes"]), {"selection_url"})
-        url = arguments["attributes"]["selection_url"]
+        arguments = self.sms.send_simple.call_args.kwargs
+        self.assertEqual(set(arguments), {"recipient", "text"})
+        token = worker.token_for_order("order-1", self.settings.token_secret)
+        url = self.settings.selection_base_url + "/" + token
+        self.assertEqual(arguments["recipient"], "09120000000")
+        self.assertEqual(arguments["text"],
+                         "مشتری عزیز سراد\n\n"
+                         "برای تکمیل سفارش پک تستر خود، لطفاً از طریق لینک زیر اقدام فرمایید:\n\n" + url)
+        payload = json.loads(self.http.call_args.args[0].data)
+        self.assertEqual(payload["text"], arguments["text"])
+        self.assertEqual(payload["recipients"], ["09120000000"])
+        self.assertEqual(self.http.call_args.args[0].full_url, "https://api.iranpayamak.com/ws/v1/sms/simple")
         persisted = repr(self.db[worker.NOTIFICATIONS].documents + self.db[worker.SELECTIONS].documents)
-        for secret in (url, url.rsplit("/", 1)[1], "test-key", "private-token", "09120000000"):
+        for secret in (url, token, arguments["text"], "test-key", "private-token", "09120000000"):
             self.assertNotIn(secret, persisted)
         self.assertEqual(self.notification()["provider_data"], 42)
 
@@ -538,7 +570,7 @@ class TesterWorkerTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(worker.WorkerConfigurationError):
             await self.run_worker()
         self.assertEqual(self.db.writes, 0)
-        self.sms.send_pattern.assert_not_called()
+        self.sms.send_simple.assert_not_called()
 
     def make_retry_due(self):
         self.notification()["next_retry_at"] = datetime.now(timezone.utc) - timedelta(seconds=1)
@@ -562,11 +594,13 @@ class TesterWorkerTests(unittest.IsolatedAsyncioTestCase):
         self.http.side_effect = None
         await self.run_worker()
         self.assertEqual(self.notification()["status"], "accepted")
-        links = [call.kwargs["attributes"]["link"] for call in self.sms.send_pattern.call_args_list]
-        self.assertEqual(links[0], links[1])
+        texts = [call.kwargs["text"] for call in self.sms.send_simple.call_args_list]
+        link = self.settings.selection_base_url + "/" + worker.token_for_order("order-1", self.settings.token_secret)
+        self.assertEqual(texts, [worker.TESTER_SMS_TEXT.format(link=link)] * 2)
+        self.assertEqual(self.http.call_args_list[0].args[0].data, self.http.call_args_list[1].args[0].data)
         self.assertEqual(len(self.db[worker.SELECTIONS].documents), 1)
         await self.run_worker()
-        self.assertEqual(self.sms.send_pattern.call_count, 2)
+        self.assertEqual(self.sms.send_simple.call_count, 2)
 
     async def test_connection_failure_then_retry(self):
         self.http.side_effect = URLError("private network details")
@@ -583,7 +617,7 @@ class TesterWorkerTests(unittest.IsolatedAsyncioTestCase):
             await self.run_worker()
             self.make_retry_due()
         result = await self.run_worker()
-        self.assertEqual(self.sms.send_pattern.call_count, 3)
+        self.assertEqual(self.sms.send_simple.call_count, 3)
         self.assertEqual(self.notification()["status"], "exhausted")
         self.assertEqual(result["exhausted_total"], 1)
         report = await worker.exhausted_report(worker.worker_collections(self.db, self.settings), worker.order_filter(self.settings), 10)
@@ -595,26 +629,26 @@ class TesterWorkerTests(unittest.IsolatedAsyncioTestCase):
             with self.subTest(code=code):
                 self.db = FakeDatabase([order("order-1"), order("order-2")])
                 await worker.create_indexes(worker.worker_collections(self.db, self.settings))
-                self.sms.send_pattern.reset_mock()
+                self.sms.send_simple.reset_mock()
                 self.http.side_effect = HTTPError("https://provider.example", code, "private error", {}, io.BytesIO(b'error'))
                 with self.assertLogs(worker.logger.name, level="WARNING") as captured:
                     result = await self.run_worker()
                 self.assertEqual(result["halted_http_status"], code)
-                self.sms.send_pattern.assert_called_once()
+                self.sms.send_simple.assert_called_once()
                 self.assertEqual(len(self.db[worker.NOTIFICATIONS].documents), 1)
                 self.assertEqual(self.notification()["status"], "retry_pending")
                 self.assertNotIn("private error", "".join(captured.output))
 
     async def test_crashed_send_retries_after_expiry_and_due_time(self):
-        self.sms.send_pattern.side_effect = SimulatedCrash()
+        self.sms.send_simple.side_effect = SimulatedCrash()
         with self.assertRaises(SimulatedCrash):
             await self.run_worker()
         self.notification()["lease_expires_at"] = datetime.now(timezone.utc) - timedelta(seconds=1)
         await self.run_worker()
         self.assertEqual(self.notification()["status"], "retry_pending")
-        self.assertEqual(self.sms.send_pattern.call_count, 1)
+        self.assertEqual(self.sms.send_simple.call_count, 1)
         self.make_retry_due()
-        self.sms.send_pattern.side_effect = None
+        self.sms.send_simple.side_effect = None
         await self.run_worker()
         self.assertEqual(self.notification()["status"], "accepted")
         self.assertEqual(self.notification()["attempt_count"], 2)
@@ -629,13 +663,13 @@ class TesterWorkerTests(unittest.IsolatedAsyncioTestCase):
         self.make_retry_due()
         await self.run_worker()
         self.assertEqual(self.notification()["status"], "accepted")
-        self.assertEqual(self.sms.send_pattern.call_count, 2)
+        self.assertEqual(self.sms.send_simple.call_count, 2)
 
     async def test_mongodb_failure_before_claim_does_not_consume_attempt(self):
         with patch.object(worker, "claim_notification", new=AsyncMock(side_effect=AutoReconnect("offline"))):
             await self.run_worker()
         self.assertEqual(self.notification()["attempt_count"], 0)
-        self.sms.send_pattern.assert_not_called()
+        self.sms.send_simple.assert_not_called()
         await self.run_worker()
         self.assertEqual(self.notification()["attempt_count"], 1)
 
@@ -645,7 +679,7 @@ class TesterWorkerTests(unittest.IsolatedAsyncioTestCase):
         self.make_retry_due()
         self.http.side_effect = None
         await asyncio.gather(self.run_worker(), self.run_worker())
-        self.assertEqual(self.sms.send_pattern.call_count, 2)
+        self.assertEqual(self.sms.send_simple.call_count, 2)
         self.assertEqual(self.notification()["attempt_count"], 2)
 
     async def test_old_attempt_cannot_overwrite_new_attempt_or_sync_order(self):
@@ -697,16 +731,16 @@ class TesterWorkerTests(unittest.IsolatedAsyncioTestCase):
         before = copy.deepcopy(self.db[worker.NOTIFICATIONS].documents)
         await self.run_worker()
         self.assertEqual(self.db[worker.NOTIFICATIONS].documents, before)
-        self.sms.send_pattern.assert_not_called()
+        self.sms.send_simple.assert_not_called()
 
     async def test_permanent_error_after_claim_sets_both_codes_and_never_retries(self):
-        self.sms.send_pattern.side_effect = SmsValidationError("invalid order")
+        self.sms.send_simple.side_effect = SmsValidationError("invalid order")
         await self.run_worker()
         self.assertEqual(self.notification()["status"], "failed")
         self.assertEqual(self.notification()["error_code"], "invalid_order_data")
         self.assertEqual(self.notification()["last_error_code"], "invalid_order_data")
         await self.run_worker()
-        self.sms.send_pattern.assert_called_once()
+        self.sms.send_simple.assert_called_once()
 
     async def test_error_fields_match_across_retry_recovery_and_success(self):
         self.http.side_effect = TimeoutError("timeout")
@@ -734,7 +768,7 @@ class TesterWorkerTests(unittest.IsolatedAsyncioTestCase):
         self.settings = replace(self.settings, max_attempts=1)
         await self.run_worker()
         self.assertEqual(self.notification()["status"], "exhausted")
-        self.sms.send_pattern.assert_called_once()
+        self.sms.send_simple.assert_called_once()
 
 
 class WorkerSettingsAndTokenTests(unittest.TestCase):
@@ -750,6 +784,18 @@ class WorkerSettingsAndTokenTests(unittest.TestCase):
         self.assertEqual(settings.start_at, datetime(2026, 10, 13, 20, 30, tzinfo=timezone.utc))
         self.assertFalse(settings.sms_enabled)
 
+    def test_message_template_preserves_exact_text_and_case_sensitive_example_link(self):
+        link = "https://domain.com/aB7xQ2mN9pR4tY6kL8"
+        self.assertEqual(worker.TESTER_SMS_TEXT.format(link=link),
+                         "مشتری عزیز سراد\n\n"
+                         "برای تکمیل سفارش پک تستر خود، لطفاً از طریق لینک زیر اقدام فرمایید:\n\n"
+                         "https://domain.com/aB7xQ2mN9pR4tY6kL8")
+
+    def test_obsolete_pattern_environment_does_not_affect_worker_settings(self):
+        with patch.dict(os.environ, {**self.environment, "TESTER_PATTERN_LINK_ATTRIBUTE": "invalid old value"}, clear=True):
+            settings = worker.WorkerSettings.from_environment()
+        self.assertFalse(hasattr(settings, "link_attribute"))
+
     def test_configuration_error_is_reported_by_cli_without_secret_values(self):
         message = "TESTER_TOKEN_SECRET is incompatible with the existing Selection token hash/version; restore the original secret."
         stderr = io.StringIO()
@@ -762,7 +808,7 @@ class WorkerSettingsAndTokenTests(unittest.TestCase):
     def test_missing_or_invalid_settings_fail_with_setting_name(self):
         for key, invalid in (("TESTER_PACK_PRODUCT_ID", ""), ("TESTER_SMS_START_AT", "invalid"),
                              ("TESTER_SMS_START_AT", "2026-10-14T00:00:00"), ("TESTER_WORKER_BATCH_SIZE", "0"),
-                             ("TESTER_SMS_ENABLED", "yes"), ("TESTER_PATTERN_LINK_ATTRIBUTE", "bad-name")):
+                             ("TESTER_SMS_ENABLED", "yes")):
             with self.subTest(key=key, invalid=invalid), patch.dict(os.environ, {**self.environment, key: invalid}, clear=True):
                 with self.assertRaisesRegex(worker.WorkerConfigurationError, key):
                     worker.WorkerSettings.from_environment()

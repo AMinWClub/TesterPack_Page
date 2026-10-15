@@ -657,7 +657,7 @@ async function loadSelectionContext() {
 
 function showSubmissionSuccess() {
   $('#modalTitle').textContent = 'انتخاب‌های شما با موفقیت ثبت شد.';
-  $('#modalDescription').textContent = '۱۰ عطر انتخابی شما برای آماده‌سازی پک تستر ثبت شدند. از همراهی شما با سوراد سپاسگزاریم.';
+  $('#modalDescription').textContent = '۱۰ عطر انتخابی شما برای آماده‌سازی پک تستر ثبت شدند. از همراهی شما با سراد سپاسگزاریم.';
   $('#modalSelected').innerHTML = submittedNames.map(name => `<li>${escapeHtml(name)}</li>`).join('');
   $('#modalDone').textContent = 'مشاهده انتخاب‌های ثبت‌شده';
   $('#modalBack').hidden = true;
@@ -715,7 +715,7 @@ async function submitSelection() {
 renderSelection();
 if (isSelectionPage) loadSelectionContext();
 else {
-  $('#orderState').innerHTML = '<strong>پیش‌نمایش کاتالوگ سوراد</strong><p>برای مشاهده سفارش و ثبت ۱۰ تستر، لینک اختصاصی پیامک را باز کنید.</p>';
+  $('#orderState').innerHTML = '<strong>پیش‌نمایش کاتالوگ سراد</strong><p>برای مشاهده سفارش و ثبت ۱۰ تستر، لینک اختصاصی پیامک را باز کنید.</p>';
   updateSelectionPage();
   loadCatalog();
 }

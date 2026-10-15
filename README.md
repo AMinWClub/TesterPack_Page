@@ -1,4 +1,4 @@
-# انتخاب تسترهای سوراد
+# انتخاب تسترهای سراد
 
 پروژه‌ای ساده با FastAPI و اتصال غیرهمزمان MongoDB از طریق `pymongo.AsyncMongoClient`.
 Python 3.10 یا جدیدتر و یک سرور MongoDB در دسترس نیاز است.
@@ -292,10 +292,9 @@ node tests/test_selection_frontend.cjs
 
 هر اجرای کامل تست مرورگر به Preview تازه نیاز دارد. تست شامل سفارش واقعی در دیتابیس ایزوله، مرور/ثبت ۱۰ انتخاب، شمارهٔ کامل، Modal، دوبارکلیک، بازگشایی فقط‌خواندنی، پاسخ موفق گم‌شده، شبکهٔ نامشخص، محصول ناموجود، لینک نامعتبر، امنیت Header/Referer و عرض‌های ۳۲۰/۳۹۰/۷۶۸/۱۴۴۰ است. تصاویر و گزارش در `test-artifacts/selection/` ذخیره می‌شوند. مسیر مرورگر با `CATALOG_BROWSER_PATH` قابل تنظیم است.
 
-## سرویس پیامک پترن فرازSMS
+## سرویس پیامک ساده فرازSMS
 
-سرویس `send_pattern` از [API پترن فرازSMS](https://docs.farazsms.com/service/post-ws-v1-sms-pattern) استفاده می‌کند.
-ابتدا پترن را در پنل ایجاد و تأیید کنید؛ `FARAZ_PATTERN_CODE` همان UID پترن است.
+سرویس `send_simple` از [API رسمی Simple SMS فراز](https://docs.iranpayamak.com/send-simple-sms-13909967e0)، مسیر `POST /ws/v1/sms/simple`، استفاده می‌کند.
 این متغیرها را به `.env` موجود اضافه کنید؛ تنظیمات MongoDB خود را حفظ کنید:
 
 ```dotenv
@@ -303,42 +302,54 @@ FARAZ_API_KEY=your-api-key
 FARAZ_API_URL=https://api.iranpayamak.com
 FARAZ_LINE_NUMBER=your-sender-line
 FARAZ_TIMEOUT_SECONDS=15
-FARAZ_PATTERN_CODE=your-approved-pattern-code
 ```
 
 تنظیمات با همان `python-dotenv`، از `.env` ریشه و با اولویت متغیرهای محیط خوانده می‌شوند.
-تنظیمات فراز برای راه‌اندازی FastAPI الزامی نیستند؛ ساخت Payload به کد پترن و شمارهٔ خط و ارسال به کلید API نیز نیاز دارد.
+تنظیمات فراز برای راه‌اندازی FastAPI الزامی نیستند؛ ساخت Payload به شمارهٔ خط و ارسال به کلید API نیز نیاز دارد.
+متغیرهای قدیمی `FARAZ_PATTERN_CODE` و `TESTER_PATTERN_LINK_ATTRIBUTE` دیگر خوانده نمی‌شوند و می‌توانید آن‌ها را از `.env` حذف کنید.
 نمونهٔ ساخت Payload بدون ارسال:
 
 ```python
 from app.services.sms import FarazSmsClient
+from app.workers.tester_sms import TESTER_SMS_TEXT
 
 client = FarazSmsClient()
-attributes = {"link": "https://example.com/token"}
-payload = client.build_pattern_payload(recipient="09120000000", attributes=attributes)
+text = TESTER_SMS_TEXT.format(link="https://domain.com/aB7xQ2mN9pR4tY6kL8")
+payload = client.build_simple_payload(recipient="09120000000", text=text)
 
 # برای ارسال واقعی در کد مصرف‌کننده:
-# result = client.send_pattern(recipient="09120000000", attributes=attributes)
+# result = client.send_simple(recipient="09120000000", text=text)
 # result.status_code, result.data
 ```
 
-نام `link` صرفاً مثال است؛ کلیدهای `attributes` باید با نام متغیرهای پترن شما یکی باشند.
-مقادیر رشته‌ای (حتی رشتهٔ خالی) و عددی مجازند؛ برای پترن بدون متغیر از `{}` استفاده کنید.
-هر درخواست فقط یک `recipient` می‌پذیرد؛ شماره‌های `09...`، `989...`، `+989...` و ارقام فارسی نرمال می‌شوند.
-نام متغیرها، نوع مقادیر، کد پترن و موبایل پیش از ارسال اعتبارسنجی می‌شوند؛ تطابق با متغیرهای پترن در پنل را API بررسی می‌کند.
+هر فراخوانی فقط یک `recipient` رشته‌ای می‌پذیرد؛ در Payload به آرایهٔ تک‌عضوی `recipients` تبدیل می‌شود. شماره‌های `09...`، `989...`، `+989...` و ارقام فارسی نرمال می‌شوند.
+Payload شامل `text`، `line_number`، `recipients`، `number_format="english"` و `schedule=null` برای ارسال بدون زمان‌بندی است؛ `code` و `attributes` ندارد.
+متن باید String غیرخالی و موبایل معتبر باشد؛ متن بدون Trim یا بازنویسی در UTF-8 ارسال می‌شود.
 
-متد `send_pattern` همزمان است؛ در کد `async` از `await run_in_threadpool(client.send_pattern, ...)`
+متن ثابت Worker در Constant به نام `TESTER_SMS_TEXT` در `app/workers/tester_sms.py` متمرکز است. فقط `{link}` جایگزین می‌شود؛ دو خط جدید بین بخش‌ها و نبود خط جدید اضافی در ابتدا/انتها حفظ می‌شود:
+
+```text
+مشتری عزیز سراد
+
+برای تکمیل سفارش پک تستر خود، لطفاً از طریق لینک زیر اقدام فرمایید:
+
+{link}
+```
+
+لینک پس از `ensure_selection` و با همان توکن ۱۸ کاراکتری Base64 URL-safe و Case-Sensitive ساخته می‌شود؛ مقدار `TESTER_SELECTION_BASE_URL=https://domain.com` لینک را به شکل `https://domain.com/<token>` می‌سازد. Selection پیش از ارسال ایجاد/بازیابی می‌شود و تمام Retryهای سفارش با همان لینک و متن انجام می‌شوند.
+
+متد `send_simple` همزمان است؛ در کد `async` از `await run_in_threadpool(client.send_simple, ...)`
 با import از `starlette.concurrency` استفاده کنید. خطاهای سرویس از نوع `SmsServiceError` هستند.
 سرویس هیچ متن، شماره، کلید، توکن لینک یا پاسخ خامی را لاگ نمی‌کند؛ `result.body` و `error.body` را نیز در کد مصرف‌کننده لاگ نکنید.
 هر فراخوانی کلاینت فقط یک درخواست ارسال می‌کند؛ Retry توسط Worker مدیریت می‌شود.
-طبق [OpenAPI رسمی](https://docs.farazsms.com/download/openapi.json)، پاسخ موفق `201` شامل `status="success"`، `data` عددی و `messages` است.
+طبق مستندات همان Endpoint، پاسخ موفق `201` به معنی پذیرش در صف ارسال است و شامل `status="success"`، `data` عددی و `messages` است. HTTP موفق به‌تنهایی کافی نیست؛ `status` و نوع عددی متناهی `data` نیز اعتبارسنجی می‌شوند. این تأیید، تضمین تحویل به گوشی نیست.
 مقدار `data` بدون تعبیر به شناسهٔ درخواست در `result.data` و بدنهٔ کامل در `result.body` نگهداری می‌شود؛ ویژگی `request_id` وجود ندارد.
 خطاهای HTTP، اتصال، `status="error"` و پاسخ نامعتبر با `SmsProviderError` گزارش می‌شوند.
 
 اجرای تست‌های Payload، تنظیمات و پاسخ Mock؛ تمام درخواست‌های HTTP در تست‌ها مسدود یا Mock می‌شوند:
 
 ```shell
-python -m unittest discover -s tests -v
+python -m unittest tests.test_sms_faraz tests.test_tester_sms_worker -v
 ```
 
 ## Worker سفارش‌های پک تستر
@@ -363,12 +374,11 @@ Notificationهای `accepted`، `exhausted` و خطای دائمی داده دو
 | `TESTER_WORKER_BATCH_SIZE` | حداکثر سفارش‌های ارسال در هر اجرا؛ پیش‌فرض `50` |
 | `TESTER_SMS_ENABLED` | فقط `true` یا `false`؛ پیش‌فرض `false`، حالت فقط خواندنی |
 | `TESTER_SELECTION_BASE_URL` | فقط Origin مانند `https://tester.example.com`، بدون مسیر؛ هنگام ارسال الزامی |
-| `TESTER_PATTERN_LINK_ATTRIBUTE` | نام دقیق متغیر لینک در پترن؛ پیش‌فرض `link` |
 | `TESTER_TOKEN_SECRET` | Secret تصادفی و ثابت با حداقل ۳۲ بایت؛ هنگام ارسال الزامی |
 | `TESTER_SMS_RETRY_DELAY_MINUTES` | فاصلهٔ Retry به دقیقه؛ فقط عدد صحیح مثبت، پیش‌فرض `5` |
 | `TESTER_SMS_MAX_ATTEMPTS` | سقف کل تلاش‌ها، شامل ارسال اول؛ فقط عدد صحیح مثبت، پیش‌فرض `3` |
 
-تنظیمات `MONGODB_*` و `FARAZ_*` همان تنظیمات موجود پروژه هستند. برای ارسال، API Key، خط و کد پترن فراز باید تنظیم شده باشند.
+تنظیمات `MONGODB_*` و `FARAZ_*` همان تنظیمات موجود پروژه هستند. برای ارسال، API Key و شمارهٔ خط فراز باید تنظیم شده باشند.
 برای Dry Run و حالت غیرفعال، تنظیمات لینک، Secret و اعتبارنامهٔ پیامک ضروری نیستند.
 Secret را یک بار مثلاً با `python -c "import secrets; print(secrets.token_urlsafe(48))"` تولید و در `.env` قرار دهید؛ آن را ثابت نگه دارید.
 توکن Base64 URL-safe نسخهٔ ۳ از HMAC-SHA256 با همان Secret ثابت، شناسهٔ دارای نوع سفارش و نسخه ساخته می‌شود: خروجی HMAC با `urlsafe_b64encode` کدگذاری می‌شود و ۱۸ کاراکتر اول با همان حروف اصلی نگهداری می‌شوند. در این بخش ابتدایی Padding وجود ندارد. تبدیل عددی و پیمانه‌گیری حذف شده‌اند؛ شمارهٔ نمایشی سفارش و شمارنده مبنای توکن نیستند. بزرگی و کوچکی حروف و علائم در لینک، JavaScript، Body و Hash حفظ می‌شوند. همهٔ Retryهای یک سفارش با Secret و نسخهٔ ثابت دقیقاً همان لینک را می‌فرستند.
@@ -511,7 +521,7 @@ app/
     __init__.py
     sms/
       __init__.py
-      faraz.py    # ارسال پیامک پترن
+      faraz.py    # ارسال پیامک ساده به یک گیرنده
 frontend/
   index.html
   app.js          # کاتالوگ، سفارش واقعی، ثبت نهایی و رسید فقط‌خواندنی

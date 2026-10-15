@@ -43,6 +43,11 @@ ORDER_DATE_FIELD = "date_created"
 ORDER_MOBILE_FIELD = "phone"
 UTC_DATE_PATTERN = r"^([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2})(?:\.([0-9]{1,9}))?Z$"
 ORDER_INDEX = "tester_product_created"
+TESTER_SMS_TEXT = (
+    "مشتری عزیز سراد\n\n"
+    "برای تکمیل سفارش پک تستر خود، لطفاً از طریق لینک زیر اقدام فرمایید:\n\n"
+    "{link}"
+)
 
 
 class WorkerConfigurationError(ValueError):
@@ -57,7 +62,6 @@ class WorkerSettings:
     batch_size: int = 50
     sms_enabled: bool = False
     selection_base_url: str = ""
-    link_attribute: str = "link"
     token_secret: str = field(default="", repr=False)
     retry_delay_minutes: int = 5
     max_attempts: int = 3
@@ -104,13 +108,10 @@ class WorkerSettings:
             batch_size=batch_size,
             sms_enabled=enabled == "true",
             selection_base_url=os.getenv("TESTER_SELECTION_BASE_URL", "").strip().rstrip("/"),
-            link_attribute=os.getenv("TESTER_PATTERN_LINK_ATTRIBUTE", "link").strip(),
             token_secret=os.getenv("TESTER_TOKEN_SECRET", ""),
             retry_delay_minutes=retry_settings["TESTER_SMS_RETRY_DELAY_MINUTES"],
             max_attempts=retry_settings["TESTER_SMS_MAX_ATTEMPTS"],
         )
-        if not re.fullmatch(r"[a-zA-Z_][a-zA-Z0-9_]*", settings.link_attribute):
-            raise WorkerConfigurationError("TESTER_PATTERN_LINK_ATTRIBUTE must be a valid pattern variable name.")
         if require_delivery and settings.sms_enabled:
             settings.validate_delivery()
         return settings
@@ -471,10 +472,10 @@ async def exhausted_report(collections: dict, match: dict, limit: int) -> dict:
     return {"exhausted_total": total, "orders": [item async for item in records]}
 
 
-async def send_with_lease(sms, recipient, attributes, notifications, claim):
+async def send_with_lease(sms, recipient, text, notifications, claim):
     # Keep an active request leased even if reading a response takes longer than
     # one socket timeout. A dead process cannot renew; its lease will expire.
-    task = asyncio.create_task(asyncio.to_thread(sms.send_pattern, recipient=recipient, attributes=attributes))
+    task = asyncio.create_task(asyncio.to_thread(sms.send_simple, recipient=recipient, text=text))
     while True:
         done, _ = await asyncio.wait({task}, timeout=min(sms.config.timeout_seconds, 30))
         if done:
@@ -502,8 +503,8 @@ async def process_order(order: dict, collections: dict, settings: WorkerSettings
     try:
         recipient = normalize_recipient(order.get(ORDER_MOBILE_FIELD))
         link = await ensure_selection(collections["selections"], order["_id"], settings)
-        attributes = {settings.link_attribute: link}
-        sms.build_pattern_payload(recipient=recipient, attributes=attributes)
+        text = TESTER_SMS_TEXT.format(link=link)
+        sms.build_simple_payload(recipient=recipient, text=text)
     except (SmsValidationError, SmsConfigurationError):
         result = await notifications.update_one({
             "order_id": order["_id"], "status": notification["status"], "attempt_id": notification.get("attempt_id"),
@@ -514,7 +515,7 @@ async def process_order(order: dict, collections: dict, settings: WorkerSettings
     if not claim:
         return "skipped", None
     try:
-        response = await send_with_lease(sms, recipient, attributes, notifications, claim)
+        response = await send_with_lease(sms, recipient, text, notifications, claim)
     except SmsProviderError as error:
         stop_code = error.status_code if error.status_code in {401, 403, 429} else None
         try:
@@ -569,8 +570,8 @@ async def run_once(db, settings: WorkerSettings, *, limit: int | None = None,
             raise WorkerConfigurationError("FARAZ_API_URL must be a valid HTTP(S) base URL.")
         if not re.fullmatch(r"[0-9]+", sms.config.line_number):
             raise WorkerConfigurationError("FARAZ_LINE_NUMBER must contain only digits.")
-        # Validate global pattern settings without generating a token or sending.
-        sms.build_pattern_payload(recipient="09120000000", attributes={settings.link_attribute: "https://validation.invalid"})
+        # Validate the Simple SMS payload without generating a token or sending.
+        sms.build_simple_payload(recipient="09120000000", text=TESTER_SMS_TEXT.format(link="https://validation.invalid"))
         await check_indexes(collections)
         summary.update(await recover_notifications(collections, match, limit, settings))
     cursor = await collections["orders"].aggregate(

@@ -80,11 +80,11 @@ class SelectionMongoTests(unittest.IsolatedAsyncioTestCase):
         return await self.db[worker.SELECTIONS].find_one({"order_id": self.source_order["_id"]})
 
     async def test_worker_to_submission_to_readonly_and_worker_regression(self):
-        sms = FarazSmsClient(FarazSmsConfig(api_key="test", base_url="https://provider.example.test", line_number="50001", pattern_code="test"))
-        sms.send_pattern = Mock(return_value=SimpleNamespace(status_code=200, data=42))
+        sms = FarazSmsClient(FarazSmsConfig(api_key="test", base_url="https://provider.example.test", line_number="50001"))
+        sms.send_simple = Mock(return_value=SimpleNamespace(status_code=200, data=42))
         result = await worker.run_once(self.db, replace(self.config, sms_enabled=True), sms=sms)
         self.assertEqual(result["accepted"], 1)
-        self.assertEqual(sms.send_pattern.call_args.kwargs["attributes"]["link"], self.config.selection_base_url + "/" + self.token)
+        self.assertEqual(sms.send_simple.call_args.kwargs["text"], worker.TESTER_SMS_TEXT.format(link=self.config.selection_base_url + "/" + self.token))
         self.assertEqual((await self.call())[1]["order"]["phone"], "09123456789")
         self.assertEqual((await request(self.app, "/api/tester/catalog", method="GET"))[1]["total"], 498)
         pids = list(reversed(self.pids))
@@ -99,7 +99,7 @@ class SelectionMongoTests(unittest.IsolatedAsyncioTestCase):
         await worker.ensure_selection(self.db[worker.SELECTIONS], self.source_order["_id"], self.config)
         self.assertEqual(await self.selection(), saved)
         await worker.run_once(self.db, replace(self.config, sms_enabled=True), sms=sms)
-        sms.send_pattern.assert_called_once()
+        sms.send_simple.assert_called_once()
         # Owned fixtures only: receipts must survive later stock disappearance.
         await self.db.products_api.delete_many({})
         self.assertEqual((await self.call())[1]["selection"]["selected_names"], expected)

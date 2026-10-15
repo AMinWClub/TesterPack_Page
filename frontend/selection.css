@@ -22,6 +22,58 @@
 .demo-modal .submission-message { color: #8a542c; background: #faf4e9; padding: 9px 12px; border-radius: 10px; font-size: 11px; }
 .demo-modal button:focus-visible, .order-state button:focus-visible { outline: 2px solid var(--gold); outline-offset: 3px; }
 @keyframes selection-pulse { to { opacity: .55; } }
+@media (min-width: 941px) {
+  /* Keep the sticky selection box inside the viewport as the catalog grows. */
+  .selection-panel {
+    display: flex;
+    flex-direction: column;
+    max-height: min(90dvh, calc(100dvh - 44px));
+    overflow-y: auto;
+    overscroll-behavior-y: contain;
+    scrollbar-width: thin;
+    scrollbar-color: var(--gold) transparent;
+  }
+  .selection-panel .selection-top { flex-shrink: 0; padding: 16px 18px; }
+  .selection-panel .selection-title-row { margin: 8px 0 12px; }
+  .selection-panel .selection-title-row h2 { font-size: 19px; }
+  .selection-panel .selection-counter { width: 48px; height: 48px; }
+  .selection-panel .selection-counter b { font-size: 20px; }
+  .selection-panel .selection-main {
+    display: flex;
+    flex-direction: column;
+    flex: 1 1 auto;
+    min-height: 0;
+    padding: 14px 16px 12px;
+  }
+  .selection-panel .selection-subheading { flex-shrink: 0; margin-bottom: 10px; }
+  .selection-panel .selected-list {
+    flex: 1 1 auto;
+    min-height: 0;
+    max-height: none;
+    grid-template-columns: minmax(0, 1fr);
+    gap: 6px;
+    align-content: start;
+    overscroll-behavior-y: contain;
+    scrollbar-color: var(--gold) transparent;
+  }
+  .selection-panel .selected-item { min-width: 0; padding: 6px; gap: 8px; }
+  .selection-panel .selected-thumb { width: 32px; height: 34px; }
+  .selection-panel .selection-tip { flex-shrink: 0; margin-top: 10px; padding-top: 9px; }
+  .selection-panel .selection-bottom { flex-shrink: 0; padding: 12px 16px 14px; }
+  .selection-panel .finalize-btn { min-height: 44px; padding: 9px; }
+  .selection-result {
+    max-height: calc(100dvh - 64px);
+    overflow-y: auto;
+    overscroll-behavior-y: contain;
+    scrollbar-width: thin;
+    scrollbar-color: var(--gold) transparent;
+  }
+}
+/* On very short desktop windows, scroll the whole box rather than hide its list. */
+@media (min-width: 941px) and (max-height: 420px) {
+  .selection-panel .selection-main { flex-shrink: 0; }
+  .selection-panel .selected-list { flex: none; overflow: visible; }
+}
 @media (max-width: 680px) {
   .order-state { font-size: 11px; }
   .selection-result { padding: 20px 16px; margin-top: 28px; margin-bottom: 36px; }
