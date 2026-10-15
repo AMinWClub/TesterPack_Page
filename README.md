@@ -58,7 +58,7 @@ uvicorn app.main:app --reload
 ## کاتالوگ واقعی عطرها
 
 بعد از اجرای Uvicorn، صفحه را در `http://127.0.0.1:8000/` باز کنید. فایل‌های مستقل فرانت در `/frontend/` از همان FastAPI سرو می‌شوند؛ نیازی به CORS یا سرور فرانت جدا نیست.
-اطلاعات سفارش همچنان نمونه است و انتخاب‌ها فقط در حافظهٔ صفحه نگهداری می‌شوند. ثبت نهایی، احراز توکن و تغییر سفارش در این مرحله پیاده نشده‌اند.
+مسیر `/` پیش‌نمایش عمومی کاتالوگ است و امکان ثبت واقعی ندارد. مشتری باید لینک اختصاصی `/s/<token>` را باز کند تا اطلاعات واقعی سفارش و ثبت نهایی فعال شوند.
 
 | مسیر | پاسخ |
 | --- | --- |
@@ -129,6 +129,153 @@ node tests/test_catalog_frontend.cjs
 
 بررسی محلی این مرحله در ۱۴ اکتبر ۲۰۲۶: ۴۹۸ محصول واجد شرایط، ۴۹۸ Match با Fragrantica و صفر مورد بدون Match.
 برای هر ۴۹۸ محصول، URL معتبر تصویر اصلی موجود بود. حجم JSON حدود ۲۳۷ KiB و پاسخ GZip حدود ۳۹ KiB بود. اولین درخواست HTTP روی Loopback پس از راه‌اندازی حدود ۲۷۸ میلی‌ثانیه و میانهٔ ۲۰ Cache Hit حدود ۱۲ میلی‌ثانیه اندازه‌گیری شد؛ این اعداد Benchmark همین محیط هستند.
+
+## انتخاب واقعی سفارش و لینک پیامک
+
+Worker همان توکن HMAC قبلی را می‌سازد و `https://your-domain.example/s/<token>` را پیامک می‌کند. مقدار `TESTER_SELECTION_BASE_URL` باید `https://your-domain.example/s` باشد. مسیر `/s/{token}` همان HTML ثابت را سرو می‌کند؛ CSS/JS و لوگو مسیر مطلق دارند و Refresh نیز کار می‌کند. HTML شامل اطلاعات مشتری یا توکن تعبیه‌شده نیست.
+
+API توکن را دوباره تولید نمی‌کند: فرمت `[A-Za-z0-9_-]{24}` بررسی، SHA256 محاسبه و Selection با `token_hash` پیدا می‌شود. ارتباط سفارش فقط با `order_id` از نوع اصلی `ObjectId` است. `id` مانند `OR0000087510` فقط برای نمایش استفاده می‌شود. نسخه و وضعیت Selection و وجود سفارش بررسی می‌شوند. فیلتر محصول/تاریخ دقیقاً از Worker استفاده می‌شود و فقط شرط `sms_sent` حذف می‌شود. Cutoff، Secret، پرداخت، Notification و Retry پیامک تغییر نکرده‌اند. API برای سفارش تاریخی Selection ایجاد نمی‌کند.
+
+### قرارداد Context و Submit
+
+توکن فقط در Body JSON است؛ آن را در Query یا URL API نفرستید.
+
+```http
+POST /api/tester/selection/context
+Content-Type: application/json
+
+{"token":"<24-character-token>"}
+```
+
+پاسخ موفق:
+
+```json
+{
+  "order": {
+    "id": "OR0000087510",
+    "customer_name": "احمد فرجی",
+    "phone": "09123456789",
+    "tester_count": 10
+  },
+  "selection": {"status": "pending", "selected_pids": [], "selected_names": []}
+}
+```
+
+نام و نام خانوادگی Trim و با یک فاصله به هم متصل می‌شوند. موبایل کامل، با نرمال‌سازی فعلی شماره، در UI با جهت LTR نمایش داده می‌شود. آدرس، پرداخت، Tracking، ObjectId، Hash و اطلاعات داخلی برگردانده نمی‌شوند.
+
+```http
+POST /api/tester/selection/submit
+Content-Type: application/json
+
+{"token":"<24-character-token>","pids":["1001","1002","1003","1004","1005","1006","1007","1008","1009","1010"]}
+```
+
+PIDهای بالا نمونه‌اند؛ Body فقط `token` و ۱۰ PID رشته‌ایِ متمایز دارد. نامی از فرانت پذیرفته نمی‌شود. قبل از پذیرش Intent، یک Query تازه روی `products_api` با همان فیلتر، ترتیب `vol_idx` و سقف ۴۹۸ اجرا می‌شود؛ کش کاتالوگ مبنای ثبت نیست. محصول ناموجود، خارج از ۴۹۸ عضو فعلی، PID مبهم یا نام خالی/غیررشته‌ای باعث رد کل ثبت می‌شود.
+
+`recommended_products` دقیقاً از ۱۰ مقدار اصلی `products_api.name` به ترتیب PIDهای ارسال‌شده ساخته می‌شود. فاصله‌ها، متن انگلیسی و نام کامل منبع حفظ می‌شوند؛ نام Fragrantica، ترجمه و خلاصه‌سازی جایگزین آن نمی‌شوند. پاسخ Submit موفق همان قرارداد Context با `status: submitted`، `selected_pids` و `selected_names` ده‌عضوی است.
+
+| HTTP | رفتار |
+| --- | --- |
+| `200` | Context معتبر، ثبت موفق یا بازیابی همان ثبت |
+| `400` | فرمت توکن یا JSON/کلیدهای درخواست نامعتبر |
+| `404` | Selection/سفارش ناموجود، خارج از Cutoff یا لینک نامعتبر |
+| `409` | انتخاب متفاوت پس از Intent، فیلد قبلی سفارش، محصول ناموجود یا داده ناسازگار |
+| `413` | Body بزرگ‌تر از ۸ KiB |
+| `422` | تعداد نامعتبر، PID تکراری یا PID با نوع/فرمت نامعتبر |
+| `429` | درخواست‌های بیش از حد؛ همراه `Retry-After` |
+| `503` | خطای موقت MongoDB یا تنظیمات ناقص سرویس |
+
+خطا به شکل `{"detail":{"code":"...","message":"پیام فارسی"}}` است و دادهٔ مشتری، ورودی توکن یا خطای خام دیتابیس را شامل نمی‌شود. موجودبودن `recommended_products` حتی با مقدار `null`، آرایهٔ خالی یا نام‌های یکسان مانع بازنویسی است. سفارش دارای فیلد قدیمی بدون شناسهٔ ثبت این سیستم، خطای کنترل‌شدهٔ `already_selected` می‌گیرد و خودکار مهاجرت یا تعمیر نمی‌شود.
+
+### ثبت اتمیک، Idempotency و Recovery
+
+سه وضعیت در همان `tester_selections` استفاده می‌شوند:
+
+| وضعیت | معنی |
+| --- | --- |
+| `pending` | هنوز Intent ثبت نشده؛ انتخاب‌های صفحه قابل تغییرند |
+| `submitting` | یک Intent معتبر، ثابت و قابل ادامه ثبت شده است |
+| `submitted` | هر دو سند سازگارند و انتخاب‌ها برای همیشه فقط‌خواندنی‌اند |
+
+بعد از اعتبارسنجی تازه، عملیات شرطی اتمیک `pending → submitting` فقط به یک درخواست اجازهٔ ثبت Intent می‌دهد. Intent شامل `submission_id`، ۱۰ `selected_pids`، ۱۰ `selected_names` و زمان‌هاست؛ درخواست دیگر نمی‌تواند آن را جایگزین کند. همین Intent نقطهٔ پذیرش انتخاب‌های اعتبارسنجی‌شده است و در Recovery همان snapshot ادامه پیدا می‌کند؛ موجودی رزرو یا کم نمی‌شود.
+
+سپس سفارش فقط با `_id` واقعی، همان شرایط محصول/تاریخ، و شرط `recommended_products: {$exists: false}` و نبود Marker نوشته می‌شود. در یک Update اتمیک، فقط دو فیلد لازم اضافه می‌شوند:
+
+```text
+recommended_products: [10 exact source names]
+tester_selection_submission_id: <same submission_id>
+```
+
+Marker برای تشخیص ثبت همین Intent از آرایهٔ قدیمیِ احتمالا یکسان لازم است. پس از تأیید تطابق Marker و تمام نام‌ها، Selection به `submitted` تغییر می‌کند. اطلاعات نهایی:
+
+```text
+order_id: ObjectId (unchanged)
+token_hash / token_version / created_at: unchanged
+status: submitted
+submission_id: unique intent identifier
+selected_pids: [10 strings in customer order]
+selected_names: [10 exact products_api.name strings]
+submitting_at / submitted_at / updated_at: UTC datetime
+```
+
+اگر قبل از نوشتن سفارش Crash رخ دهد، Context یا Submit همان Intent را ادامه می‌دهد؛ Lease و پاک‌سازی زمان‌دار لازم نیست. اگر نوشتن سفارش موفق شد ولی پاسخ آن یا نهایی‌کردن Selection از دست رفت، Marker و اسامی از دیتابیس خوانده می‌شوند و فقط Selection تکمیل می‌شود. Intent متفاوت `409` می‌گیرد. Retry همان ۱۰ PID با همان ترتیب، پاسخ موفق قبلی را بازمی‌گرداند. Intent و سفارش ناسازگار خودکار بازنویسی نمی‌شوند و نیاز به بررسی دارند.
+
+این روش به Transaction وابسته نیست و روی Standalone نیز کار می‌کند. Write Concern همان `majority` فعلی Worker است. ایندکس‌های یکتای `order_id` و `token_hash` فعلی حفظ می‌شوند؛ Collection، Worker، Queue یا Migration جدیدی وجود ندارد. `ensure_selection` همچنان فقط `$setOnInsert` دارد و Selection ثبت‌شده را Reset نمی‌کند.
+
+فرانت پیش از ثبت، فهرست ۱۰ نام را برای مرور نشان می‌دهد. هنگام ارسال، تغییر انتخاب‌ها و کلیک مجدد قفل می‌شوند. در خطای شبکه موفقیت حدس زده نمی‌شود؛ Context وضعیت واقعی را بررسی/بازیابی می‌کند. اگر آن هم در دسترس نبود، وضعیت نامشخص باقی می‌ماند و Retry فقط همان PIDهای ثابت را می‌فرستد. پس از موفقیت یا بازکردن دوباره لینک، رسید از نام‌های ذخیره‌شده نمایش داده می‌شود، حتی اگر محصول بعداً ناموجود باشد؛ کاتالوگ زنده برای نمایش رسید لازم نیست.
+
+### امنیت و استقرار
+
+- لینک نقش Bearer Credential دارد و صاحب لینک شمارهٔ موبایل کامل سفارش را می‌بیند؛ آن را محرمانه نگه دارید. Secret فعلی Worker را تغییر ندهید و API به تولید مجدد توکن وابسته نیست.
+- در Production، TLS/HTTPS را در Reverse Proxy فعال کنید. مسیرهای `/s/`، `/api/` و `/frontend/` را با همان Origin به FastAPI برسانید. درخواست مستقیم `/s/<token>` باید به برنامه برسد؛ صرفاً فایل‌های فرانت را روی یک هاست جدا کپی نکنید.
+- صفحات و APIهای اختصاصی `Cache-Control: no-store`، `Referrer-Policy: no-referrer` و `X-Robots-Tag` دارند. Metaهای متناظر و CSP محدود به اسکریپت‌های خود پروژه نیز فعال‌اند. اطلاعات مشتری وارد کش کاتالوگ یا Storage مرورگر نمی‌شود.
+- توکن خام در لاگ برنامه نیست و Access Log استاندارد Uvicorn مسیر `/s/[redacted]` را ثبت می‌کند. در Proxy/CDN/APM هم ثبت URL اختصاصی و Body این APIها را غیرفعال کنید؛ Analytics و Session Replay روی صفحهٔ مشتری نصب نکنید.
+- برای Nginx، `access_log off;` را در Location مخصوص `/s/` بگذارید، کش مسیرهای اختصاصی و ثبت Body را خاموش کنید و `Referrer-Policy` را Override نکنید. HSTS را روی دامنهٔ HTTPS تنظیم کنید. لاگ‌های دیگر مانند Error Log، WAF و سرویس مانیتورینگ نیز نباید مسیر دارای توکن را ثبت کنند.
+- Rate Limit ساده و محدود در حافظه، پیش‌فرض ۶۰ Context/Submit در دقیقه برای هر IP و هر Process است. سقف با `TESTER_SELECTION_RATE_LIMIT_PER_MINUTE` از ۱ تا ۱۰۰۰ تنظیم می‌شود؛ Body حداکثر ۸ KiB است. این محدودسازی توزیع‌شده نیست. پشت Proxy فقط آدرس Proxyهای مورداعتماد را در `--forwarded-allow-ips` مجاز کنید تا IP مشتری درست و غیرقابل جعل باشد.
+
+تنظیمات جدید فقط `TESTER_SELECTION_RATE_LIMIT_PER_MINUTE=60` است. `MONGODB_*`، `TESTER_ORDERS_COLLECTION`، `TESTER_PACK_PRODUCT_ID` و `TESTER_SMS_START_AT` موجود برای API نیز استفاده می‌شوند. برای نصب صرفاً کاتالوگ بدون تنظیمات معتبر Worker، برنامه بالا می‌آید ولی Context/Submit با `503` غیرفعال‌اند. پیکربندی فراز و `TESTER_SMS_ENABLED` فقط ارسال Worker را کنترل می‌کنند.
+
+پس از تنظیم `.env` و ایندکس‌های موجود با `python -m app.workers.tester_sms --create-indexes`، وب‌سرور Production را پشت HTTPS اجرا کنید؛ `--reload` فقط برای توسعه است:
+
+```shell
+uvicorn app.main:app --host 127.0.0.1 --port 8000
+```
+
+### تست فلو بدون پیامک واقعی
+
+Unit/ASGI و Regression توکن Worker:
+
+```shell
+python -m unittest tests.test_selections -v
+python -m unittest discover -s tests -v
+```
+
+Integration واقعی در دیتابیس موقت `tester_selection_it_<uuid>`؛ تمام سفارش‌ها و محصولات ساختگی و SMSها Mock هستند:
+
+```powershell
+$env:TESTER_RUN_SELECTION_INTEGRATION = "1"
+python -m unittest tests.test_selections_integration -v
+Remove-Item Env:TESTER_RUN_SELECTION_INTEGRATION
+```
+
+در Linux: `TESTER_RUN_SELECTION_INTEGRATION=1 python -m unittest tests.test_selections_integration -v`.
+این تست‌ها شامل Worker تا ثبت نهایی، موجودی تازه، سقف ۴۹۸، ثبت هم‌زمان، عدم بازنویسی، قطع کلاینت واقعی MongoDB، Crash و بازیابی هر دو سند هستند. روی سفارش‌های واقعی هیچ تست ثبت انجام ندهید.
+
+برای تست دستی و مرورگر، سرور کاملاً ایزولهٔ زیر را به جای وب‌سرور اصلی اجرا کنید:
+
+```shell
+python -m tests.selection_preview --port 8789
+```
+
+این ابزار فقط به `127.0.0.1` گوش می‌دهد، دیتابیس `tester_selection_preview_<uuid>` و سفارش‌های آزمایشی می‌سازد و هیچ SMS ارسال نمی‌کند. لینک‌های آزمایشی در `test-artifacts/selection-preview.json` هستند؛ یکی از `fixtures.*.path` را روی `http://127.0.0.1:8789` باز کنید. پس از تست، با خاموش‌شدن عادی سرور همان دیتابیس پاک می‌شود. اگر فرایند را اجباری Kill کردید، فقط دیتابیس موقت با نام دقیق ثبت‌شده در این فایل را پس از توقف سرور پاک کنید.
+
+در ترمینال دوم با Node 22+ و Chromium/Edge نصب‌شده:
+
+```shell
+node tests/test_selection_frontend.cjs
+```
+
+هر اجرای کامل تست مرورگر به Preview تازه نیاز دارد. تست شامل سفارش واقعی در دیتابیس ایزوله، مرور/ثبت ۱۰ انتخاب، شمارهٔ کامل، Modal، دوبارکلیک، بازگشایی فقط‌خواندنی، پاسخ موفق گم‌شده، شبکهٔ نامشخص، محصول ناموجود، لینک نامعتبر، امنیت Header/Referer و عرض‌های ۳۲۰/۳۹۰/۷۶۸/۱۴۴۰ است. تصاویر و گزارش در `test-artifacts/selection/` ذخیره می‌شوند. مسیر مرورگر با `CATALOG_BROWSER_PATH` قابل تنظیم است.
 
 ## سرویس پیامک پترن فرازSMS
 
@@ -209,7 +356,7 @@ Notificationهای `accepted`، `exhausted` و خطای دائمی داده دو
 تنظیمات `MONGODB_*` و `FARAZ_*` همان تنظیمات موجود پروژه هستند. برای ارسال، API Key، خط و کد پترن فراز باید تنظیم شده باشند.
 برای Dry Run و حالت غیرفعال، تنظیمات لینک، Secret و اعتبارنامهٔ پیامک ضروری نیستند.
 Secret را یک بار مثلاً با `python -c "import secrets; print(secrets.token_urlsafe(48))"` تولید و در `.env` قرار دهید؛ آن را ثابت نگه دارید.
-هر توکن ۲۴ کاراکتری از HMAC-SHA256 با شناسهٔ دارای نوع سفارش و نسخهٔ توکن ساخته می‌شود. در `tester_selections` فقط Hash توکن، شناسهٔ سفارش، نسخه، وضعیت و زمان ایجاد نگهداری می‌شود.
+هر توکن ۲۴ کاراکتری از HMAC-SHA256 با شناسهٔ دارای نوع سفارش و نسخهٔ توکن ساخته می‌شود. Worker در `tester_selections` فقط Hash توکن، شناسهٔ سفارش، نسخه، وضعیت اولیه و زمان ایجاد را درج می‌کند؛ API ثبت نهایی، اطلاعات Intent و انتخاب‌ها را به همان سند اضافه می‌کند.
 ناسازگاری Secret با Selection موجود، خطای سراسری تنظیمات است؛ Worker پیش از ارسال آن سفارش متوقف می‌شود و Notification را به `failed` دائمی تغییر نمی‌دهد. Secret اصلی را بازگردانید و اجرا را تکرار کنید.
 
 تاریخ پیش‌فرض `2026-10-14T00:00:00+03:30` برابر با `2026-10-13T20:30:00Z` است.
@@ -337,6 +484,8 @@ app/
   main.py         # برنامه، Lifespan و health
   catalog.py      # Query دسته‌ای، کش و API کاتالوگ
   catalog_labels.py # نگاشت و خلاصه‌سازی فارسی
+  selections.py   # Context، ثبت اتمیک و Recovery انتخاب سفارش
+  selection_security.py # هدرهای خصوصی، Rate Limit و Redact لاگ
   workers/
     __init__.py
     tester_sms.py # Worker مستقل و یک‌نوبتی
@@ -347,10 +496,11 @@ app/
       faraz.py    # ارسال پیامک پترن
 frontend/
   index.html
-  app.js          # کاتالوگ API، جست‌وجوی محلی و انتخاب‌های حافظه‌ای
+  app.js          # کاتالوگ، سفارش واقعی، ثبت نهایی و رسید فقط‌خواندنی
   styles.css
   perfume-details.css
   catalog.css     # فقط حالت‌های بارگذاری/خطا
+  selection.css   # وضعیت سفارش، تأیید نهایی و رسید
   assets/
     perfume-placeholder.svg
 tests/
@@ -358,6 +508,10 @@ tests/
   test_catalog.py
   test_catalog_integration.py
   test_catalog_frontend.cjs
+  test_selections.py
+  test_selections_integration.py
+  test_selection_frontend.cjs
+  selection_preview.py
   test_sms_faraz.py
   test_tester_sms_worker.py
   test_tester_sms_integration.py

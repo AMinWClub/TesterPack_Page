@@ -5,7 +5,9 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <meta name="theme-color" content="#06277e" />
-  <meta name="description" content="پیش‌نمایش صفحه انتخاب عطرهای پک تستر سوراد" />
+  <meta name="description" content="انتخاب عطرهای پک تستر سوراد" />
+  <meta name="referrer" content="no-referrer" />
+  <meta name="robots" content="noindex, nofollow, noarchive" />
   <title>انتخاب تسترهای شما | SORRAD</title>
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
@@ -14,6 +16,7 @@
   <link rel="stylesheet" href="/frontend/styles.css" />
   <link rel="stylesheet" href="/frontend/perfume-details.css" />
   <link rel="stylesheet" href="/frontend/catalog.css" />
+  <link rel="stylesheet" href="/frontend/selection.css" />
   <script src="/frontend/app.js" defer></script>
 </head>
 
@@ -89,7 +92,7 @@
         </ol>
       </section>
 
-      <section class="order-card" aria-labelledby="orderTitle">
+      <section class="order-card" aria-labelledby="orderTitle" aria-busy="true">
         <div class="order-intro"><span class="order-intro-icon"><svg class="ico">
               <use href="#i-shield" />
             </svg></span>
@@ -98,15 +101,24 @@
             <p>برای اطمینان، اطلاعات سفارشت رو بررسی کن.</p>
           </div>
         </div>
-        <div class="order-fields">
-          <div class="order-field"><span>سفارش‌دهنده</span><strong>نیلوفر احمدی</strong></div>
-          <div class="order-field"><span>شماره سفارش</span><strong class="latin">SR-20482</strong></div>
-          <div class="order-field"><span>شماره همراه</span><strong class="latin" dir="ltr">0912••••421</strong></div>
+        <div class="order-state" id="orderState" role="status" aria-live="polite">در حال بررسی لینک سفارش…</div>
+        <div class="order-fields" id="orderFields" hidden>
+          <div class="order-field"><span>سفارش‌دهنده</span><strong id="orderCustomerName">—</strong></div>
+          <div class="order-field"><span>شماره سفارش</span><strong class="latin" id="orderNumber">—</strong></div>
+          <div class="order-field"><span>شماره همراه</span><strong class="latin" dir="ltr" id="orderPhone">—</strong></div>
           <div class="order-field order-field-last"><span>تعداد تستر</span><strong><b
                 class="gold-number">۱۰</b> رایحه</strong></div>
         </div>
       </section>
     </div>
+
+    <section class="wrap selection-result" id="submittedSelection" aria-labelledby="submittedTitle" hidden>
+      <div class="section-kicker"><span></span> YOUR DISCOVERY BOX</div>
+      <h2 id="submittedTitle" tabindex="-1">انتخاب‌های شما با موفقیت ثبت شد.</h2>
+      <p>۱۰ عطر انتخابی شما برای آماده‌سازی پک تستر ثبت شدند. از همراهی شما با سوراد سپاسگزاریم.</p>
+      <ol class="submitted-list" id="submittedList"></ol>
+      <p class="selection-locked-note">این انتخاب‌ها نهایی شده‌اند و امکان ویرایش یا ثبت دوباره ندارند.</p>
+    </section>
 
     <div class="wrap page-layout" id="collection">
       <section class="catalog" aria-labelledby="catalogTitle">
@@ -156,7 +168,7 @@
         </div>
         <div class="catalog-footnote"><svg class="ico">
             <use href="#i-info" />
-          </svg><span>اطلاعات عطرها از کاتالوگ موجود دریافت می‌شوند؛ اطلاعات سفارش فعلاً نمایشی است.</span></div>
+          </svg><span>موجودی عطرها هنگام تأیید نهایی دوباره بررسی می‌شود.</span></div>
       </section>
 
       <aside class="selection-aside" aria-label="پنل انتخاب تسترها">
@@ -235,10 +247,12 @@
         <use href="#i-check" />
       </svg></div>
     <div class="section-kicker"><span></span> A PERFECT DISCOVERY <span></span></div>
-    <h2 id="modalTitle">انتخاب‌هات تکمیل شد!</h2>
-    <p>هر ۱۰ رایحه رو انتخاب کردی. انتخاب‌ها فعلاً فقط در همین صفحه نگهداری می‌شوند؛ هنوز چیزی برای سفارش ثبت یا ارسال نشده.</p>
-    <div class="modal-selected" id="modalSelected"></div><button id="modalDone" type="button" class="modal-done">بازگشت
-      به انتخاب‌ها</button>
+    <h2 id="modalTitle">مرور نهایی انتخاب‌ها</h2>
+    <p id="modalDescription">این ۱۰ عطر برای پک تستر شما ثبت می‌شوند. پس از تأیید، امکان تغییر انتخاب‌ها وجود ندارد.</p>
+    <ol class="modal-selected" id="modalSelected"></ol>
+    <p class="submission-message" id="submissionMessage" role="status" aria-live="polite" hidden></p>
+    <button id="modalDone" type="button" class="modal-done">تأیید و ثبت نهایی</button>
+    <button id="modalBack" type="button" class="modal-back">بازگشت و ویرایش</button>
   </div>
   <dialog class="pd-dialog" id="perfumeDialog" aria-labelledby="perfumeTitle">
     <div class="pd-shell">

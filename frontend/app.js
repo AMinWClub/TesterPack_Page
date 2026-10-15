@@ -1,4 +1,4 @@
-/** Real catalog; order information is still a demo and selections stay in memory. */
+/** Real catalog and token-linked order selection; tokens stay out of API URLs. */
 const MAX_TESTERS = 10;
 const PAGE_SIZE = 24;
 let PERFUMES = [];
@@ -24,6 +24,17 @@ let catalogLoading = false;
 let visibleCount = PAGE_SIZE;
 let filteredProducts = [];
 const PLACEHOLDER = '/frontend/assets/perfume-placeholder.svg';
+const isSelectionPage = location.pathname.startsWith('/s/');
+const selectionToken = (() => {
+  try { return isSelectionPage ? decodeURIComponent(location.pathname.split('/')[2] || '') : ''; }
+  catch { return ''; }
+})();
+let selectionState = isSelectionPage ? 'loading' : 'preview';
+let submitBusy = false;
+let contextBusy = false;
+let submissionPids = null;
+let submittedNames = [];
+const canEditSelection = () => ['pending', 'preview'].includes(selectionState) && !submitBusy;
 
 function escapeHtml(str) {
   return String(str ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
@@ -53,14 +64,19 @@ const selectedHas = pid => selected.includes(String(pid));
 function getProduct(pid) { return productsByPid.get(String(pid)); }
 function displayName(item) { return String(item.name || '').split('|')[0].trim(); }
 
-async function apiJson(url) {
+async function apiJson(url, options = {}) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 15000);
   try {
-    const response = await fetch(url, { signal: controller.signal, headers: { Accept: 'application/json' } });
+    const response = await fetch(url, { ...options, signal: controller.signal, cache: 'no-store', headers: { Accept: 'application/json', ...options.headers } });
     if (!response.ok) {
       const error = new Error('API request failed');
       error.status = response.status;
+      try {
+        const body = await response.json();
+        error.code = body.detail?.code;
+        if (typeof body.detail?.message === 'string') error.message = body.detail.message;
+      } catch { /* Keep the generic error if the response is not JSON. */ }
       throw error;
     }
     return await response.json();
@@ -116,7 +132,7 @@ async function loadCatalog() {
 
 function cardTemplate(item) {
   const isSelected = selectedHas(item.pid);
-  const isFull = (selected.length >= MAX_TESTERS || unavailablePids.has(item.pid)) && !isSelected;
+  const isFull = !canEditSelection() || ((selected.length >= MAX_TESTERS || unavailablePids.has(item.pid)) && !isSelected);
   return `<article class="product-card ${isSelected ? 'is-selected' : ''}" data-id="${escapeHtml(item.pid)}" tabindex="0" aria-haspopup="dialog" aria-controls="perfumeDialog" aria-label="مشاهده جزئیات ${escapeHtml(item.name)}">
     <div class="product-visual">
       ${unavailablePids.has(item.pid) ? '<span class="product-tag">ناموجود</span>' : ''}
@@ -170,7 +186,7 @@ function selectedRowTemplate(item) {
   return `<div class="selected-item">
     <div class="selected-thumb">${productImage(item)}</div>
     <div class="selected-info"><strong>${escapeHtml(displayName(item))}</strong><span dir="auto">${escapeHtml(item.brand || 'برند نامشخص')}</span></div>
-    <button type="button" class="remove-selected" data-remove="${escapeHtml(item.pid)}" aria-label="حذف ${escapeHtml(item.name)} از انتخاب‌ها"><svg class="ico"><use href="#i-x"/></svg></button>
+    <button type="button" class="remove-selected" data-remove="${escapeHtml(item.pid)}" ${canEditSelection() ? '' : 'disabled'} aria-label="حذف ${escapeHtml(item.name)} از انتخاب‌ها"><svg class="ico"><use href="#i-x"/></svg></button>
   </div>`;
 }
 
@@ -188,8 +204,9 @@ function renderSelection() {
   $('#remainingLabel').textContent = n === MAX_TESTERS ? 'جعبه تکمیل شد ✦' : `${farsiNumber(remaining)} جای خالی`;
   $('#mobileRemaining').textContent = n === MAX_TESTERS ? 'آماده مرور انتخاب‌ها' : `${farsiNumber(remaining)} انتخاب باقی‌مانده`;
   $('#finalizeHint').textContent = n === MAX_TESTERS ? 'عالی! هر ۱۰ رایحه رو انتخاب کردی.' : `برای ادامه، ${farsiNumber(remaining)} عطر دیگه انتخاب کن.`;
-  $('#finalizeButton').disabled = n !== MAX_TESTERS;
-  $('#mobileFinalize').disabled = n !== MAX_TESTERS;
+  $('#finalizeButton').disabled = n !== MAX_TESTERS || selectionState !== 'pending' || submitBusy;
+  $('#mobileFinalize').disabled = $('#finalizeButton').disabled;
+  if (selectionState === 'preview') $('#finalizeHint').textContent = 'برای ثبت واقعی، لینک اختصاصی پیامک را باز کنید.';
   $('#selectedList').innerHTML = selectedListTemplate();
   $('#drawerContent').innerHTML = `<div class="selection-subheading"><strong>رایحه‌های انتخاب‌شده</strong><span>${farsiNumber(remaining)} جای خالی</span></div><div class="selected-list">${selectedListTemplate()}</div>`;
   $('#progressTrack').innerHTML = Array.from({ length: MAX_TESTERS }, (_, i) => `<span class="${i < n?'active':''}"></span>`).join('');
@@ -207,6 +224,7 @@ function showToast(message) {
 }
 
 function toggleProduct(id) {
+  if (!canEditSelection()) return;
   id = String(id);
   const item = getProduct(id);
   if (!item) return;
@@ -311,7 +329,7 @@ function syncPerfumeSelection() {
   if (!$('#perfumeDialog').open || perfumeId === null) return;
   const item = getProduct(perfumeId);
   const isSelected = selectedHas(perfumeId);
-  const full = (selected.length >= MAX_TESTERS || unavailablePids.has(perfumeId)) && !isSelected;
+  const full = !canEditSelection() || ((selected.length >= MAX_TESTERS || unavailablePids.has(perfumeId)) && !isSelected);
   const button = $('#perfumeSelect');
   button.disabled = full;
   button.classList.toggle('is-selected', isSelected);
@@ -418,10 +436,16 @@ function closeDrawer() {
   lastFocus?.focus?.();
 }
 function openModal() {
-  if (selected.length !== MAX_TESTERS) return;
+  if (selected.length !== MAX_TESTERS || selectionState !== 'pending' || submitBusy) return;
   if ($('#mobileDrawer').classList.contains('is-open')) closeDrawer();
   lastFocus = document.activeElement;
-  $('#modalSelected').innerHTML = selected.map(id => `<span>${escapeHtml(getProduct(id).name)}</span>`).join('');
+  $('#modalSelected').innerHTML = selected.map(id => `<li>${escapeHtml(getProduct(id).name)}</li>`).join('');
+  $('#modalTitle').textContent = 'مرور نهایی انتخاب‌ها';
+  $('#modalDescription').textContent = 'این ۱۰ عطر برای پک تستر شما ثبت می‌شوند. پس از تأیید، امکان تغییر انتخاب‌ها وجود ندارد.';
+  $('#modalDone').textContent = 'تأیید و ثبت نهایی';
+  $('#modalDone').disabled = false;
+  $('#modalBack').hidden = false;
+  $('#submissionMessage').hidden = true;
   $('#modalBackdrop').hidden = false;
   const modal = $('#demoModal');
   modal.inert = false;
@@ -430,12 +454,14 @@ function openModal() {
   $('#closeModal').focus();
 }
 function closeModal() {
+  if (submitBusy) return;
   $('#modalBackdrop').hidden = true;
   const modal = $('#demoModal');
   modal.inert = true;
   modal.setAttribute('aria-hidden','true');
   document.body.style.overflow = '';
-  lastFocus?.focus?.();
+  if (selectionState === 'submitted') $('#submittedTitle').focus({preventScroll:true});
+  else lastFocus?.focus?.();
 }
 
 $('#productGrid').addEventListener('click', e => {
@@ -524,7 +550,8 @@ $('#drawerBackdrop').addEventListener('click', closeDrawer);
 $('#finalizeButton').addEventListener('click', openModal);
 $('#mobileFinalize').addEventListener('click', openModal);
 $('#closeModal').addEventListener('click', closeModal);
-$('#modalDone').addEventListener('click', closeModal);
+$('#modalDone').addEventListener('click', () => selectionState === 'submitted' ? closeModal() : submitSelection());
+$('#modalBack').addEventListener('click', closeModal);
 $('#modalBackdrop').addEventListener('click', closeModal);
 document.addEventListener('keydown', event => {
   if (event.key !== 'Escape') return;
@@ -553,5 +580,142 @@ document.addEventListener('error', event => {
   img.src = PLACEHOLDER;
   img.alt = 'تصویر عطر موجود نیست';
 }, true);
+$('#orderState').addEventListener('click', event => {
+  if (event.target.closest('#retrySelectionContext')) loadSelectionContext();
+});
+$('#demoModal').addEventListener('keydown', event => {
+  if (event.key !== 'Tab') return;
+  const controls = $$('button:not(:disabled):not([hidden])', $('#demoModal'));
+  if (!controls.length) { event.preventDefault(); return; }
+  const first = controls[0], last = controls.at(-1);
+  if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
+  else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
+});
+
+function selectionApi(action, extra = {}) {
+  return apiJson(`/api/tester/selection/${action}`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ token: selectionToken, ...extra }),
+  });
+}
+
+function updateSelectionPage() {
+  const browsing = ['pending', 'submitting', 'uncertain', 'preview'].includes(selectionState);
+  $('#collection').hidden = !browsing;
+  $('#mobileSelectionBar').hidden = !browsing;
+  $('#submittedSelection').hidden = selectionState !== 'submitted';
+  $('.order-card').setAttribute('aria-busy', String(selectionState === 'loading'));
+  $('#orderFields').hidden = ['loading', 'error', 'preview'].includes(selectionState);
+  $('#orderState').hidden = ['pending', 'submitted', 'submitting'].includes(selectionState);
+  $('#headerCount').disabled = !browsing;
+  renderSelection();
+  renderCatalog(false);
+}
+
+function applySelectionContext(data) {
+  if (!data.order || !['pending', 'submitted'].includes(data.selection?.status)
+      || data.order.tester_count !== MAX_TESTERS || typeof data.order.customer_name !== 'string'
+      || typeof data.order.phone !== 'string' || typeof data.order.id !== 'string') throw new Error('Invalid context');
+  const status = data.selection.status;
+  if (status === 'submitted' && (!Array.isArray(data.selection.selected_names) || data.selection.selected_names.length !== MAX_TESTERS
+      || !data.selection.selected_names.every(name => typeof name === 'string' && name.trim())
+      || !Array.isArray(data.selection.selected_pids) || data.selection.selected_pids.length !== MAX_TESTERS)) throw new Error('Invalid receipt');
+  $('#orderCustomerName').textContent = data.order.customer_name;
+  $('#orderNumber').textContent = data.order.id;
+  $('#orderPhone').textContent = data.order.phone;
+  selectionState = status;
+  submissionPids = null;
+  if (status === 'submitted') {
+    submittedNames = [...data.selection.selected_names];
+    selected.splice(0, selected.length, ...data.selection.selected_pids);
+    // The receipt uses immutable saved names, independent of later catalog stock.
+    data.selection.selected_pids.forEach((pid, i) => productsByPid.set(pid, { pid, name: submittedNames[i] }));
+    $('#submittedList').innerHTML = submittedNames.map(name => `<li>${escapeHtml(name)}</li>`).join('');
+  }
+  updateSelectionPage();
+}
+
+async function loadSelectionContext() {
+  if (contextBusy || submitBusy) return;
+  contextBusy = true;
+  const recovering = selectionState === 'uncertain';
+  if (!recovering) selectionState = 'loading';
+  $('#orderState').textContent = 'در حال بررسی وضعیت سفارش…';
+  updateSelectionPage();
+  try {
+    const data = await selectionApi('context');
+    applySelectionContext(data);
+    if (selectionState === 'pending' && catalogState !== 'ready') await loadCatalog();
+  } catch (error) {
+    selectionState = recovering ? 'uncertain' : 'error';
+    const message = error.message === 'API request failed' || !error.status
+      ? 'ارتباط با سرویس برقرار نشد. لطفاً دوباره وضعیت سفارش را بررسی کنید.' : error.message;
+    $('#orderState').innerHTML = `<strong>${recovering ? 'وضعیت ثبت هنوز مشخص نیست' : 'دریافت سفارش ممکن نشد'}</strong><p>${escapeHtml(message)}</p>
+      <button type="button" id="retrySelectionContext">بررسی دوباره</button>`;
+    updateSelectionPage();
+  } finally { contextBusy = false; }
+}
+
+function showSubmissionSuccess() {
+  $('#modalTitle').textContent = 'انتخاب‌های شما با موفقیت ثبت شد.';
+  $('#modalDescription').textContent = '۱۰ عطر انتخابی شما برای آماده‌سازی پک تستر ثبت شدند. از همراهی شما با سوراد سپاسگزاریم.';
+  $('#modalSelected').innerHTML = submittedNames.map(name => `<li>${escapeHtml(name)}</li>`).join('');
+  $('#modalDone').textContent = 'مشاهده انتخاب‌های ثبت‌شده';
+  $('#modalBack').hidden = true;
+  $('#submissionMessage').hidden = true;
+}
+
+async function submitSelection() {
+  if (submitBusy || !isSelectionPage || !['pending', 'uncertain'].includes(selectionState) || selected.length !== MAX_TESTERS) return;
+  submissionPids = submissionPids || [...selected];
+  submitBusy = true;
+  selectionState = 'submitting';
+  $('#modalDone').disabled = true;
+  $('#modalDone').textContent = 'در حال ثبت انتخاب‌ها…';
+  $('#closeModal').disabled = true;
+  $('#modalBack').disabled = true;
+  $('#submissionMessage').hidden = true;
+  updateSelectionPage();
+  try {
+    const result = await selectionApi('submit', { pids: submissionPids });
+    if (result.selection?.status !== 'submitted') throw new Error('Unknown submission result');
+    applySelectionContext(result);
+    showSubmissionSuccess();
+  } catch (error) {
+    // A lost response is never interpreted as success. Ask the server to resume
+    // its saved intent or report pending, then allow changes only when confirmed.
+    try {
+      const result = await selectionApi('context');
+      applySelectionContext(result);
+      if (selectionState === 'submitted') showSubmissionSuccess();
+      else {
+        $('#submissionMessage').textContent = error.status ? error.message : 'ثبت انجام نشده است. اتصال را بررسی کنید و دوباره تلاش کنید.';
+        $('#submissionMessage').hidden = false;
+        $('#modalDone').textContent = 'تلاش دوباره برای ثبت';
+        if (error.code === 'products_unavailable') {
+          // Keep existing picks visible so unavailable products can be removed.
+          await loadCatalog();
+        }
+      }
+    } catch {
+      selectionState = 'uncertain';
+      $('#submissionMessage').textContent = 'نتیجهٔ ثبت مشخص نیست. انتخاب‌ها تا بررسی وضعیت قفل هستند؛ دوباره تلاش کنید.';
+      $('#submissionMessage').hidden = false;
+      $('#modalDone').textContent = 'بررسی وضعیت و تلاش دوباره';
+      $('#orderState').innerHTML = '<strong>در انتظار تأیید وضعیت ثبت</strong><p>انتخاب‌ها تا بررسی نتیجه قابل تغییر نیستند.</p><button type="button" id="retrySelectionContext">بررسی وضعیت ثبت</button>';
+    }
+  } finally {
+    submitBusy = false;
+    $('#modalDone').disabled = false;
+    $('#closeModal').disabled = false;
+    $('#modalBack').disabled = false;
+    updateSelectionPage();
+  }
+}
+
 renderSelection();
-loadCatalog();
+if (isSelectionPage) loadSelectionContext();
+else {
+  $('#orderState').innerHTML = '<strong>پیش‌نمایش کاتالوگ سوراد</strong><p>برای مشاهده سفارش و ثبت ۱۰ تستر، لینک اختصاصی پیامک را باز کنید.</p>';
+  updateSelectionPage();
+  loadCatalog();
+}

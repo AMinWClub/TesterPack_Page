@@ -1,0 +1,281 @@
+"""Mock order flow, recovery, privacy and the unchanged worker token contract."""
+
+import asyncio
+import copy
+import json
+import logging
+import unittest
+from datetime import datetime, timezone
+from unittest.mock import AsyncMock, patch
+
+from bson import ObjectId
+from fastapi import FastAPI
+from pymongo.errors import AutoReconnect
+
+from app import selections as service
+from app.selection_security import RedactSelectionAccessLog, SelectionSecurity
+from app.workers import tester_sms as worker
+from tests.test_tester_sms_worker import FakeCollection, FakeDatabase, SimulatedCrash, matches
+
+
+class SelectionCollection(FakeCollection):
+    async def find_one_and_update(self, query, update, **kwargs):
+        await asyncio.sleep(0)
+        # Mongo's direct array equality compares the whole array in order.
+        arrays = {key: value for key, value in query.items() if isinstance(value, list)}
+        remaining = {key: value for key, value in query.items() if key not in arrays}
+        for document in self.documents:
+            if matches(document, remaining) and all(document.get(key) == value for key, value in arrays.items()):
+                self.db.writes += 1
+                self.apply_update(document, update)
+                return copy.deepcopy(document)
+        return None
+
+
+def settings():
+    return worker.WorkerSettings("preprocess_orders", "123", datetime(2026, 10, 14, tzinfo=timezone.utc),
+                                 selection_base_url="https://tester.example.test/s", token_secret="test-secret-" + "x" * 40)
+
+
+def order(order_id=None, **changes):
+    return {"_id": order_id or ObjectId(), "id": "OR0000087510", "first_name": "  احمد ", "last_name": " فرجی  ",
+            "phone": "09123456789", "product_id": ["123"], "date_created": "2026-10-14T00:00:00Z",
+            "address": "must-not-leak", "payment_method": "private", "tracking_code": "private", **changes}
+
+
+def products():
+    return [{"pid": index, "name": f"  Original product {index} | English {index}  ", "vol_idx": index,
+             "variations": {"a": {"in_stock": True}}} for index in range(1, 21)]
+
+
+def make_app(db, config, rate=60):
+    app = FastAPI()
+    app.include_router(service.router)
+    app.add_middleware(SelectionSecurity, requests_per_minute=rate)
+    app.state.db, app.state.selection_settings = db, config
+    return app
+
+
+async def request(app, path, body=None, *, method="POST", raw=None, client="test"):
+    events = []
+    payload = raw if raw is not None else json.dumps(body).encode()
+    received = False
+
+    async def receive():
+        nonlocal received
+        if not received:
+            received = True
+            return {"type": "http.request", "body": payload, "more_body": False}
+        return {"type": "http.disconnect"}
+
+    async def send(event):
+        events.append(event)
+
+    await app({"type": "http", "asgi": {"version": "3.0"}, "http_version": "1.1", "scheme": "http", "method": method,
+               "path": path, "raw_path": path.encode(), "query_string": b"", "root_path": "", "headers": [(b"content-type", b"application/json")],
+               "server": ("test", 80), "client": (client, 1234)}, receive, send)
+    start = next(event for event in events if event["type"] == "http.response.start")
+    content = b"".join(event.get("body", b"") for event in events if event["type"] == "http.response.body")
+    headers = dict((key.decode(), value.decode()) for key, value in start["headers"])
+    return start["status"], json.loads(content) if content.startswith(b"{") else content, headers
+
+
+class SelectionTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        self.config = settings()
+        self.source_order = order()
+        self.db = FakeDatabase([self.source_order])
+        link = await worker.ensure_selection(self.db[worker.SELECTIONS], self.source_order["_id"], self.config)
+        self.token = link.rsplit("/", 1)[1]
+        self.db.collections[worker.SELECTIONS] = SelectionCollection(self.db, self.db[worker.SELECTIONS].documents)
+        self.db[worker.SELECTIONS].documents[0]["_id"] = ObjectId()
+        self.app = make_app(self.db, self.config)
+        self.rows = products()
+        patcher = patch("app.selections.eligible_products", new_callable=AsyncMock, return_value=self.rows)
+        self.fresh_catalog = patcher.start()
+        self.addCleanup(patcher.stop)
+        blocker = patch("socket.create_connection", side_effect=AssertionError("Unit tests must not use the network"))
+        blocker.start()
+        self.addCleanup(blocker.stop)
+        self.pids = [str(index) for index in range(1, 11)]
+
+    async def call(self, action="context", **extra):
+        return await request(self.app, f"/api/tester/selection/{action}", {"token": self.token, **extra})
+
+    @property
+    def stored_order(self):
+        return self.db["preprocess_orders"].documents[0]
+
+    @property
+    def selection(self):
+        return self.db[worker.SELECTIONS].documents[0]
+
+    async def test_valid_context_full_phone_trimmed_name_display_id_and_privacy(self):
+        self.stored_order["sms_sent"] = True
+        status, body, headers = await self.call()
+        self.assertEqual(status, 200)
+        self.assertEqual(body["order"], {"id": "OR0000087510", "customer_name": "احمد فرجی", "phone": "09123456789", "tester_count": 10})
+        self.assertEqual(body["selection"], {"status": "pending", "selected_pids": [], "selected_names": []})
+        for private in ("address", "payment_method", "tracking_code", "token_hash", str(self.source_order["_id"])):
+            self.assertNotIn(private, json.dumps(body))
+        self.assertEqual(headers["cache-control"], "no-store")
+        self.assertEqual(headers["referrer-policy"], "no-referrer")
+        self.assertIn("noindex", headers["x-robots-tag"])
+
+    async def test_invalid_format_missing_selection_and_wrong_version(self):
+        for token, expected in (("wrong", 400), ("A" * 24, 404), (None, 400), ({"$ne": None}, 400)):
+            status, body, _ = await request(self.app, "/api/tester/selection/context", {"token": token})
+            self.assertEqual(status, expected)
+            self.assertNotIn("order", body)
+        self.selection["token_version"] = 2
+        self.assertEqual((await self.call())[0], 404)
+
+    async def test_historical_wrong_product_and_missing_order_never_write(self):
+        original = copy.deepcopy(self.stored_order)
+        for changes in ({"date_created": "2026-10-13T23:59:59.999999Z"}, {"product_id": ["other"]}):
+            self.stored_order.update(changes)
+            before = copy.deepcopy(self.stored_order)
+            self.assertEqual((await self.call())[0], 404)
+            self.assertEqual((await self.call("submit", pids=self.pids))[0], 404)
+            self.assertEqual(self.stored_order, before)
+            self.stored_order.update(original)
+        self.db["preprocess_orders"].documents.clear()
+        self.assertEqual((await self.call())[0], 404)
+
+    async def test_exact_ten_names_order_and_only_required_order_fields_change(self):
+        original = copy.deepcopy(self.stored_order)
+        pids = list(reversed(self.pids))
+        status, body, _ = await self.call("submit", pids=pids)
+        self.assertEqual(status, 200)
+        expected = [self.rows[int(pid)-1]["name"] for pid in pids]
+        self.assertEqual(self.stored_order["recommended_products"], expected)
+        self.assertEqual(body["selection"]["selected_names"], expected)
+        self.assertEqual(body["selection"]["selected_pids"], pids)
+        self.assertEqual(self.selection["status"], "submitted")
+        self.assertIsInstance(self.selection["order_id"], ObjectId)
+        self.assertEqual({key: value for key, value in self.stored_order.items() if key not in {"recommended_products", service.ORDER_MARKER}}, original)
+        self.assertEqual(self.stored_order[service.ORDER_MARKER], self.selection["submission_id"])
+        self.fresh_catalog.assert_awaited_once_with(self.db)
+
+    async def test_count_duplicates_and_nonstring_pids_rejected_without_writes(self):
+        for pids in (self.pids[:9], self.pids + ["11"], self.pids[:9]+["1"], list(range(10)), "123", None):
+            self.assertEqual((await self.call("submit", pids=pids))[0], 422)
+            self.assertNotIn("recommended_products", self.stored_order)
+            self.assertEqual(self.selection["status"], "pending")
+
+    async def test_missing_products_or_names_never_create_intent(self):
+        for rows in (self.rows[1:], [{**row, "name": None} for row in self.rows], self.rows + [self.rows[0]]):
+            self.fresh_catalog.return_value = rows
+            self.assertEqual((await self.call("submit", pids=self.pids))[0], 409)
+            self.assertNotIn("recommended_products", self.stored_order)
+            self.assertEqual(self.selection["status"], "pending")
+
+    async def test_any_existing_field_including_null_and_identical_names_is_never_overwritten(self):
+        for value in (None, [], ["old"], [row["name"] for row in self.rows[:10]]):
+            self.stored_order["recommended_products"] = value
+            # The worker fake conflates missing and null; the explicit Python guard
+            # and real integration tests both check that null is also protected.
+            self.assertEqual((await self.call("submit", pids=self.pids))[0], 409)
+            self.assertEqual((await self.call())[0], 409)
+            self.assertEqual(self.stored_order["recommended_products"], value)
+
+    async def test_same_request_is_idempotent_different_request_conflicts(self):
+        first = await self.call("submit", pids=self.pids)
+        self.assertEqual(first[0], 200)
+        saved = copy.deepcopy(self.selection)
+        self.assertEqual((await self.call("submit", pids=self.pids))[1], first[1])
+        self.assertEqual((await self.call("submit", pids=list(reversed(self.pids))))[0], 409)
+        self.assertEqual(self.selection, saved)
+        self.fresh_catalog.assert_awaited_once()
+
+    async def test_two_different_requests_only_one_wins(self):
+        other = [str(index) for index in range(11, 21)]
+        results = await asyncio.gather(self.call("submit", pids=self.pids), self.call("submit", pids=other))
+        self.assertEqual(sorted(result[0] for result in results), [200, 409])
+        winner = next(result[1] for result in results if result[0] == 200)
+        self.assertEqual(self.stored_order["recommended_products"], winner["selection"]["selected_names"])
+
+    async def test_same_request_concurrently_succeeds_without_replacing_names(self):
+        results = await asyncio.gather(*(self.call("submit", pids=self.pids) for _ in range(4)))
+        self.assertTrue(all(result[0] == 200 for result in results))
+        self.assertTrue(all(result[1] == results[0][1] for result in results))
+
+    async def test_recover_when_final_selection_write_fails(self):
+        collection = self.db[worker.SELECTIONS]
+        original = collection.find_one_and_update
+        async def fail_final(query, update, **kwargs):
+            if update["$set"]["status"] == "submitted":
+                raise AutoReconnect("must-not-leak")
+            return await original(query, update, **kwargs)
+        collection.find_one_and_update = fail_final
+        status, body, _ = await self.call("submit", pids=self.pids)
+        self.assertEqual(status, 503)
+        self.assertNotIn("must-not-leak", str(body))
+        self.assertIn("recommended_products", self.stored_order)
+        saved = copy.deepcopy(self.stored_order)
+        collection.find_one_and_update = original
+        self.assertEqual((await self.call())[1]["selection"]["status"], "submitted")
+        self.assertEqual(self.stored_order, saved)
+
+    async def test_order_write_accepted_but_response_lost_recovery(self):
+        collection = self.db["preprocess_orders"]
+        original = collection.update_one
+        async def write_then_disconnect(*args, **kwargs):
+            await original(*args, **kwargs)
+            raise AutoReconnect("simulated lost write acknowledgment")
+        collection.update_one = write_then_disconnect
+        self.assertEqual((await self.call("submit", pids=self.pids))[0], 503)
+        collection.update_one = original
+        self.assertEqual((await self.call("submit", pids=self.pids))[0], 200)
+
+    async def test_crash_before_order_write_resumes_same_intent(self):
+        with patch("app.selections.finish_intent", side_effect=SimulatedCrash):
+            with self.assertRaises(SimulatedCrash):
+                await service.submit(self.db, self.config, self.token, self.pids)
+        self.assertEqual(self.selection["status"], "submitting")
+        self.assertNotIn("recommended_products", self.stored_order)
+        self.assertEqual((await self.call("submit", pids=list(reversed(self.pids))))[0], 409)
+        self.assertEqual((await self.call())[1]["selection"]["status"], "submitted")
+
+    async def test_database_failure_before_intent_recovers_to_pending(self):
+        self.fresh_catalog.side_effect = AutoReconnect("private-db-host")
+        self.assertEqual((await self.call("submit", pids=self.pids))[0], 503)
+        self.assertEqual(self.selection["status"], "pending")
+        self.fresh_catalog.side_effect = None
+        self.assertEqual((await self.call("submit", pids=self.pids))[0], 200)
+
+    async def test_submitted_context_uses_saved_names_even_if_stock_disappears(self):
+        self.assertEqual((await self.call("submit", pids=self.pids))[0], 200)
+        self.fresh_catalog.side_effect = AssertionError("Submitted receipt must not depend on catalog")
+        self.assertEqual((await self.call())[1]["selection"]["selected_names"], self.selection["selected_names"])
+
+    async def test_marker_or_list_mismatch_is_not_silently_repaired(self):
+        self.assertEqual((await self.call("submit", pids=self.pids))[0], 200)
+        self.stored_order[service.ORDER_MARKER] = "different"
+        self.assertEqual((await self.call())[0], 409)
+        self.assertEqual((await self.call("submit", pids=self.pids))[0], 409)
+
+    async def test_worker_ensure_selection_preserves_submitted_record_and_token(self):
+        self.assertEqual((await self.call("submit", pids=self.pids))[0], 200)
+        before = copy.deepcopy(self.selection)
+        link = await worker.ensure_selection(self.db[worker.SELECTIONS], self.source_order["_id"], self.config)
+        self.assertEqual(link.rsplit("/", 1)[1], self.token)
+        self.assertEqual(self.selection, before)
+
+    async def test_bad_body_oversize_and_rate_limit_are_private(self):
+        for raw, expected in ((b'{bad', 400), (b'[]', 400), (b'x'*8193, 413)):
+            self.assertEqual((await request(self.app, "/api/tester/selection/context", raw=raw))[0], expected)
+        app = make_app(self.db, self.config, rate=1)
+        self.assertEqual((await request(app, "/api/tester/selection/context", {"token": "bad"}))[0], 400)
+        status, body, headers = await request(app, "/api/tester/selection/context", {"token": self.token})
+        self.assertEqual(status, 429)
+        self.assertEqual(headers["cache-control"], "no-store")
+        self.assertNotIn(self.token, str(body))
+
+    def test_access_log_redacts_token_and_query(self):
+        record = logging.LogRecord("uvicorn.access", logging.INFO, "", 0, '%s - "%s %s HTTP/%s" %d',
+                                   ("127.0.0.1", "GET", f"/s/{self.token}?x=secret", "1.1", 200), None)
+        RedactSelectionAccessLog().filter(record)
+        self.assertNotIn(self.token, record.getMessage())
+        self.assertNotIn("secret", record.getMessage())
+        self.assertIn("/s/[redacted]", record.getMessage())

@@ -76,6 +76,11 @@ def display_product(product, fragrance=None):
     }
 
 
+async def eligible_products(db):
+    """The same fresh, ordered catalog boundary for browsing and final submission."""
+    return await db["products_api"].find(PRODUCT_FILTER, PRODUCT_PROJECTION).sort("vol_idx", 1).limit(CATALOG_LIMIT).to_list()
+
+
 class CatalogCache:
     def __init__(self, db, ttl=60):
         self.db = db
@@ -93,7 +98,7 @@ class CatalogCache:
         async with self.lock:
             if self.snapshot is not None and monotonic() < self.expires_at:
                 return self.snapshot
-            products = await self.db["products_api"].find(PRODUCT_FILTER, PRODUCT_PROJECTION).sort("vol_idx", 1).limit(CATALOG_LIMIT).to_list()
+            products = await eligible_products(self.db)
             variants = list({variant for product in products for variant in pid_variants(product.get("pid"))})
             fragrances = await self.db["fragrantica_products"].find({"pid": {"$in": variants}}, SUMMARY_PROJECTION).to_list() if variants else []
             by_pid = {}
