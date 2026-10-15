@@ -25,7 +25,7 @@ let visibleCount = PAGE_SIZE;
 let filteredProducts = [];
 const PLACEHOLDER = '/frontend/assets/perfume-placeholder.svg';
 const selectionToken = (() => {
-  try { return /^\/([A-Za-z0-9_-]{24})\/?$/.exec(decodeURIComponent(location.pathname))?.[1] || ''; }
+  try { return /^\/([A-Za-z0-9_-]{18})\/?$/.exec(decodeURIComponent(location.pathname))?.[1] || ''; }
   catch { return ''; }
 })();
 const isSelectionPage = Boolean(selectionToken);

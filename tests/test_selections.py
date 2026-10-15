@@ -2,6 +2,7 @@
 
 import asyncio
 import copy
+import hashlib
 import json
 import logging
 import unittest
@@ -9,7 +10,7 @@ from datetime import datetime, timezone
 from unittest.mock import AsyncMock, patch
 
 from bson import ObjectId
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from pymongo.errors import AutoReconnect
 
 from app import selections as service
@@ -127,12 +128,37 @@ class SelectionTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("noindex", headers["x-robots-tag"])
 
     async def test_invalid_format_missing_selection_and_wrong_version(self):
-        for token, expected in (("wrong", 400), ("A" * 24, 404), (None, 400), ({"$ne": None}, 400)):
+        for token, expected in (("wrong", 400), ("0" * 18, 404), ("A" * 24, 400), ("1" * 17, 400),
+                                ("1" * 19, 400), ("۱" * 18, 400), ("١" * 18, 400),
+                                (123456789012345678, 400), (True, 400), (None, 400), ({"$ne": None}, 400)):
             status, body, _ = await request(self.app, "/api/tester/selection/context", {"token": token})
             self.assertEqual(status, expected)
             self.assertNotIn("order", body)
-        self.selection["token_version"] = 2
+        self.selection["token_version"] = worker.TOKEN_VERSION + 1
         self.assertEqual((await self.call())[0], 404)
+
+    def test_token_hash_preserves_exact_text_and_rejects_whitespace_and_non_urlsafe_characters(self):
+        token = "000000000000000001"
+        self.assertEqual(service.validate_token(token), hashlib.sha256(token.encode("ascii")).hexdigest())
+        self.assertNotEqual(service.validate_token(token), hashlib.sha256(b"1").hexdigest())
+        for invalid in (" " + token, token + " ", token + "\n", "+" + token, token[:9] + "." + token[10:],
+                        "+" * 18, "/" * 18, "=" * 18):
+            with self.assertRaises(HTTPException) as caught:
+                service.validate_token(invalid)
+            self.assertEqual(caught.exception.status_code, 400)
+
+    async def test_case_sensitive_token_hash_and_order_access(self):
+        self.token = "aB7xQ2mN9pR4tY6kL8"
+        changed_case = "AB7xQ2mN9pR4tY6kL8"
+        self.selection["token_hash"] = service.validate_token(self.token)
+        self.assertNotEqual(service.validate_token(self.token), service.validate_token(changed_case))
+        self.assertEqual((await self.call())[0], 200)
+        for action, extra in (("context", {}), ("submit", {"pids": self.pids})):
+            status, body, _ = await request(self.app, f"/api/tester/selection/{action}", {"token": changed_case, **extra})
+            self.assertEqual(status, 404)
+            self.assertNotIn("order", body)
+        self.assertEqual(self.selection["status"], "pending")
+        self.assertNotIn("recommended_products", self.stored_order)
 
     async def test_historical_wrong_product_and_missing_order_never_write(self):
         original = copy.deepcopy(self.stored_order)

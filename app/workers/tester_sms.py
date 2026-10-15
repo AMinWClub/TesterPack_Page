@@ -36,7 +36,7 @@ from app.services.sms.faraz import normalize_recipient
 
 NOTIFICATIONS = "tester_sms_notifications"
 SELECTIONS = "tester_selections"
-TOKEN_VERSION = 1
+TOKEN_VERSION = 3
 ENV_FILE = Path(__file__).resolve().parents[2] / ".env"
 logger = logging.getLogger(__name__)
 ORDER_DATE_FIELD = "date_created"
@@ -232,7 +232,8 @@ async def check_indexes(collections: dict) -> None:
 def token_for_order(order_id, secret: str) -> str:
     identity = dumps(order_id, json_options=CANONICAL_JSON_OPTIONS, sort_keys=True, separators=(",", ":"))
     digest = hmac.new(secret.encode("utf-8"), f"tester-selection:v{TOKEN_VERSION}:{identity}".encode("utf-8"), hashlib.sha256).digest()
-    return base64.urlsafe_b64encode(digest[:18]).decode("ascii").rstrip("=")
+    # Preserve the exact case of the first 18 Base64 URL-safe characters.
+    return base64.urlsafe_b64encode(digest).decode("ascii")[:18]
 
 
 def worker_collections(db, settings: WorkerSettings) -> dict:
@@ -259,7 +260,9 @@ async def ensure_selection(selections, order_id, settings: WorkerSettings) -> st
         # A simultaneous worker may have inserted the same order first.
         pass
     selection = await selections.find_one({"order_id": order_id})
-    if not selection or selection.get("token_version") != TOKEN_VERSION or not hmac.compare_digest(
+    if not selection:
+        raise WorkerConfigurationError("Selection token allocation failed; check unique token/order indexes for a collision.")
+    if selection.get("token_version") != TOKEN_VERSION or not hmac.compare_digest(
         selection.get("token_hash", ""), token_hash,
     ):
         raise WorkerConfigurationError(

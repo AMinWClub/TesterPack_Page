@@ -52,7 +52,16 @@ async def lifespan(app):
         } for i in range(1, 31)])
         fixtures = {}
         for scenario in ("success", "uncertain", "lost_response", "unavailable"):
-            fixture = order(first_name="  مشتری  ", last_name=" آزمایشی ", phone="09120000000", id="OR-TEST-" + scenario)
+            # Exercise exact-case HMAC/Hash lookup and both URL-safe symbols.
+            for _ in range(1000):
+                fixture = order(first_name="  مشتری  ", last_name=" آزمایشی ", phone="09120000000", id="OR-TEST-" + scenario)
+                token = worker.token_for_order(fixture["_id"], config.token_secret)
+                if scenario != "success" or ("-" in token and "_" in token
+                        and any("a" <= char <= "z" for char in token)
+                        and any("A" <= char <= "Z" for char in token)):
+                    break
+            else:
+                raise RuntimeError("Could not prepare a mixed-case URL-safe preview fixture.")
             await db.preprocess_orders.insert_one(fixture)
             token = (await worker.ensure_selection(db[worker.SELECTIONS], fixture["_id"], config)).rsplit("/", 1)[1]
             fixtures[scenario] = {"path": "/" + token, "order_id": fixture["id"], "phone": fixture["phone"]}

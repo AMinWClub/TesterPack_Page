@@ -10,7 +10,7 @@ from fastapi.responses import JSONResponse
 from starlette.convertors import StringConvertor, register_url_convertor
 
 
-TOKEN_PATTERN = r"[A-Za-z0-9_-]{24}"
+TOKEN_PATTERN = r"[A-Za-z0-9_-]{18}"
 
 
 class SelectionTokenConvertor(StringConvertor):

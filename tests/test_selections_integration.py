@@ -10,6 +10,7 @@ from unittest.mock import Mock, patch
 from uuid import uuid4
 
 from fastapi import HTTPException
+from bson import ObjectId
 from pymongo import AsyncMongoClient
 from pymongo.asynchronous.collection import AsyncCollection
 from pymongo.errors import AutoReconnect
@@ -179,3 +180,33 @@ class SelectionMongoTests(unittest.IsolatedAsyncioTestCase):
         self.app.state.selection_settings = replace(self.config, orders_collection="different_orders")
         await self.db.different_orders.insert_one(self.source_order)
         self.assertEqual((await self.call())[0], 200)
+
+    async def test_case_sensitive_urlsafe_token_lookup_submission_and_readonly_context(self):
+        fixture = order(ObjectId("000000000000000000000002"), id="OR-CASE-SENSITIVE")
+        await self.db.preprocess_orders.insert_one(fixture)
+        link = await worker.ensure_selection(self.db[worker.SELECTIONS], fixture["_id"], self.config)
+        token = link.rsplit("/", 1)[1]
+        self.assertEqual(token, "C5azLUAZxMoxdlt5qn")
+        changed_case = "c" + token[1:]
+        self.assertEqual((await request(self.app, "/api/tester/selection/context", {"token": token}))[1]["order"]["id"], "OR-CASE-SENSITIVE")
+        self.assertEqual((await request(self.app, "/api/tester/selection/context", {"token": changed_case}))[0], 404)
+        self.assertEqual((await request(self.app, "/api/tester/selection/submit", {"token": changed_case, "pids": self.pids}))[0], 404)
+        self.assertNotIn("recommended_products", await self.db.preprocess_orders.find_one({"_id": fixture["_id"]}))
+        body = {"token": token, "pids": self.pids}
+        self.assertEqual((await request(self.app, "/api/tester/selection/submit", body))[0], 200)
+        self.assertEqual((await request(self.app, "/api/tester/selection/context", {"token": token}))[1]["selection"]["status"], "submitted")
+        record = await self.db[worker.SELECTIONS].find_one({"order_id": fixture["_id"]})
+        self.assertEqual(record["token_version"], worker.TOKEN_VERSION)
+        self.assertNotIn(token, str(record))
+
+    async def test_unique_hash_collision_never_reassigns_another_orders_token(self):
+        fixture = order()
+        await self.db.preprocess_orders.insert_one(fixture)
+        original = await self.selection()
+        with patch.object(worker, "token_for_order", return_value=self.token):
+            with self.assertRaisesRegex(worker.WorkerConfigurationError, "collision") as caught:
+                await worker.ensure_selection(self.db[worker.SELECTIONS], fixture["_id"], self.config)
+        self.assertNotIn(self.token, str(caught.exception))
+        self.assertEqual(await self.selection(), original)
+        self.assertIsNone(await self.db[worker.SELECTIONS].find_one({"order_id": fixture["_id"]}))
+        self.assertEqual(await self.db[worker.SELECTIONS].count_documents({}), 1)

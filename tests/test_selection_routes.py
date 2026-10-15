@@ -12,7 +12,7 @@ from tests.test_selections import request
 
 class SelectionRouteTests(unittest.IsolatedAsyncioTestCase):
     async def test_root_token_page_and_refresh_have_private_headers_and_absolute_assets(self):
-        token = "Ab09_-" * 4
+        token = "Ab09_-" * 3
         for _ in range(2):
             status, body, headers = await request(app, "/" + token, method="GET")
             self.assertEqual(status, 200)
@@ -24,7 +24,8 @@ class SelectionRouteTests(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn(token.encode(), body)
 
     async def test_invalid_or_old_paths_do_not_open_the_selection_page(self):
-        for path in ("/short", "/" + "A" * 23, "/" + "A" * 25, "/" + "." * 24, "/s/" + "A" * 24, "/foo/bar"):
+        for path in ("/short", "/" + "1" * 17, "/" + "1" * 19, "/" + "1" * 24,
+                     "/" + "Ab09_-" * 4, "/" + "+" * 18, "/" + "=" * 18, "/" + "۱" * 18, "/s/" + "1" * 18, "/foo/bar"):
             with self.subTest(path=path):
                 self.assertEqual((await request(app, path, method="GET"))[0], 404)
 
@@ -50,15 +51,15 @@ class SelectionRouteTests(unittest.IsolatedAsyncioTestCase):
                 app.state.catalog = original
 
     async def test_token_redirect_and_wrong_method_are_also_private(self):
-        token = "A" * 24
+        token = "Ab09_-" * 3
         for method, path, expected in (("GET", f"/{token}/", 307), ("POST", f"/{token}", 405)):
             status, _, headers = await request(app, path, method=method)
             self.assertEqual(status, expected)
             self.assertEqual(headers["cache-control"], "no-store")
 
     def test_access_log_redacts_root_tokens_encoded_tokens_and_query_but_preserves_static_paths(self):
-        token = "A" * 24
-        for target in ("/" + token, "/" + token + "/?x=secret", "/%41" + "A" * 23 + "?x=secret"):
+        token = "Ab09_-" * 3
+        for target in ("/" + token, "/" + token + "/?x=secret", "/%41" + token[1:] + "?x=secret", "/ab09_-" + token[6:]):
             record = logging.LogRecord("uvicorn.access", logging.INFO, "", 0, '%s - "%s %s HTTP/%s" %d',
                                        ("127.0.0.1", "GET", target, "1.1", 200), None)
             RedactSelectionAccessLog().filter(record)

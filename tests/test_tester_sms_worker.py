@@ -2,6 +2,7 @@
 
 import asyncio
 import copy
+import hashlib
 import io
 import json
 import os
@@ -346,7 +347,9 @@ class TesterWorkerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(links[0], links[1])
         self.assertEqual(len(selections.documents), 1)
         token = links[0].rsplit("/", 1)[1]
-        self.assertEqual(len(token), 24)
+        self.assertRegex(token, r"^[A-Za-z0-9_-]{18}$")
+        self.assertEqual(selections.documents[0]["token_hash"], hashlib.sha256(token.encode("ascii")).hexdigest())
+        self.assertEqual(selections.documents[0]["token_version"], worker.TOKEN_VERSION)
         self.assertNotIn(token, repr(selections.documents))
         self.assertEqual(set(selections.documents[0]), {"order_id", "token_hash", "token_version", "status", "created_at"})
 
@@ -783,14 +786,29 @@ class WorkerSettingsAndTokenTests(unittest.TestCase):
                 with self.assertRaisesRegex(worker.WorkerConfigurationError, "TESTER_SELECTION_BASE_URL"):
                     worker.WorkerSettings.from_environment(require_delivery=True)
 
-    def test_typed_identity_and_secret_affect_deterministic_24_character_token(self):
+    def test_typed_identity_and_secret_affect_deterministic_18_character_urlsafe_token(self):
         secret = "a" * 48
         identifier = ObjectId("000000000000000000000001")
         token = worker.token_for_order(identifier, secret)
-        self.assertRegex(token, r"^[a-zA-Z0-9_-]{24}$")
+        self.assertIsInstance(token, str)
+        self.assertRegex(token, r"^[A-Za-z0-9_-]{18}$")
         self.assertEqual(token, worker.token_for_order(identifier, secret))
         self.assertNotEqual(token, worker.token_for_order(str(identifier), secret))
         self.assertNotEqual(token, worker.token_for_order(identifier, "b" * 48))
+
+    def test_urlsafe_token_fixed_hmac_vector_preserves_case(self):
+        token = worker.token_for_order(ObjectId("000000000000000000000001"), "a" * 48)
+        self.assertEqual(token, "3BEqKw7eBb7orHJMXi")
+        self.assertIsInstance(token, str)
+        self.assertEqual(len(token), 18)
+        self.assertNotIn("=", token)
+
+    def test_urlsafe_tokens_are_unique_and_cover_the_full_alphabet_for_ten_thousand_orders(self):
+        tokens = [worker.token_for_order(ObjectId(f"{i:024x}"), "a" * 48) for i in range(10000)]
+        self.assertEqual(len(set(tokens)), len(tokens))
+        self.assertTrue(all(re.fullmatch(r"[A-Za-z0-9_-]{18}", token) for token in tokens))
+        self.assertEqual(set("".join(tokens)), set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_"))
+        self.assertNotEqual(tokens, sorted(tokens))
 
     def test_product_id_variants_do_not_use_substrings_or_array_strings(self):
         self.assertEqual(worker.product_id_variants("123"), ["123", 123])

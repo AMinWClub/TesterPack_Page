@@ -9,6 +9,8 @@ const { spawn } = require('node:child_process');
 async function main() {
   const { fixtures, database } = JSON.parse(fs.readFileSync('test-artifacts/selection-preview.json', 'utf8'));
   assert(database.startsWith('tester_selection_preview_'));
+  assert(Object.values(fixtures).every(f=>/^\/[A-Za-z0-9_-]{18}$/.test(f.path)));
+  assert(/[a-z]/.test(fixtures.success.path)&&/[A-Z]/.test(fixtures.success.path)&&fixtures.success.path.includes('-')&&fixtures.success.path.includes('_'), 'Preview must exercise exact case and both URL-safe symbols');
   const base = process.env.SELECTION_TEST_BASE_URL || 'http://127.0.0.1:8789';
   assert(['localhost','127.0.0.1'].includes(new URL(base).hostname), 'Only a local isolated preview is allowed');
   const artifacts = path.resolve('test-artifacts/selection');
@@ -61,7 +63,7 @@ async function main() {
       }else if(m.method==='Network.responseReceived'){
         const response=m.params.response;
         const url=new URL(response.url);
-        if(url.origin===new URL(base).origin&&(/^\/[A-Za-z0-9_-]{24}\/?$/.test(url.pathname)||url.pathname.startsWith('/api/tester/selection/'))){
+        if(url.origin===new URL(base).origin&&(/^\/[A-Za-z0-9_-]{18}\/?$/.test(decodeURIComponent(url.pathname))||url.pathname.startsWith('/api/tester/selection/'))){
           const h=Object.fromEntries(Object.entries(response.headers).map(([k,v])=>[k.toLowerCase(),v]));
           if(response.status===200)headers.push({noStore:h['cache-control']==='no-store',noReferrer:h['referrer-policy']==='no-referrer',noIndex:h['x-robots-tag']?.includes('noindex')});
         }
@@ -99,7 +101,8 @@ async function main() {
 
     for(const [width,height]of [[1440,1000],[768,1024],[390,844],[320,740]]){
       await load(fixtures.success.path,width,height);await until('catalogState==="ready"');
-      assert(await evaluate('isSelectionPage&&/^\\/[A-Za-z0-9_-]{24}$/.test(location.pathname)&&selectionToken.length===24'));
+      assert(await evaluate('isSelectionPage&&/^\\/[A-Za-z0-9_-]{18}$/.test(location.pathname)&&typeof selectionToken==="string"&&selectionToken.length===18'));
+      assert.equal(await evaluate('selectionToken'),fixtures.success.path.slice(1));
       assert.equal(await evaluate('document.querySelector("#orderPhone").textContent'),fixtures.success.phone);
       assert.equal(await evaluate('document.querySelector("#orderNumber").textContent'),fixtures.success.order_id);
       assert.equal(await evaluate('getComputedStyle(document.querySelector("#orderPhone")).direction'),'ltr');
@@ -108,6 +111,15 @@ async function main() {
       await evaluate('scrollTo(0,0)');await screenshot('order-'+width);
       responsive.push({width,orderVisible:true,fullPhone:true,overflow:false});
     }
+    // A single changed letter must not authorize the original order.
+    const changedCasePath=fixtures.success.path.replace(/[A-Za-z]/,char=>String.fromCharCode(char.charCodeAt(0)^32));
+    await load(changedCasePath,320,740);
+    assert(await evaluate('selectionState==="error"&&document.querySelector("#orderFields").hidden'));
+    // Percent-encoding must preserve the exact token case when it is extracted.
+    const token=fixtures.success.path.slice(1);
+    await load('/%'+token.charCodeAt(0).toString(16)+token.slice(1),320,740);
+    await until('catalogState==="ready"');
+    assert.equal(await evaluate('selectionToken'),token);
     // Existing details and the new order state must work together.
     await click('.product-card .product-name');await until('document.querySelector("#perfumeContent").dataset.state==="ready"');
     assert(await evaluate('document.querySelectorAll(".pd-trait").length===2'));
@@ -147,7 +159,7 @@ async function main() {
     await click('#modalDone');await until('selectionState==="pending"&&!submitBusy&&!document.querySelector("#submissionMessage").hidden');
     assert(await evaluate('document.querySelector("#submissionMessage").textContent.includes("موجود نیست")&&canEditSelection()'));
     await click('#modalBack');modes.submit='real';
-    await load('/'+'A'.repeat(24));
+    await load('/'+'9'.repeat(18));
     assert(await evaluate('selectionState==="error"&&document.querySelector("#orderFields").hidden&&document.querySelector("#collection").hidden'));
     await screenshot('invalid-link-mobile');
     await load('/');await chooseTen();
