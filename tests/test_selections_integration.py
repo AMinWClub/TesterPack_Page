@@ -104,6 +104,27 @@ class SelectionMongoTests(unittest.IsolatedAsyncioTestCase):
         await self.db.products_api.delete_many({})
         self.assertEqual((await self.call())[1]["selection"]["selected_names"], expected)
 
+    async def test_null_gender_allows_context_submission_and_readonly_without_purchased_product(self):
+        await self.db.preprocess_orders.update_one({"_id": self.source_order["_id"]}, {
+            "$set": {"tester_gender": None, "sms_sent": True}, "$unset": {"product_id": ""},
+        })
+        self.assertEqual((await self.call())[0], 200)
+        status, result, _ = await self.call("submit", pids=self.pids)
+        self.assertEqual(status, 200)
+        self.assertEqual(result["selection"]["status"], "submitted")
+        self.assertEqual((await self.stored_order())["recommended_products"], [row["name"] for row in self.rows[:10]])
+        self.assertEqual((await self.call())[1], result)
+        self.assertEqual((await self.call("submit", pids=self.pids))[1], result)
+
+    async def test_missing_or_empty_gender_rejects_context_submit_without_writes(self):
+        for update in ({"$unset": {"tester_gender": ""}}, {"$set": {"tester_gender": ""}}):
+            await self.db.preprocess_orders.update_one({"_id": self.source_order["_id"]}, update)
+            before_order, before_selection = await self.stored_order(), await self.selection()
+            self.assertEqual((await self.call())[0], 404)
+            self.assertEqual((await self.call("submit", pids=self.pids))[0], 404)
+            self.assertEqual(await self.stored_order(), before_order)
+            self.assertEqual(await self.selection(), before_selection)
+
     async def test_fresh_stock_exact_names_and_current_catalog_cap(self):
         await self.app.state.catalog.get()
         await self.db.products_api.update_one({"pid": 1}, {"$set": {"variations.a.in_stock": False}})

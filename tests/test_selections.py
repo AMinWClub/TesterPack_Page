@@ -16,7 +16,7 @@ from pymongo.errors import AutoReconnect
 from app import selections as service
 from app.selection_security import RedactSelectionAccessLog, SelectionSecurity
 from app.workers import tester_sms as worker
-from tests.test_tester_sms_worker import FakeCollection, FakeDatabase, SimulatedCrash, matches
+from tests.test_tester_sms_worker import FakeCollection, FakeDatabase, GENDER_CASES, SimulatedCrash, matches
 
 
 class SelectionCollection(FakeCollection):
@@ -34,13 +34,13 @@ class SelectionCollection(FakeCollection):
 
 
 def settings():
-    return worker.WorkerSettings("preprocess_orders", "123", datetime(2026, 10, 14, tzinfo=timezone.utc),
+    return worker.WorkerSettings("preprocess_orders", datetime(2026, 10, 14, tzinfo=timezone.utc),
                                  selection_base_url="https://tester.example.test", token_secret="test-secret-" + "x" * 40)
 
 
 def order(order_id=None, **changes):
     return {"_id": order_id or ObjectId(), "id": "OR0000087510", "first_name": "  احمد ", "last_name": " فرجی  ",
-            "phone": "09123456789", "product_id": ["123"], "date_created": "2026-10-14T00:00:00Z",
+            "phone": "09123456789", "tester_gender": "female", "date_created": "2026-10-14T00:00:00Z",
             "address": "must-not-leak", "payment_method": "private", "tracking_code": "private", **changes}
 
 
@@ -160,9 +160,9 @@ class SelectionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.selection["status"], "pending")
         self.assertNotIn("recommended_products", self.stored_order)
 
-    async def test_historical_wrong_product_and_missing_order_never_write(self):
+    async def test_historical_empty_gender_and_missing_order_never_write(self):
         original = copy.deepcopy(self.stored_order)
-        for changes in ({"date_created": "2026-10-13T23:59:59.999999Z"}, {"product_id": ["other"]}):
+        for changes in ({"date_created": "2026-10-13T23:59:59.999999Z"}, {"tester_gender": ""}):
             self.stored_order.update(changes)
             before = copy.deepcopy(self.stored_order)
             self.assertEqual((await self.call())[0], 404)
@@ -171,6 +171,32 @@ class SelectionTests(unittest.IsolatedAsyncioTestCase):
             self.stored_order.update(original)
         self.db["preprocess_orders"].documents.clear()
         self.assertEqual((await self.call())[0], 404)
+
+    async def test_context_and_submit_share_gender_semantics_without_a_product_requirement(self):
+        original_order = copy.deepcopy(self.stored_order)
+        original_order.pop("tester_gender")
+        original_selection = copy.deepcopy(self.selection)
+        for name, fields, eligible in GENDER_CASES:
+            with self.subTest(name=name):
+                self.db["preprocess_orders"].documents = [{**copy.deepcopy(original_order), **fields,
+                                                         "product_id": ["unrelated"], "sms_sent": True}]
+                self.db[worker.SELECTIONS].documents = [copy.deepcopy(original_selection)]
+                self.db.writes = 0
+                expected = 200 if eligible else 404
+                self.assertEqual((await self.call())[0], expected)
+                self.assertEqual((await self.call("submit", pids=self.pids))[0], expected)
+                if eligible:
+                    self.assertEqual(len(self.stored_order["recommended_products"]), 10)
+                else:
+                    self.assertEqual(self.db.writes, 0)
+                    self.assertEqual(self.selection["status"], "pending")
+
+    async def test_missing_or_arbitrary_purchased_product_does_not_restrict_link(self):
+        for value in (None, [], "other", [123], {"unexpected": "shape"}):
+            self.stored_order["product_id"] = value
+            self.assertEqual((await self.call())[0], 200)
+        self.stored_order.pop("product_id")
+        self.assertEqual((await self.call("submit", pids=self.pids))[0], 200)
 
     async def test_exact_ten_names_order_and_only_required_order_fields_change(self):
         original = copy.deepcopy(self.stored_order)

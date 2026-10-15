@@ -109,11 +109,26 @@ def equal(left, right):
     return type(left) is type(right) and left == right
 
 
-def condition(value, expected):
+def path_exists(document, path):
+    key, _, tail = path.partition(".")
+    if isinstance(document, list):
+        if key.isdigit():
+            if int(key) >= len(document):
+                return False
+            return path_exists(document[int(key)], tail) if tail else True
+        return any(path_exists(item, path) for item in document)
+    if not isinstance(document, dict) or key not in document:
+        return False
+    return path_exists(document[key], tail) if tail else True
+
+
+def condition(value, expected, *, exists=None):
     if not isinstance(expected, dict):
         return any(equal(item, expected) for item in value) if isinstance(value, list) else equal(value, expected)
     for operator, operand in expected.items():
-        if operator == "$ne" and equal(value, operand):
+        if operator == "$ne" and (equal(value, operand) or (
+            isinstance(value, list) and not isinstance(operand, list) and any(equal(item, operand) for item in value)
+        )):
             return False
         if operator == "$in" and not any(equal(value, item) for item in operand):
             return False
@@ -123,7 +138,7 @@ def condition(value, expected):
             return False
         if operator == "$lt" and (value is None or value >= operand):
             return False
-        if operator == "$exists" and (value is not None) != operand:
+        if operator == "$exists" and (value is not None if exists is None else exists) != operand:
             return False
         if operator == "$type" and not (operand == "string" and isinstance(value, str)):
             return False
@@ -147,7 +162,7 @@ def matches(document, query):
         elif key == "$and":
             if not all(matches(document, item) for item in expected):
                 return False
-        elif not condition(path_value(document, key), expected):
+        elif not condition(path_value(document, key), expected, exists=path_exists(document, key)):
             return False
     return True
 
@@ -281,8 +296,21 @@ class SimulatedCrash(BaseException):
 
 
 def order(order_id="order-1", **changes):
-    return {"_id": order_id, "product_id": ["999", "123"], "date_created": "2026-10-13T20:30:00Z",
+    return {"_id": order_id, "tester_gender": "female", "date_created": "2026-10-13T20:30:00Z",
             "phone": "+989120000000", **changes}
+
+
+GENDER_CASES = [
+    ("missing", {}, False), ("empty", {"tester_gender": ""}, False),
+    ("text", {"tester_gender": "female"}, True), ("space", {"tester_gender": " "}, True),
+    ("null", {"tester_gender": None}, True), ("false", {"tester_gender": False}, True),
+    ("true", {"tester_gender": True}, True), ("zero", {"tester_gender": 0}, True),
+    ("number", {"tester_gender": 42}, True), ("object", {"tester_gender": {}}, True),
+    ("empty_array", {"tester_gender": []}, True),
+    ("array", {"tester_gender": [None, False, 0]}, True),
+    ("text_array", {"tester_gender": ["female", "male"]}, True),
+    ("array_with_empty", {"tester_gender": ["female", ""]}, False),
+]
 
 
 class TesterWorkerTests(unittest.IsolatedAsyncioTestCase):
@@ -291,7 +319,7 @@ class TesterWorkerTests(unittest.IsolatedAsyncioTestCase):
         self.start_patch("socket.create_connection", side_effect=AssertionError("Network disabled"))
         self.start_patch("app.services.sms.faraz.load_dotenv")
         self.settings = worker.WorkerSettings(
-            orders_collection="preprocess_orders", product_id="123",
+            orders_collection="preprocess_orders",
             start_at=datetime(2026, 10, 13, 20, 30, tzinfo=timezone.utc), sms_enabled=True,
             selection_base_url="https://tester.example.com", token_secret="random-test-secret-" + "x" * 32,
         )
@@ -312,7 +340,7 @@ class TesterWorkerTests(unittest.IsolatedAsyncioTestCase):
     def notification(self):
         return self.db[worker.NOTIFICATIONS].documents[0]
 
-    async def test_date_product_array_and_sms_flag_filter(self):
+    async def test_date_tester_gender_and_sms_flag_filter(self):
         self.db["preprocess_orders"].documents = [
             order("old", date_created="2026-10-13T20:29:59.999999Z"),
             order("boundary"),
@@ -320,13 +348,62 @@ class TesterWorkerTests(unittest.IsolatedAsyncioTestCase):
             order("other", product_id=["1234"]),
             order("sent", sms_sent=True),
             order("scalar", product_id="123"),
+            order("empty", tester_gender=""),
         ]
         result = await self.run_worker()
-        self.assertEqual(result["accepted"], 2)
-        self.assertEqual(self.sms.send_simple.call_count, 2)
+        self.assertEqual(result["accepted"], 4)
+        self.assertEqual(self.sms.send_simple.call_count, 4)
         changed = {item["_id"] for item in self.db["preprocess_orders"].documents if item.get("sms_sent") is True}
-        self.assertEqual(changed, {"boundary", "new", "sent"})
+        self.assertEqual(changed, {"boundary", "new", "other", "scalar", "sent"})
         self.assertNotIn("sms_sent", self.db["preprocess_orders"].documents[0])
+
+    async def test_tester_gender_mongodb_type_semantics_and_ignored_product_id(self):
+        documents = []
+        for name, fields, _ in GENDER_CASES:
+            document = order(name, product_id=["unrelated"])
+            document.pop("tester_gender")
+            documents.append({**document, **fields})
+        self.db["preprocess_orders"].documents = documents
+        await self.run_worker()
+        expected = {name for name, _, eligible in GENDER_CASES if eligible}
+        actual = {row["_id"] for row in documents if row.get("sms_sent") is True}
+        self.assertEqual(actual, expected)
+        await self.run_worker()
+        self.assertEqual(self.sms.send_simple.call_count, len(expected))
+        self.assertEqual({row["order_id"] for row in self.db[worker.SELECTIONS].documents}, expected)
+
+    async def test_recovery_and_accepted_sync_use_gender_date_scope(self):
+        documents, notifications, expected = [], [], set()
+        for name, fields, eligible in GENDER_CASES:
+            for status in ("submission_unknown", "accepted"):
+                identifier = f"{status}-{name}"
+                document = order(identifier)
+                document.pop("tester_gender")
+                documents.append({**document, **fields})
+                notifications.append({"order_id": identifier, "status": status, "order_synced": False,
+                                      "updated_at": datetime.now(timezone.utc) - timedelta(minutes=10)})
+                if eligible:
+                    expected.add(identifier)
+        documents.append(order("old", date_created="2026-01-01T00:00:00Z"))
+        notifications.append({"order_id": "old", "status": "submission_unknown"})
+        before = copy.deepcopy(notifications)
+        self.db["preprocess_orders"].documents = documents
+        self.db[worker.NOTIFICATIONS].documents = notifications
+        result = await worker.recover_notifications(worker.worker_collections(self.db, self.settings),
+                                                    worker.order_filter(self.settings), 50, self.settings)
+        count = sum(eligible for _, _, eligible in GENDER_CASES)
+        self.assertEqual((result["recovered_retry"], result["repaired"]), (count, count))
+        for original, notification, document in zip(before, notifications, documents):
+            if original["order_id"] not in expected:
+                self.assertEqual(notification, original)
+                self.assertNotIn("sms_sent", document)
+            elif original["status"] == "accepted":
+                self.assertTrue(notification["order_synced"])
+                self.assertTrue(document["sms_sent"])
+            else:
+                self.assertEqual(notification["status"], "retry_pending")
+                self.assertNotIn("sms_sent", document)
+        self.http.assert_not_called()
 
     async def test_rerun_does_not_duplicate_sms_notification_or_selection(self):
         await self.run_worker()
@@ -572,6 +649,33 @@ class TesterWorkerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.db.writes, 0)
         self.sms.send_simple.assert_not_called()
 
+    async def test_new_order_index_options_and_hint_preserve_old_index(self):
+        collections = worker.worker_collections(self.db, self.settings)
+        old_index = {"key": [("product_id", 1), ("date_created", 1), ("_id", 1)]}
+        collections["orders"].indexes["tester_product_created"] = copy.deepcopy(old_index)
+        await worker.create_indexes(collections)
+        self.assertEqual(collections["orders"].indexes["tester_product_created"], old_index)
+        index = collections["orders"].indexes[worker.ORDER_INDEX]
+        self.assertEqual(index["key"], [("date_created", 1), ("_id", 1)])
+        self.assertEqual(index["partialFilterExpression"], {"tester_gender": {"$exists": True}})
+        await worker.check_indexes(collections)
+        await self.run_worker(dry_run=True)
+        self.assertEqual(collections["orders"].last_options["hint"], worker.ORDER_INDEX)
+
+    async def test_missing_or_incompatible_new_order_index_stops_before_writes(self):
+        indexes = self.db["preprocess_orders"].indexes
+        original = copy.deepcopy(indexes[worker.ORDER_INDEX])
+        for change in (None, {"partialFilterExpression": {"tester_gender": "female"}},
+                       {"partialFilterExpression": None}, {"sparse": True}, {"collation": {"locale": "en"}}):
+            with self.subTest(change=change):
+                indexes.pop(worker.ORDER_INDEX, None)
+                if change is not None:
+                    indexes[worker.ORDER_INDEX] = {**original, **change}
+                with self.assertRaisesRegex(worker.WorkerConfigurationError, "create-indexes"):
+                    await self.run_worker()
+                self.assertEqual(self.db.writes, 0)
+                self.sms.send_simple.assert_not_called()
+
     def make_retry_due(self):
         self.notification()["next_retry_at"] = datetime.now(timezone.utc) - timedelta(seconds=1)
 
@@ -776,7 +880,7 @@ class WorkerSettingsAndTokenTests(unittest.TestCase):
         patcher = patch.object(worker, "load_dotenv")
         patcher.start()
         self.addCleanup(patcher.stop)
-        self.environment = {"TESTER_PACK_PRODUCT_ID": "123", "TESTER_SMS_START_AT": "2026-10-14T00:00:00+03:30"}
+        self.environment = {"TESTER_SMS_START_AT": "2026-10-14T00:00:00+03:30"}
 
     def test_start_date_is_timezone_aware_and_converted_to_utc(self):
         with patch.dict(os.environ, self.environment, clear=True):
@@ -806,7 +910,7 @@ class WorkerSettingsAndTokenTests(unittest.TestCase):
         self.assertIn("Worker configuration error", stderr.getvalue())
 
     def test_missing_or_invalid_settings_fail_with_setting_name(self):
-        for key, invalid in (("TESTER_PACK_PRODUCT_ID", ""), ("TESTER_SMS_START_AT", "invalid"),
+        for key, invalid in (("TESTER_SMS_START_AT", "invalid"),
                              ("TESTER_SMS_START_AT", "2026-10-14T00:00:00"), ("TESTER_WORKER_BATCH_SIZE", "0"),
                              ("TESTER_SMS_ENABLED", "yes")):
             with self.subTest(key=key, invalid=invalid), patch.dict(os.environ, {**self.environment, key: invalid}, clear=True):
@@ -856,10 +960,17 @@ class WorkerSettingsAndTokenTests(unittest.TestCase):
         self.assertEqual(set("".join(tokens)), set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_"))
         self.assertNotEqual(tokens, sorted(tokens))
 
-    def test_product_id_variants_do_not_use_substrings_or_array_strings(self):
-        self.assertEqual(worker.product_id_variants("123"), ["123", 123])
-        self.assertEqual(worker.product_id_variants("00123"), ["00123"])
-        self.assertEqual(worker.product_id_variants("sku-123"), ["sku-123"])
+    def test_product_id_environment_is_no_longer_required_or_used(self):
+        for value in (None, "", "any-product"):
+            env = dict(self.environment)
+            if value is not None:
+                env["TESTER_PACK_PRODUCT_ID"] = value
+            with self.subTest(value=value), patch.dict(os.environ, env, clear=True):
+                settings = worker.WorkerSettings.from_environment()
+            self.assertFalse(hasattr(settings, "product_id"))
+            match = worker.order_filter(settings)
+            self.assertNotIn("product_id", match)
+            self.assertEqual(match["tester_gender"], {"$exists": True, "$ne": ""})
 
     def test_retry_settings_accept_only_positive_integers(self):
         for key in ("TESTER_SMS_RETRY_DELAY_MINUTES", "TESTER_SMS_MAX_ATTEMPTS"):
@@ -872,7 +983,7 @@ class WorkerSettingsAndTokenTests(unittest.TestCase):
         self.assertEqual((settings.retry_delay_minutes, settings.max_attempts), (7, 4))
 
     def test_variable_fraction_precision_and_invalid_dates(self):
-        settings = worker.WorkerSettings("preprocess_orders", "123", datetime(2026, 10, 13, 20, 30, 0, 500000, timezone.utc))
+        settings = worker.WorkerSettings("preprocess_orders", datetime(2026, 10, 13, 20, 30, 0, 500000, timezone.utc))
         match = worker.order_filter(settings)
         for timestamp, expected in (("2026-10-13T20:30:00Z", False), ("2026-10-13T20:30:00.499999Z", False),
                                     ("2026-10-13T20:30:00.5Z", True), ("2026-10-13T20:30:00.500000Z", True),

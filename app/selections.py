@@ -49,7 +49,7 @@ def validate_pids(pids):
 
 
 def eligible_order(settings):
-    # Link validity is independent of the worker's eventual sms_sent sync.
+    # Share the worker's tester_gender/date rules, independently of sms_sent sync.
     return {key: value for key, value in order_filter(settings).items() if key != "sms_sent"}
 
 

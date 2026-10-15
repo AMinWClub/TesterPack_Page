@@ -42,7 +42,9 @@ logger = logging.getLogger(__name__)
 ORDER_DATE_FIELD = "date_created"
 ORDER_MOBILE_FIELD = "phone"
 UTC_DATE_PATTERN = r"^([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2})(?:\.([0-9]{1,9}))?Z$"
-ORDER_INDEX = "tester_product_created"
+ORDER_INDEX = "tester_gender_created"
+ORDER_INDEX_KEYS = [(ORDER_DATE_FIELD, 1), ("_id", 1)]
+ORDER_INDEX_FILTER = {"tester_gender": {"$exists": True}}
 TESTER_SMS_TEXT = (
     "مشتری عزیز سراد\n\n"
     "برای تکمیل سفارش پک تستر خود، لطفاً از طریق لینک زیر اقدام فرمایید:\n\n"
@@ -57,7 +59,6 @@ class WorkerConfigurationError(ValueError):
 @dataclass(frozen=True)
 class WorkerSettings:
     orders_collection: str
-    product_id: str
     start_at: datetime
     batch_size: int = 50
     sms_enabled: bool = False
@@ -70,11 +71,8 @@ class WorkerSettings:
     def from_environment(cls, *, require_delivery: bool = False) -> WorkerSettings:
         load_dotenv(ENV_FILE, encoding="utf-8")
         collection = os.getenv("TESTER_ORDERS_COLLECTION", "preprocess_orders").strip()
-        product_id = os.getenv("TESTER_PACK_PRODUCT_ID", "").strip()
         if not collection or "$" in collection or "\x00" in collection or collection in {NOTIFICATIONS, SELECTIONS}:
             raise WorkerConfigurationError("TESTER_ORDERS_COLLECTION must name the orders collection.")
-        if not product_id:
-            raise WorkerConfigurationError("TESTER_PACK_PRODUCT_ID is required.")
         try:
             start_at = datetime.fromisoformat(os.getenv("TESTER_SMS_START_AT", ""))
         except ValueError:
@@ -103,7 +101,6 @@ class WorkerSettings:
                 raise WorkerConfigurationError(f"{name} must be a positive integer.")
         settings = cls(
             orders_collection=collection,
-            product_id=product_id,
             start_at=start_at.astimezone(timezone.utc),
             batch_size=batch_size,
             sms_enabled=enabled == "true",
@@ -130,18 +127,8 @@ class WorkerSettings:
             raise WorkerConfigurationError("TESTER_TOKEN_SECRET must be a stable random secret of at least 32 bytes.")
 
 
-def product_id_variants(product_id: str) -> list[str | int]:
-    """Match the real array element, allowing canonical numeric strings and ints."""
-    variants: list[str | int] = [product_id]
-    if re.fullmatch(r"0|[1-9][0-9]*", product_id):
-        number = int(product_id)
-        if number <= 2**63 - 1:
-            variants.append(number)
-    return variants
-
-
 def order_filter(settings: WorkerSettings) -> dict:
-    """Use the supplied schema: product_id array, UTC date_created string.
+    """Require tester_gender to exist and differ from '', with a UTC date string.
 
     The indexed range is only a coarse seconds bound. The expression pads the
     fractional part to nine digits before the exact comparison, so variable
@@ -159,7 +146,7 @@ def order_filter(settings: WorkerSettings) -> dict:
         "onError": None, "onNull": None,
     }}
     return {
-        "product_id": {"$elemMatch": {"$in": product_id_variants(settings.product_id)}},
+        "tester_gender": {"$exists": True, "$ne": ""},
         ORDER_DATE_FIELD: {"$type": "string", "$gte": prefix},
         "sms_sent": {"$ne": True},
         "$expr": {"$let": {
@@ -197,7 +184,8 @@ def eligible_pipeline(match: dict, limit: int, max_attempts: int = 3, now: datet
 
 async def create_indexes(collections: dict) -> None:
     await collections["orders"].create_index(
-        [("product_id", 1), (ORDER_DATE_FIELD, 1), ("_id", 1)], name=ORDER_INDEX,
+        ORDER_INDEX_KEYS, name=ORDER_INDEX,
+        partialFilterExpression=ORDER_INDEX_FILTER,
         collation=Collation(locale="simple"),
     )
     await collections["notifications"].create_index("order_id", unique=True, name="tester_notification_order_unique")
@@ -210,7 +198,7 @@ async def create_indexes(collections: dict) -> None:
 
 async def check_indexes(collections: dict) -> None:
     required = {
-        "orders": [(False, [("product_id", 1), (ORDER_DATE_FIELD, 1), ("_id", 1)])],
+        "orders": [(False, ORDER_INDEX_KEYS)],
         "notifications": [
             (True, [("order_id", 1)]), (False, [("status", 1), ("lease_expires_at", 1)]),
             (False, [("status", 1), ("order_synced", 1), ("accepted_at", 1)]),
@@ -223,9 +211,11 @@ async def check_indexes(collections: dict) -> None:
         for unique, keys in indexes:
             if not any(
                 list(index["key"]) == keys and bool(index.get("unique", False)) == unique
-                and not index.get("partialFilterExpression") and not index.get("sparse")
+                and index.get("partialFilterExpression") == (ORDER_INDEX_FILTER if collection == "orders" else None)
+                and (collection != "orders" or name == ORDER_INDEX)
+                and not index.get("sparse")
                 and index.get("collation", {}).get("locale", "simple") == "simple"
-                for index in existing.values()
+                for name, index in existing.items()
             ):
                 raise WorkerConfigurationError("Required indexes are missing; run --create-indexes first.")
 
@@ -349,7 +339,7 @@ async def schedule_retry(notifications, claim: dict, settings: WorkerSettings, c
 
 
 async def sync_accepted_order(collections: dict, notification: dict, order_filter: dict) -> bool:
-    # Keep the product/date guard during repair: never modify historical orders.
+    # Keep the tester_gender/date guard during repair: never modify historical orders.
     match = {key: value for key, value in order_filter.items() if key != "sms_sent"}
     result = await collections["orders"].update_one(
         {**match, "_id": notification["order_id"]}, {"$set": {"sms_sent": True}},
@@ -577,7 +567,7 @@ async def run_once(db, settings: WorkerSettings, *, limit: int | None = None,
     cursor = await collections["orders"].aggregate(
         eligible_pipeline(match, limit, settings.max_attempts), batchSize=min(limit, settings.batch_size),
         allowDiskUse=True, collation=Collation(locale="simple"),
-        hint={"product_id": 1, ORDER_DATE_FIELD: 1, "_id": 1},
+        hint=ORDER_INDEX,
     )
     async for order in cursor:
         summary["eligible"] += 1

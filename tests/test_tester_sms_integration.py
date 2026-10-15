@@ -20,6 +20,7 @@ from pymongo.asynchronous.collection import AsyncCollection
 from app.services.sms import FarazSmsClient, FarazSmsConfig
 from app.workers import tester_sms as worker
 from tests.test_sms_faraz import FakeHttpResponse
+from tests.test_tester_sms_worker import GENDER_CASES
 
 
 @unittest.skipUnless(os.getenv("TESTER_RUN_MONGO_INTEGRATION") == "1", "Set TESTER_RUN_MONGO_INTEGRATION=1 for isolated MongoDB tests")
@@ -39,7 +40,7 @@ class MongoWorkerIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await self.db.list_collection_names(), [])
         self.owned = True
         self.settings = worker.WorkerSettings(
-            "preprocess_orders", "123", datetime(2026, 10, 13, 20, 30, tzinfo=timezone.utc), sms_enabled=True,
+            "preprocess_orders", datetime(2026, 10, 13, 20, 30, tzinfo=timezone.utc), sms_enabled=True,
             selection_base_url="https://tester.example.test", token_secret="integration-secret-" + "x" * 40,
         )
         self.sms = FarazSmsClient(FarazSmsConfig(
@@ -74,7 +75,7 @@ class MongoWorkerIntegrationTests(unittest.IsolatedAsyncioTestCase):
             await self.client.close()
 
     def order(self, order_id="order-1", **changes):
-        return {"_id": order_id, "product_id": ["999", "123"], "date_created": "2026-10-13T20:30:00Z",
+        return {"_id": order_id, "tester_gender": "female", "date_created": "2026-10-13T20:30:00Z",
                 "phone": "09120000000", **changes}
 
     async def run_worker(self, **kwargs):
@@ -99,21 +100,85 @@ class MongoWorkerIntegrationTests(unittest.IsolatedAsyncioTestCase):
         await self.run_worker()
         self.http.assert_called_once()
 
-    async def test_date_product_and_old_order_filter(self):
+    async def test_date_gender_and_old_order_filter(self):
         await self.collections["orders"].insert_many([
             self.order("old", date_created="2026-10-13T20:29:59.999999Z"),
             self.order("fraction", date_created="2026-10-13T20:30:00.83444Z", product_id=[123]),
             self.order("other", product_id=["1234"]), self.order("scalar", product_id="123"),
             self.order("paid-collection-only", status="arbitrary-paid-status"), self.order("sent", sms_sent=True),
             self.order("invalid-date", date_created="2026-13-14T00:00:00Z"),
+            self.order("empty-gender", tester_gender="", product_id=["123"]),
         ])
         old_notification = {"order_id": "old", "status": "submission_unknown"}
         await self.collections["notifications"].insert_one(old_notification)
         before = await self.collections["notifications"].find_one({"order_id": "old"})
         result = await self.run_worker()
-        self.assertEqual(result["accepted"], 3)
+        self.assertEqual(result["accepted"], 5)
         self.assertEqual(await self.collections["notifications"].find_one({"order_id": "old"}), before)
         self.assertNotIn("sms_sent", await self.collections["orders"].find_one({"_id": "old"}))
+
+    async def test_real_gender_type_semantics_partial_index_and_no_resend(self):
+        fixtures = []
+        for name, fields, _ in GENDER_CASES:
+            document = self.order(name, product_id=["unrelated"])
+            document.pop("tester_gender")
+            fixtures.append({**document, **fields})
+        await self.collections["orders"].insert_many(fixtures)
+        expected = {name for name, _, eligible in GENDER_CASES if eligible} | {"order-1"}
+        raw_matches = await self.collections["orders"].find(
+            {"tester_gender": {"$exists": True, "$ne": ""}}, {"_id": 1},
+        ).to_list(length=None)
+        self.assertEqual({row["_id"] for row in raw_matches}, expected)
+        result = await self.run_worker()
+        self.assertEqual(result["accepted"], len(expected))
+        sent = await self.collections["orders"].find({"sms_sent": True}, {"_id": 1}).to_list(length=None)
+        self.assertEqual({row["_id"] for row in sent}, expected)
+        self.assertEqual(await self.collections["selections"].count_documents({}), len(expected))
+        await self.run_worker()
+        self.assertEqual(self.http.call_count, len(expected))
+
+    async def test_new_index_created_without_deleting_old_index(self):
+        orders = self.collections["orders"]
+        await orders.create_index([("product_id", 1), ("date_created", 1), ("_id", 1)],
+                                  name="tester_product_created", collation=Collation(locale="simple"))
+        old_index = (await orders.index_information())["tester_product_created"]
+        await worker.create_indexes(self.collections)
+        await worker.check_indexes(self.collections)
+        indexes = await orders.index_information()
+        self.assertEqual(indexes["tester_product_created"], old_index)
+        self.assertEqual(indexes[worker.ORDER_INDEX]["key"], [("date_created", 1), ("_id", 1)])
+        self.assertEqual(indexes[worker.ORDER_INDEX]["partialFilterExpression"], {"tester_gender": {"$exists": True}})
+        await self.run_worker()
+        self.http.assert_called_once()
+
+    async def test_recovery_and_order_sync_respect_changed_gender_scope(self):
+        orders, notifications = self.collections["orders"], self.collections["notifications"]
+        fixtures, records = [], []
+        for status in ("submission_unknown", "accepted"):
+            for name, fields in (("null", {"tester_gender": None}), ("empty", {"tester_gender": ""}), ("missing", {})):
+                identifier = f"{status}-{name}"
+                fixture = self.order(identifier)
+                fixture.pop("tester_gender")
+                fixtures.append({**fixture, **fields})
+                records.append({"order_id": identifier, "status": status, "order_synced": False,
+                                "updated_at": datetime.now(timezone.utc) - timedelta(minutes=10)})
+        await orders.insert_many(fixtures)
+        await notifications.insert_many(records)
+        before = {row["order_id"]: row for row in await notifications.find({}).to_list(length=None)}
+        result = await worker.recover_notifications(self.collections, worker.order_filter(self.settings), 50, self.settings)
+        self.assertEqual((result["recovered_retry"], result["repaired"]), (1, 1))
+        for row in await notifications.find({}).to_list(length=None):
+            fixture = await orders.find_one({"_id": row["order_id"]})
+            if row["order_id"] == "accepted-null":
+                self.assertTrue(row["order_synced"])
+                self.assertTrue(fixture["sms_sent"])
+            elif row["order_id"] == "submission_unknown-null":
+                self.assertEqual(row["status"], "retry_pending")
+                self.assertNotIn("sms_sent", fixture)
+            else:
+                self.assertEqual(row, before[row["order_id"]])
+                self.assertNotIn("sms_sent", fixture)
+        self.http.assert_not_called()
 
     async def test_timeout_due_retry_and_constant_link(self):
         self.http.side_effect = TimeoutError("simulated timeout")
@@ -283,14 +348,16 @@ class MongoWorkerIntegrationTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_query_explain_uses_orders_and_lookup_indexes(self):
         await self.collections["orders"].insert_many([
-            self.order(f"bulk-{index:04d}", product_id=["123"] if index % 100 == 0 else ["other"],
-                       date_created="2026-10-13T20:30:00.123456Z" if index % 2 == 0 else "2026-10-12T00:00:00Z")
+            {key: value for key, value in self.order(
+                f"bulk-{index:04d}",
+                date_created="2026-10-13T20:30:00.123456Z" if index % 2 == 0 else "2026-10-12T00:00:00Z",
+            ).items() if key != "tester_gender" or index % 100 == 0}
             for index in range(3000)
         ])
         pipeline = worker.eligible_pipeline(worker.order_filter(self.settings), 10, self.settings.max_attempts)
         explained = await self.db.command({"explain": {
             "aggregate": self.settings.orders_collection, "pipeline": pipeline, "cursor": {},
-            "hint": {"product_id": 1, "date_created": 1, "_id": 1}, "collation": {"locale": "simple"},
+            "hint": worker.ORDER_INDEX, "collation": {"locale": "simple"},
         }, "verbosity": "executionStats"})
         cursor = explained["stages"][0]["$cursor"]
         stages = []
