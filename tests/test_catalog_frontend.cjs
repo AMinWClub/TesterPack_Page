@@ -44,7 +44,9 @@ async function main() {
       return { ...fixtures.find(item => item.pid === pid), mainAccords: [{ name: 'چوبی', strength: 80.24, color: '#774414' }],
         notesTop: [{ name: 'رز', originalName: 'Rose', noteId: '105', image: null }], notesMiddle: [], notesBase: [],
         longevity: { label: 'ماندگار', level: 4, scale: ['خیلی ضعیف', 'ضعیف', 'متوسط', 'ماندگار', 'بسیار ماندگار'] },
-        sillage: { label: 'قوی', level: 3, scale: ['ملایم', 'متوسط', 'قوی', 'بسیار قوی'] } };
+        sillage: { label: 'قوی', level: 3, scale: ['ملایم', 'متوسط', 'قوی', 'بسیار قوی'] },
+        descriptiveTags: [{ id: 'luxurious', label: 'لوکس' }, { id: 'bold', label: 'جسور' },
+          { id: 'future_tag', label: '<img src=x onerror=alert(1)> توصیف ناشناخته با نام طولانی برای بررسی چیدمان' }] };
     }
     async function intercept(event) {
       const url = new URL(event.request.url);
@@ -56,7 +58,7 @@ async function main() {
       const pid = catalog ? null : decodeURIComponent(url.pathname.split('/').at(-1));
       let status = strategy === 'error' ? 503 : strategy === 'unavailable' ? 404 : 200;
       let body = catalog ? { products: strategy === 'empty' ? [] : fixtures, total: strategy === 'empty' ? 0 : fixtures.length } : fixtureDetail(pid);
-      if (!catalog && strategy === 'missing') body = { ...fixtures.find(item => item.pid === pid), mainAccords: [], notesTop: null, notesMiddle: [], notesBase: [], longevity: null, sillage: null };
+      if (!catalog && strategy === 'missing') body = { ...fixtures.find(item => item.pid === pid), mainAccords: [], notesTop: null, notesMiddle: [], notesBase: [], longevity: null, sillage: null, descriptiveTags: [] };
       if (status !== 200) body = { detail: 'Test error' };
       return send('Fetch.fulfillRequest', { requestId: event.requestId, responseCode: status,
         responseHeaders: [{ name: 'Content-Type', value: 'application/json; charset=utf-8' }], body: Buffer.from(JSON.stringify(body)).toString('base64') });
@@ -130,6 +132,11 @@ async function main() {
       assert(await evaluate('[...document.querySelectorAll("[data-product-image]")].every(img=>img.loading==="lazy"&&img.referrerPolicy==="no-referrer")'));
       real.push({ width, ...layout });
       await screenshot('real-detail-' + width);
+      if (await evaluate('!!document.querySelector(".pd-traits")')) {
+        await evaluate('document.querySelector(".pd-traits").scrollIntoView({behavior:"instant",block:"center"})');
+        await screenshot('real-traits-' + width);
+        assert(await evaluate('document.querySelector(".pd-traits").previousElementSibling.matches(".pd-meters")'));
+      }
       await evaluate('document.querySelector("#perfumeContent").scrollTop = 100000'); await wait(500);
       await screenshot('real-notes-' + width);
       await close();
@@ -157,6 +164,7 @@ async function main() {
     await evaluate('document.querySelector("#catalogMore").click()');
     assert(await evaluate('document.querySelectorAll(".product-card").length===48&&filteredProducts.length===498'));
     await click('.product-card .product-name'); await until('document.querySelector("#perfumeContent").dataset.state==="ready"');
+    assert(await evaluate('document.querySelectorAll(".pd-trait").length===3&&document.querySelector(".pd-trait").textContent==="لوکس"&&document.querySelectorAll(".pd-traits img").length===0'));
     assert(await evaluate('document.querySelector("#perfumeSelect").getAttribute("aria-pressed")==="true"'));
     await click('#perfumeSelect');
     assert(await evaluate('!selected.includes("0012")&&document.querySelector("#perfumeDialog").open'));
@@ -178,7 +186,7 @@ async function main() {
     mode.catalog = 'fixture'; mode.detail = 'error'; await load();
     await click('.product-card .product-name'); await until('document.querySelector("#perfumeContent").dataset.state==="error"');
     mode.detail = 'missing'; await click('#retryPerfume'); await until('document.querySelector("#perfumeContent").dataset.state==="ready"');
-    assert(await evaluate('document.querySelectorAll(".pd-note-group").length===0&&document.querySelectorAll("[role=meter]").length===0'));
+    assert(await evaluate('document.querySelectorAll(".pd-note-group").length===0&&document.querySelectorAll("[role=meter]").length===0&&document.querySelectorAll(".pd-traits").length===0'));
     await close();
     mode.detail = 'unavailable'; await evaluate('openPerfume("12")'); await until('document.querySelector("#perfumeContent").dataset.state==="error"');
     assert(await evaluate('document.querySelector("#perfumeSelect").disabled'));

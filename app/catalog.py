@@ -11,7 +11,7 @@ from fastapi.responses import Response
 from pymongo.errors import PyMongoError
 
 from app.catalog_labels import (
-    LONGEVITY, SILLAGE, accord_display, gender_display, meter_display,
+    LONGEVITY, SILLAGE, accord_display, descriptive_tags_display, gender_display, meter_display,
     notes_display, safe_image_url, scent_display, season_display, text,
 )
 
@@ -31,7 +31,7 @@ PRODUCT_PROJECTION = {"_id": 0, "pid": 1, "label": 1, "name": 1, "brand": 1, "ur
 SUMMARY_PROJECTION = {"_id": 0, **{key: 1 for key in (
     "pid", "name", "brand", "year", "imageUrl", "genderVotes", "seasonVotes", "olfactory_preferences", "mainAccords",
 )}}
-DETAIL_PROJECTION = {**SUMMARY_PROJECTION, **{key: 1 for key in ("notesTop", "notesMiddle", "notesBase", "longevity", "sillage")}}
+DETAIL_PROJECTION = {**SUMMARY_PROJECTION, **{key: 1 for key in ("notesTop", "notesMiddle", "notesBase", "longevity", "sillage", "descriptiveTags")}}
 
 
 def canonical_pid(value):
@@ -136,6 +136,7 @@ class CatalogCache:
             **{key: notes_display(fragrance.get(key)) for key in ("notesTop", "notesMiddle", "notesBase")},
             "longevity": meter_display(fragrance.get("longevity"), LONGEVITY),
             "sillage": meter_display(fragrance.get("sillage"), SILLAGE),
+            "descriptiveTags": descriptive_tags_display(fragrance.get("descriptiveTags")),
         })
         return result
 

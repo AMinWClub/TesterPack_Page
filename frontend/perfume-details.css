@@ -81,6 +81,12 @@
 .pd-meter-track i.is-active { background: var(--navy); }
 .pd-meter-track i.is-current { background: var(--gold); }
 .pd-meter-range { display: flex; justify-content: space-between; font-size: 9px; color: #8d94a1; margin-top: 7px; }
+.pd-traits { margin-top: 20px; padding-top: 16px; border-top: 1px solid #eae5db; }
+.pd-traits .pd-section-title { font-size: 13px; margin-bottom: 12px; }
+.pd-trait-list { display: flex; flex-wrap: wrap; gap: 7px; list-style: none; padding: 0; margin: 0; }
+.pd-trait { display: flex; align-items: center; gap: 6px; max-width: 100%; padding: 5px 11px; border: 1px solid #e8dcc3; border-radius: 30px; background: #f8f4ea; color: #796036; font-size: 11px; font-weight: 500; line-height: 1.8; }
+.pd-trait::before { content: ""; width: 4px; height: 4px; flex-shrink: 0; border-radius: 50%; background: var(--gold); }
+.pd-trait span { min-width: 0; overflow-wrap: anywhere; }
 .pd-empty { color: #9097a3; font-size: 12px; }
 .pd-footer { display: flex; align-items: center; justify-content: space-between; gap: 16px; border-top: 1px solid #e8e2d7; padding: 16px 24px; background: white; flex-shrink: 0; }
 .pd-footer strong { display: block; font-size: 12px; font-weight: 700; color: var(--navy); }

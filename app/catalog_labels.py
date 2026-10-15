@@ -119,6 +119,16 @@ NOTES = {
     "rhubarb": "ریواس", "toffee": "تافی", "whipped cream": "خامه زده‌شده", "Animal notes": "نت‌های حیوانی", "Quince": "به"
 }
 
+DESCRIPTIVE_TAGS = {
+    "sensual": "اغواگر", "bold": "جسور", "distinctive": "متمایز",
+    "polarizing": "سلیقه‌ای", "luxurious": "لوکس", "romantic": "رمانتیک",
+    "energetic": "پرانرژی", "modern": "مدرن", "approachable": "دلنشین",
+    "versatile": "همه‌کاره", "calming": "آرامش‌بخش", "professional": "مناسب فضای کاری",
+    "complex": "چندلایه", "nostalgic": "خاطره‌انگیز", "statement_making": "جلب‌توجه‌کننده",
+    "mysterious": "مرموز", "youthful": "جوان‌پسند", "classic": "کلاسیک",
+    "artistic": "هنری", "intimate": "صمیمی", "girly": "دخترانه",
+}
+
 GENDERS = {
     "female": ("زنانه", "زنانه"), "moreFemale": ("متمایل به زنانه", "زنانه"),
     "unisex": ("یونیسکس", "یونیسکس"), "moreMale": ("متمایل به مردانه", "مردانه"), "male": ("مردانه", "مردانه"),
@@ -168,6 +178,20 @@ def season_display(data):
 def translated(name, mapping):
     name = text(name)
     return mapping.get(name.casefold(), name)
+
+
+def descriptive_tags_display(tags):
+    """Keep source order and identity; omit raw weights and duplicate/invalid entries."""
+    result = []
+    seen = set()
+    for tag in tags if isinstance(tags, list) else []:
+        tag_id = text(tag.get("id")) if isinstance(tag, dict) else ""
+        key = tag_id.casefold()
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        result.append({"id": tag_id, "label": DESCRIPTIVE_TAGS.get(key, tag_id)})
+    return result
 
 
 def scent_display(preferences, accords):

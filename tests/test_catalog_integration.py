@@ -66,7 +66,8 @@ class CatalogMongoTests(unittest.IsolatedAsyncioTestCase):
                 continue
             pid = str(row["pid"]) if index % 2 == 0 else row["pid"]
             enrichment.append(fragrance(pid, imageUrl="https://fimgs.net/product.jpg", notesTop=[{"name": "Rose", "noteId": 105, "imageUrl": "https://fimgs.net/rose.jpg"}],
-                                        longevity={"votes": {"longLasting": 10}}, sillage={"votes": {"strong": 10}}, descriptionText="must not leak"))
+                                        longevity={"votes": {"longLasting": 10}}, sillage={"votes": {"strong": 10}},
+                                        descriptiveTags=[{"id": "romantic", "weight": 3}], descriptionText="must not leak"))
         await self.db.fragrantica_products.insert_many(enrichment)
         self.cache = CatalogCache(self.db)
         self.app = FastAPI()
@@ -97,6 +98,7 @@ class CatalogMongoTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.cache.stats, {"matched": 496, "unmatched": 2})
         self.assertEqual(result["products"][0]["brand"], "Test Brand")
         self.assertEqual(result["products"][0]["imageUrl"], "https://fimgs.net/product.jpg")
+        self.assertNotIn("descriptiveTags", result["products"][0])
         self.assertIsNone(result["products"][1]["imageUrl"])
         self.assertEqual(result["products"][1]["brand"], "برند اصلی")
         self.assertEqual(self.counter.finds, ["products_api", "fragrantica_products"])
@@ -119,10 +121,12 @@ class CatalogMongoTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["imageUrl"], "https://fimgs.net/product.jpg")
         self.assertEqual(result["longevity"]["level"], 4)
         self.assertEqual(result["sillage"]["level"], 3)
+        self.assertEqual(result["descriptiveTags"], [{"id": "romantic", "label": "رمانتیک"}])
         self.assertNotIn("descriptionText", result)
         self.assertNotIn("votes", result["longevity"])
         self.assertEqual((await asgi_get(self.app, "/api/tester/perfumes/0012"))[0], 200)
         self.assertEqual((await self.cache.detail("no-fragrance"))["mainAccords"], [])
+        self.assertEqual((await self.cache.detail("no-fragrance"))["descriptiveTags"], [])
         # Fixture only: stock changes must invalidate detail even on a cache hit.
         await self.db.products_api.update_one({"pid": 12}, {"$set": {"variations": {"a": {"in_stock": False}}}})
         self.assertEqual((await asgi_get(self.app, "/api/tester/perfumes/12"))[0], 404)

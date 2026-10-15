@@ -14,7 +14,7 @@ from app.catalog import (
     display_product, pid_variants, router,
 )
 from app.catalog_labels import (
-    ACCORDS, LONGEVITY, SILLAGE, accord_display, gender_display, meter_display,
+    ACCORDS, LONGEVITY, SILLAGE, accord_display, descriptive_tags_display, gender_display, meter_display,
     notes_display, safe_image_url, scent_display, season_display,
 )
 
@@ -130,6 +130,18 @@ class DisplayTests(unittest.TestCase):
         self.assertIsNone(result[1]["image"])
         self.assertEqual(notes_display(None), [])
 
+    def test_descriptive_tags_translate_preserve_identity_and_handle_missing_data(self):
+        result = descriptive_tags_display([
+            {"id": "luxurious", "weight": 3}, {"id": "calming", "weight": 2},
+            {"id": "LUXURIOUS", "weight": 2}, {"id": "future_tag", "weight": 3},
+            None, "bold", {}, {"id": "  "}, {"id": 12},
+        ])
+        self.assertEqual(result, [{"id": "luxurious", "label": "لوکس"},
+                                  {"id": "calming", "label": "آرامش‌بخش"},
+                                  {"id": "future_tag", "label": "future_tag"}])
+        for tags in (None, {}, "bold", []):
+            self.assertEqual(descriptive_tags_display(tags), [])
+
     def test_meters_use_votes_instead_of_disagreeing_average(self):
         data = meter_display({"average": 1, "votes": {"eternal": 10, "weak": 1}, "total": 11}, LONGEVITY)
         self.assertEqual(data["level"], 5)
@@ -206,7 +218,7 @@ class CatalogTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_api_detail_rechecks_eligibility_and_omits_raw_fields(self):
         image = "https://fimgs.net/mdimg/perfume-thumbs/375x500.62318.jpg"
-        db = fake_db(fragrances=[fragrance(imageUrl=image)])
+        db = fake_db(fragrances=[fragrance(imageUrl=image, descriptiveTags=[{"id": "bold", "weight": 3}])])
         app = FastAPI()
         app.include_router(router)
         app.state.catalog = CatalogCache(db)
@@ -214,11 +226,15 @@ class CatalogTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(status, 200)
         self.assertEqual(body["products"][0]["pid"], "12")
         self.assertEqual(body["products"][0]["imageUrl"], image)
+        self.assertNotIn("descriptiveTags", body["products"][0])
+        self.assertNotIn("descriptiveTags", db["fragrantica_products"].find.call_args.args[1])
         self.assertEqual(db["fragrantica_products"].find.call_args.args[1]["imageUrl"], 1)
         status, body = await asgi_get(app, "/api/tester/perfumes/12")
         self.assertEqual(status, 200)
         self.assertEqual(body["mainAccords"][0]["strength"], 98.25)
         self.assertEqual(body["imageUrl"], image)
+        self.assertEqual(body["descriptiveTags"], [{"id": "bold", "label": "جسور"}])
+        self.assertEqual(db["fragrantica_products"].find.call_args.args[1]["descriptiveTags"], 1)
         for field in ("descriptionText", "pros", "cons", "similarPerfumes", "genderVotes", "seasonVotes", "olfactory_preferences"):
             self.assertNotIn(field, body)
         for field in ("descriptionText", "pros", "cons", "similarPerfumes", "purchase_count", "popularityScore"):

@@ -254,7 +254,7 @@ function notesTemplate(item) {
       `<li class="pd-note">${safeImageUrl(note.image) ? `<img src="${escapeHtml(safeImageUrl(note.image))}" alt="" width="36" height="36" loading="lazy" decoding="async" referrerpolicy="no-referrer" />` : ''}<span>${escapeHtml(note.name)}</span></li>`
     ).join('')}</ul></section>`;
   }).join('');
-  return content ? `<section><h3 class="pd-section-title">سفر نت‌ها</h3><div class="pd-notes">${content}</div></section>` : '';
+  return content ? `<section><h3 class="pd-section-title">نت‌ها</h3><div class="pd-notes">${content}</div></section>` : '';
 }
 
 function meterTemplate(title, summary) {
@@ -267,6 +267,15 @@ function meterTemplate(title, summary) {
     ${known ? `<div class="pd-meter-track" role="meter" aria-label="${title}" aria-valuemin="1" aria-valuemax="${labels.length}" aria-valuenow="${level}" aria-valuetext="${escapeHtml(label)}">
       ${labels.map((_, index) => `<i aria-hidden="true" class="${index < level ? 'is-active' : ''} ${index === level - 1 ? 'is-current' : ''}"></i>`).join('')}
     </div><div class="pd-meter-range" aria-hidden="true"><span>${escapeHtml(labels[0])}</span><span>${escapeHtml(labels.at(-1))}</span></div>` : ''}
+  </section>`;
+}
+
+function descriptiveTagsTemplate(tags) {
+  const valid = (Array.isArray(tags) ? tags : []).filter(tag => typeof tag?.label === 'string' && tag.label.trim());
+  if (!valid.length) return '';
+  return `<section class="pd-traits" aria-labelledby="perfumeTraitsTitle">
+    <h3 class="pd-section-title" id="perfumeTraitsTitle">حال‌وهوای این عطر</h3>
+    <ul class="pd-trait-list">${valid.map(tag => `<li class="pd-trait"><span dir="auto">${escapeHtml(tag.label)}</span></li>`).join('')}</ul>
   </section>`;
 }
 
@@ -290,6 +299,7 @@ function renderPerfumeDetails(item) {
         ${meterTemplate('ماندگاری', item.longevity)}
         ${meterTemplate('پخش بو', item.sillage)}
       </div>
+      ${descriptiveTagsTemplate(item.descriptiveTags)}
     </section>
     <div class="pd-analysis">
       <section><h3 class="pd-section-title">آکوردهای اصلی</h3><p class="pd-section-hint">هویت رایحه، از پررنگ‌ترین تا لطیف‌ترین</p>${accordsTemplate(item.mainAccords)}</section>
