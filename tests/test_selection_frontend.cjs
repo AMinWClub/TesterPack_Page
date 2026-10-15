@@ -57,11 +57,11 @@ async function main() {
           if(new URL(req.url).search||Object.values(fixtures).some(f=>req.url.includes(f.path.split('/').at(-1))))errors.push('Token leaked in an API URL');
         }
         const referer=Object.entries(req.headers).find(([key])=>key.toLowerCase()==='referer')?.[1];
-        if(referer?.includes('/s/'))errors.push('Private URL leaked in Referer');
+        if(referer&&Object.values(fixtures).some(f=>referer.includes(f.path)))errors.push('Private URL leaked in Referer');
       }else if(m.method==='Network.responseReceived'){
         const response=m.params.response;
         const url=new URL(response.url);
-        if(url.origin===new URL(base).origin&&(url.pathname.startsWith('/s/')||url.pathname.startsWith('/api/tester/selection/'))){
+        if(url.origin===new URL(base).origin&&(/^\/[A-Za-z0-9_-]{24}\/?$/.test(url.pathname)||url.pathname.startsWith('/api/tester/selection/'))){
           const h=Object.fromEntries(Object.entries(response.headers).map(([k,v])=>[k.toLowerCase(),v]));
           if(response.status===200)headers.push({noStore:h['cache-control']==='no-store',noReferrer:h['referrer-policy']==='no-referrer',noIndex:h['x-robots-tag']?.includes('noindex')});
         }
@@ -99,6 +99,7 @@ async function main() {
 
     for(const [width,height]of [[1440,1000],[768,1024],[390,844],[320,740]]){
       await load(fixtures.success.path,width,height);await until('catalogState==="ready"');
+      assert(await evaluate('isSelectionPage&&/^\\/[A-Za-z0-9_-]{24}$/.test(location.pathname)&&selectionToken.length===24'));
       assert.equal(await evaluate('document.querySelector("#orderPhone").textContent'),fixtures.success.phone);
       assert.equal(await evaluate('document.querySelector("#orderNumber").textContent'),fixtures.success.order_id);
       assert.equal(await evaluate('getComputedStyle(document.querySelector("#orderPhone")).direction'),'ltr');
@@ -146,7 +147,7 @@ async function main() {
     await click('#modalDone');await until('selectionState==="pending"&&!submitBusy&&!document.querySelector("#submissionMessage").hidden');
     assert(await evaluate('document.querySelector("#submissionMessage").textContent.includes("موجود نیست")&&canEditSelection()'));
     await click('#modalBack');modes.submit='real';
-    await load('/s/not-a-valid-token');
+    await load('/'+'A'.repeat(24));
     assert(await evaluate('selectionState==="error"&&document.querySelector("#orderFields").hidden&&document.querySelector("#collection").hidden'));
     await screenshot('invalid-link-mobile');
     await load('/');await chooseTen();

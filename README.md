@@ -58,7 +58,7 @@ uvicorn app.main:app --reload
 ## کاتالوگ واقعی عطرها
 
 بعد از اجرای Uvicorn، صفحه را در `http://127.0.0.1:8000/` باز کنید. فایل‌های مستقل فرانت در `/frontend/` از همان FastAPI سرو می‌شوند؛ نیازی به CORS یا سرور فرانت جدا نیست.
-مسیر `/` پیش‌نمایش عمومی کاتالوگ است و امکان ثبت واقعی ندارد. مشتری باید لینک اختصاصی `/s/<token>` را باز کند تا اطلاعات واقعی سفارش و ثبت نهایی فعال شوند.
+مسیر `/` پیش‌نمایش عمومی کاتالوگ است و امکان ثبت واقعی ندارد. مشتری باید لینک اختصاصی `/<token>` را باز کند تا اطلاعات واقعی سفارش و ثبت نهایی فعال شوند.
 
 | مسیر | پاسخ |
 | --- | --- |
@@ -132,7 +132,11 @@ node tests/test_catalog_frontend.cjs
 
 ## انتخاب واقعی سفارش و لینک پیامک
 
-Worker همان توکن HMAC قبلی را می‌سازد و `https://your-domain.example/s/<token>` را پیامک می‌کند. مقدار `TESTER_SELECTION_BASE_URL` باید `https://your-domain.example/s` باشد. مسیر `/s/{token}` همان HTML ثابت را سرو می‌کند؛ CSS/JS و لوگو مسیر مطلق دارند و Refresh نیز کار می‌کند. HTML شامل اطلاعات مشتری یا توکن تعبیه‌شده نیست.
+Worker همان توکن HMAC قبلی را می‌سازد و `https://your-domain.example/<token>` را پیامک می‌کند. مقدار `TESTER_SELECTION_BASE_URL` باید فقط Origin، مانند `https://your-domain.example` باشد؛ مسیر اضافی، Query و Fragment پذیرفته نمی‌شوند و اسلش انتهایی نرمال می‌شود. مسیر `/{token}` فقط برای یک توکن ۲۴ کاراکتری با فرمت معتبر همان HTML ثابت را سرو می‌کند؛ CSS/JS و لوگو مسیر مطلق دارند و Refresh نیز کار می‌کند. HTML شامل اطلاعات مشتری یا توکن تعبیه‌شده نیست. مسیر قدیمی با پیشوند حذف شده است. `/health`، `/api/`، `/frontend/`، `/docs` و `/openapi.json` مستقل‌اند و مسیر توکن آن‌ها را نمی‌گیرد؛ مسیر ریشهٔ نامعتبر `404` می‌گیرد.
+
+```dotenv
+TESTER_SELECTION_BASE_URL=https://your-domain.example
+```
 
 API توکن را دوباره تولید نمی‌کند: فرمت `[A-Za-z0-9_-]{24}` بررسی، SHA256 محاسبه و Selection با `token_hash` پیدا می‌شود. ارتباط سفارش فقط با `order_id` از نوع اصلی `ObjectId` است. `id` مانند `OR0000087510` فقط برای نمایش استفاده می‌شود. نسخه و وضعیت Selection و وجود سفارش بررسی می‌شوند. فیلتر محصول/تاریخ دقیقاً از Worker استفاده می‌شود و فقط شرط `sms_sent` حذف می‌شود. Cutoff، Secret، پرداخت، Notification و Retry پیامک تغییر نکرده‌اند. API برای سفارش تاریخی Selection ایجاد نمی‌کند.
 
@@ -227,11 +231,22 @@ submitting_at / submitted_at / updated_at: UTC datetime
 ### امنیت و استقرار
 
 - لینک نقش Bearer Credential دارد و صاحب لینک شمارهٔ موبایل کامل سفارش را می‌بیند؛ آن را محرمانه نگه دارید. Secret فعلی Worker را تغییر ندهید و API به تولید مجدد توکن وابسته نیست.
-- در Production، TLS/HTTPS را در Reverse Proxy فعال کنید. مسیرهای `/s/`، `/api/` و `/frontend/` را با همان Origin به FastAPI برسانید. درخواست مستقیم `/s/<token>` باید به برنامه برسد؛ صرفاً فایل‌های فرانت را روی یک هاست جدا کپی نکنید.
+- در Production، TLS/HTTPS را در Reverse Proxy فعال کنید. مسیرهای `/<token>`، `/api/`، `/frontend/` و `/health` را با همان Origin به FastAPI برسانید. درخواست مستقیم `/<token>` باید به برنامه برسد؛ صرفاً فایل‌های فرانت را روی یک هاست جدا کپی نکنید.
 - صفحات و APIهای اختصاصی `Cache-Control: no-store`، `Referrer-Policy: no-referrer` و `X-Robots-Tag` دارند. Metaهای متناظر و CSP محدود به اسکریپت‌های خود پروژه نیز فعال‌اند. اطلاعات مشتری وارد کش کاتالوگ یا Storage مرورگر نمی‌شود.
-- توکن خام در لاگ برنامه نیست و Access Log استاندارد Uvicorn مسیر `/s/[redacted]` را ثبت می‌کند. در Proxy/CDN/APM هم ثبت URL اختصاصی و Body این APIها را غیرفعال کنید؛ Analytics و Session Replay روی صفحهٔ مشتری نصب نکنید.
-- برای Nginx، `access_log off;` را در Location مخصوص `/s/` بگذارید، کش مسیرهای اختصاصی و ثبت Body را خاموش کنید و `Referrer-Policy` را Override نکنید. HSTS را روی دامنهٔ HTTPS تنظیم کنید. لاگ‌های دیگر مانند Error Log، WAF و سرویس مانیتورینگ نیز نباید مسیر دارای توکن را ثبت کنند.
-- Rate Limit ساده و محدود در حافظه، پیش‌فرض ۶۰ Context/Submit در دقیقه برای هر IP و هر Process است. سقف با `TESTER_SELECTION_RATE_LIMIT_PER_MINUTE` از ۱ تا ۱۰۰۰ تنظیم می‌شود؛ Body حداکثر ۸ KiB است. این محدودسازی توزیع‌شده نیست. پشت Proxy فقط آدرس Proxyهای مورداعتماد را در `--forwarded-allow-ips` مجاز کنید تا IP مشتری درست و غیرقابل جعل باشد.
+- توکن خام در لاگ برنامه نیست و Access Log استاندارد Uvicorn مسیر `/[redacted]` را ثبت می‌کند؛ Query، اسلش انتهایی و کاراکترهای URL-encoded نیز پوشش داده می‌شوند. مسیرهای ثابت در لاگ حفظ می‌شوند. در Proxy/CDN/APM هم ثبت URL اختصاصی و Body این APIها را غیرفعال کنید؛ Analytics و Session Replay روی صفحهٔ مشتری نصب نکنید.
+- برای Nginx، `access_log off;` را در Location با Regex توکن ریشه بگذارید، کش مسیرهای اختصاصی و ثبت Body را خاموش کنید و `Referrer-Policy` را Override نکنید. HSTS را روی دامنهٔ HTTPS تنظیم کنید. لاگ‌های دیگر مانند Error Log، WAF و سرویس مانیتورینگ نیز نباید مسیر دارای توکن را ثبت کنند. نمونهٔ Location را کنار مسیرهای ثابت فعلی قرار دهید؛ Regex به آن‌ها برخورد نمی‌کند:
+
+```nginx
+location ~ "^/[A-Za-z0-9_-]{24}/?$" {
+    access_log off;
+    proxy_cache off;
+    proxy_pass http://127.0.0.1:8000;
+    proxy_set_header Host $host;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+}
+```
+Rate Limit ساده و محدود در حافظه، پیش‌فرض ۶۰ Context/Submit در دقیقه برای هر IP و هر Process است. سقف با `TESTER_SELECTION_RATE_LIMIT_PER_MINUTE` از ۱ تا ۱۰۰۰ تنظیم می‌شود؛ Body حداکثر ۸ KiB است. این محدودسازی توزیع‌شده نیست. پشت Proxy فقط آدرس Proxyهای مورداعتماد را در `--forwarded-allow-ips` مجاز کنید تا IP مشتری درست و غیرقابل جعل باشد.
 
 تنظیمات جدید فقط `TESTER_SELECTION_RATE_LIMIT_PER_MINUTE=60` است. `MONGODB_*`، `TESTER_ORDERS_COLLECTION`، `TESTER_PACK_PRODUCT_ID` و `TESTER_SMS_START_AT` موجود برای API نیز استفاده می‌شوند. برای نصب صرفاً کاتالوگ بدون تنظیمات معتبر Worker، برنامه بالا می‌آید ولی Context/Submit با `503` غیرفعال‌اند. پیکربندی فراز و `TESTER_SMS_ENABLED` فقط ارسال Worker را کنترل می‌کنند.
 
@@ -347,7 +362,7 @@ Notificationهای `accepted`، `exhausted` و خطای دائمی داده دو
 | `TESTER_SMS_START_AT` | تاریخ شروع inclusive با Timezone؛ الزامی |
 | `TESTER_WORKER_BATCH_SIZE` | حداکثر سفارش‌های ارسال در هر اجرا؛ پیش‌فرض `50` |
 | `TESTER_SMS_ENABLED` | فقط `true` یا `false`؛ پیش‌فرض `false`، حالت فقط خواندنی |
-| `TESTER_SELECTION_BASE_URL` | آدرس پایه شامل مسیر انتخاب، مانند `https://tester.example.com/s`؛ هنگام ارسال الزامی |
+| `TESTER_SELECTION_BASE_URL` | فقط Origin مانند `https://tester.example.com`، بدون مسیر؛ هنگام ارسال الزامی |
 | `TESTER_PATTERN_LINK_ATTRIBUTE` | نام دقیق متغیر لینک در پترن؛ پیش‌فرض `link` |
 | `TESTER_TOKEN_SECRET` | Secret تصادفی و ثابت با حداقل ۳۲ بایت؛ هنگام ارسال الزامی |
 | `TESTER_SMS_RETRY_DELAY_MINUTES` | فاصلهٔ Retry به دقیقه؛ فقط عدد صحیح مثبت، پیش‌فرض `5` |
@@ -509,6 +524,7 @@ tests/
   test_catalog_integration.py
   test_catalog_frontend.cjs
   test_selections.py
+  test_selection_routes.py
   test_selections_integration.py
   test_selection_frontend.cjs
   selection_preview.py

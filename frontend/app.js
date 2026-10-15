@@ -24,11 +24,11 @@ let catalogLoading = false;
 let visibleCount = PAGE_SIZE;
 let filteredProducts = [];
 const PLACEHOLDER = '/frontend/assets/perfume-placeholder.svg';
-const isSelectionPage = location.pathname.startsWith('/s/');
 const selectionToken = (() => {
-  try { return isSelectionPage ? decodeURIComponent(location.pathname.split('/')[2] || '') : ''; }
+  try { return /^\/([A-Za-z0-9_-]{24})\/?$/.exec(decodeURIComponent(location.pathname))?.[1] || ''; }
   catch { return ''; }
 })();
+const isSelectionPage = Boolean(selectionToken);
 let selectionState = isSelectionPage ? 'loading' : 'preview';
 let submitBusy = false;
 let contextBusy = false;

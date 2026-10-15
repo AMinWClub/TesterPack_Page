@@ -19,7 +19,7 @@ from pymongo import AsyncMongoClient
 
 from app.catalog import CatalogCache, router as catalog_router
 from app.config import MONGODB_DB_NAME, MONGODB_TIMEOUT_MS, MONGODB_URI
-from app.main import FRONTEND, frontend
+from app.main import FRONTEND, frontend, health
 from app.selections import router as selection_router
 from app.selection_security import SelectionSecurity
 from app.workers import tester_sms as worker
@@ -55,7 +55,7 @@ async def lifespan(app):
             fixture = order(first_name="  مشتری  ", last_name=" آزمایشی ", phone="09120000000", id="OR-TEST-" + scenario)
             await db.preprocess_orders.insert_one(fixture)
             token = (await worker.ensure_selection(db[worker.SELECTIONS], fixture["_id"], config)).rsplit("/", 1)[1]
-            fixtures[scenario] = {"path": "/s/" + token, "order_id": fixture["id"], "phone": fixture["phone"]}
+            fixtures[scenario] = {"path": "/" + token, "order_id": fixture["id"], "phone": fixture["phone"]}
         app.state.db, app.state.catalog, app.state.selection_settings = db, CatalogCache(db), config
         output = Path("test-artifacts/selection-preview.json")
         output.parent.mkdir(exist_ok=True)
@@ -73,8 +73,9 @@ app.add_middleware(SelectionSecurity, requests_per_minute=300)
 app.include_router(catalog_router)
 app.include_router(selection_router)
 app.add_api_route("/", frontend, include_in_schema=False)
-app.add_api_route("/s/{token}", frontend, include_in_schema=False)
+app.add_api_route("/health", health, include_in_schema=False)
 app.mount("/frontend", StaticFiles(directory=FRONTEND), name="frontend")
+app.add_api_route("/{token:selection_token}", frontend, include_in_schema=False)
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Disposable tester-selection preview; no SMS is sent.")

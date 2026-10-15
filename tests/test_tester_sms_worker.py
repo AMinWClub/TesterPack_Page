@@ -292,7 +292,7 @@ class TesterWorkerTests(unittest.IsolatedAsyncioTestCase):
         self.settings = worker.WorkerSettings(
             orders_collection="preprocess_orders", product_id="123",
             start_at=datetime(2026, 10, 13, 20, 30, tzinfo=timezone.utc), sms_enabled=True,
-            selection_base_url="https://tester.example.com/s", token_secret="random-test-secret-" + "x" * 32,
+            selection_base_url="https://tester.example.com", token_secret="random-test-secret-" + "x" * 32,
         )
         self.sms = FarazSmsClient(FarazSmsConfig(api_key="test-key", line_number="50001", pattern_code="pattern"))
         self.sms.send_pattern = Mock(wraps=self.sms.send_pattern)
@@ -768,9 +768,20 @@ class WorkerSettingsAndTokenTests(unittest.TestCase):
         env = {**self.environment, "TESTER_SMS_ENABLED": "true"}
         with patch.dict(os.environ, env, clear=True), self.assertRaisesRegex(worker.WorkerConfigurationError, "TESTER_SELECTION_BASE_URL"):
             worker.WorkerSettings.from_environment(require_delivery=True)
-        with patch.dict(os.environ, {**env, "TESTER_SELECTION_BASE_URL": "https://tester.example.com/s"}, clear=True), \
+        with patch.dict(os.environ, {**env, "TESTER_SELECTION_BASE_URL": "https://tester.example.com"}, clear=True), \
              self.assertRaisesRegex(worker.WorkerConfigurationError, "TESTER_TOKEN_SECRET"):
             worker.WorkerSettings.from_environment(require_delivery=True)
+
+    def test_selection_base_url_is_origin_only_and_normalizes_trailing_slash(self):
+        env = {**self.environment, "TESTER_SMS_ENABLED": "true", "TESTER_TOKEN_SECRET": "x" * 48}
+        for base in ("https://tester.example.com", "https://tester.example.com/", "http://localhost:8000/"):
+            with self.subTest(base=base), patch.dict(os.environ, {**env, "TESTER_SELECTION_BASE_URL": base}, clear=True):
+                settings = worker.WorkerSettings.from_environment(require_delivery=True)
+                self.assertEqual(settings.selection_base_url, base.rstrip("/"))
+        for path in ("/s", "/other", "/nested/path", "/?query=x", "/#fragment"):
+            with self.subTest(path=path), patch.dict(os.environ, {**env, "TESTER_SELECTION_BASE_URL": "https://tester.example.com" + path}, clear=True):
+                with self.assertRaisesRegex(worker.WorkerConfigurationError, "TESTER_SELECTION_BASE_URL"):
+                    worker.WorkerSettings.from_environment(require_delivery=True)
 
     def test_typed_identity_and_secret_affect_deterministic_24_character_token(self):
         secret = "a" * 48

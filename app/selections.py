@@ -16,6 +16,7 @@ from pymongo.errors import PyMongoError
 from app.catalog import canonical_pid, eligible_products
 from app.services.sms import SmsValidationError
 from app.services.sms.faraz import normalize_recipient
+from app.selection_security import TOKEN_PATTERN
 from app.workers.tester_sms import TOKEN_VERSION, order_filter, worker_collections
 
 router = APIRouter(prefix="/api/tester/selection", tags=["selection"])
@@ -31,7 +32,7 @@ def fail(status, code, message):
 
 
 def validate_token(token):
-    if not isinstance(token, str) or not re.fullmatch(r"[A-Za-z0-9_-]{24}", token):
+    if not isinstance(token, str) or not re.fullmatch(TOKEN_PATTERN, token):
         fail(400, "invalid_token", "لینک انتخاب تستر معتبر نیست. لطفاً از لینک پیامک استفاده کنید.")
     return hashlib.sha256(token.encode("ascii")).hexdigest()
 

@@ -34,7 +34,7 @@ class SelectionCollection(FakeCollection):
 
 def settings():
     return worker.WorkerSettings("preprocess_orders", "123", datetime(2026, 10, 14, tzinfo=timezone.utc),
-                                 selection_base_url="https://tester.example.test/s", token_secret="test-secret-" + "x" * 40)
+                                 selection_base_url="https://tester.example.test", token_secret="test-secret-" + "x" * 40)
 
 
 def order(order_id=None, **changes):
@@ -60,16 +60,20 @@ async def request(app, path, body=None, *, method="POST", raw=None, client="test
     events = []
     payload = raw if raw is not None else json.dumps(body).encode()
     received = False
+    response_done = asyncio.Event()
 
     async def receive():
         nonlocal received
         if not received:
             received = True
             return {"type": "http.request", "body": payload, "more_body": False}
+        await response_done.wait()
         return {"type": "http.disconnect"}
 
     async def send(event):
         events.append(event)
+        if event["type"] == "http.response.body" and not event.get("more_body", False):
+            response_done.set()
 
     await app({"type": "http", "asgi": {"version": "3.0"}, "http_version": "1.1", "scheme": "http", "method": method,
                "path": path, "raw_path": path.encode(), "query_string": b"", "root_path": "", "headers": [(b"content-type", b"application/json")],
@@ -262,6 +266,13 @@ class SelectionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(link.rsplit("/", 1)[1], self.token)
         self.assertEqual(self.selection, before)
 
+    async def test_worker_link_has_one_root_segment_even_with_trailing_base_slash(self):
+        from dataclasses import replace
+        from urllib.parse import urlsplit
+        for config in (self.config, replace(self.config, selection_base_url=self.config.selection_base_url + "/")):
+            link = await worker.ensure_selection(self.db[worker.SELECTIONS], self.source_order["_id"], config)
+            self.assertEqual(urlsplit(link).path, "/" + self.token)
+
     async def test_bad_body_oversize_and_rate_limit_are_private(self):
         for raw, expected in ((b'{bad', 400), (b'[]', 400), (b'x'*8193, 413)):
             self.assertEqual((await request(self.app, "/api/tester/selection/context", raw=raw))[0], expected)
@@ -274,8 +285,8 @@ class SelectionTests(unittest.IsolatedAsyncioTestCase):
 
     def test_access_log_redacts_token_and_query(self):
         record = logging.LogRecord("uvicorn.access", logging.INFO, "", 0, '%s - "%s %s HTTP/%s" %d',
-                                   ("127.0.0.1", "GET", f"/s/{self.token}?x=secret", "1.1", 200), None)
+                                   ("127.0.0.1", "GET", f"/{self.token}?x=secret", "1.1", 200), None)
         RedactSelectionAccessLog().filter(record)
         self.assertNotIn(self.token, record.getMessage())
         self.assertNotIn("secret", record.getMessage())
-        self.assertIn("/s/[redacted]", record.getMessage())
+        self.assertIn("/[redacted]", record.getMessage())

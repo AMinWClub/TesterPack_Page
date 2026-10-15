@@ -40,7 +40,7 @@ class MongoWorkerIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.owned = True
         self.settings = worker.WorkerSettings(
             "preprocess_orders", "123", datetime(2026, 10, 13, 20, 30, tzinfo=timezone.utc), sms_enabled=True,
-            selection_base_url="https://tester.example.test/s", token_secret="integration-secret-" + "x" * 40,
+            selection_base_url="https://tester.example.test", token_secret="integration-secret-" + "x" * 40,
         )
         self.sms = FarazSmsClient(FarazSmsConfig(
             api_key="integration-test-key", base_url="https://provider.example.test", line_number="50001", pattern_code="pattern",

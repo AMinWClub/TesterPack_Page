@@ -118,13 +118,13 @@ class WorkerSettings:
     def validate_delivery(self) -> None:
         try:
             url = urlsplit(self.selection_base_url)
-            valid_url = url.scheme in {"https", "http"} and url.hostname and not (
+            valid_url = url.scheme in {"https", "http"} and url.hostname and url.path in {"", "/"} and not (
                 url.username or url.password or url.query or url.fragment
             ) and not re.search(r"\s", self.selection_base_url) and (url.port is None or 1 <= url.port <= 65535)
         except ValueError:
             valid_url = False
         if not valid_url:
-            raise WorkerConfigurationError("TESTER_SELECTION_BASE_URL must be an HTTP(S) base URL without credentials or query.")
+            raise WorkerConfigurationError("TESTER_SELECTION_BASE_URL must be an HTTP(S) origin without a path, credentials, query or fragment.")
         if len(self.token_secret.encode("utf-8")) < 32 or not self.token_secret.strip():
             raise WorkerConfigurationError("TESTER_TOKEN_SECRET must be a stable random secret of at least 32 bytes.")
 
@@ -265,7 +265,7 @@ async def ensure_selection(selections, order_id, settings: WorkerSettings) -> st
         raise WorkerConfigurationError(
             "TESTER_TOKEN_SECRET is incompatible with the existing Selection token hash/version; restore the original secret."
         )
-    return f"{settings.selection_base_url}/{token}"
+    return f"{settings.selection_base_url.rstrip('/')}/{token}"
 
 
 async def prepare_notification(notifications, order_id):
@@ -567,7 +567,7 @@ async def run_once(db, settings: WorkerSettings, *, limit: int | None = None,
         if not re.fullmatch(r"[0-9]+", sms.config.line_number):
             raise WorkerConfigurationError("FARAZ_LINE_NUMBER must contain only digits.")
         # Validate global pattern settings without generating a token or sending.
-        sms.build_pattern_payload(recipient="09120000000", attributes={settings.link_attribute: "https://validation.invalid/s"})
+        sms.build_pattern_payload(recipient="09120000000", attributes={settings.link_attribute: "https://validation.invalid"})
         await check_indexes(collections)
         summary.update(await recover_notifications(collections, match, limit, settings))
     cursor = await collections["orders"].aggregate(

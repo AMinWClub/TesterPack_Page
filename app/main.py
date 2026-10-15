@@ -58,9 +58,9 @@ FRONTEND = Path(__file__).resolve().parent.parent / "frontend"
 
 
 @app.get("/", include_in_schema=False)
-@app.get("/s/{token}", include_in_schema=False)
 async def frontend():
     return FileResponse(FRONTEND / "index.html", headers={"Cache-Control": "no-store"})
 
 
 app.mount("/frontend", StaticFiles(directory=FRONTEND), name="frontend")
+app.add_api_route("/{token:selection_token}", frontend, methods=["GET"], include_in_schema=False)

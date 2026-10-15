@@ -1,10 +1,27 @@
 """Private-page headers, bounded per-process throttling and access-log redaction."""
 
 import logging
+import re
 from collections import OrderedDict
 from time import monotonic
+from urllib.parse import unquote
 
 from fastapi.responses import JSONResponse
+from starlette.convertors import StringConvertor, register_url_convertor
+
+
+TOKEN_PATTERN = r"[A-Za-z0-9_-]{24}"
+
+
+class SelectionTokenConvertor(StringConvertor):
+    regex = TOKEN_PATTERN
+
+
+register_url_convertor("selection_token", SelectionTokenConvertor())
+
+
+def is_selection_path(path):
+    return re.fullmatch(rf"/{TOKEN_PATTERN}/?", path) is not None
 
 
 PRIVATE_HEADERS = {
@@ -22,8 +39,8 @@ class RedactSelectionAccessLog(logging.Filter):
         if isinstance(record.args, tuple) and len(record.args) == 5:
             args = list(record.args)
             target = str(args[2])
-            if target.split("?", 1)[0].lower().startswith("/s/"):
-                args[2] = "/s/[redacted]"
+            if is_selection_path(unquote(target.split("?", 1)[0])):
+                args[2] = "/[redacted]"
             elif target.startswith("/api/tester/selection/"):
                 args[2] = target.split("?", 1)[0]
             record.args = tuple(args)
@@ -46,7 +63,7 @@ class SelectionSecurity:
         if scope["type"] != "http":
             return await self.app(scope, receive, send)
         path = scope["path"]
-        private = path.startswith("/s/") or path.startswith("/api/tester/selection/") or path in {"/", "/frontend/index.html"}
+        private = is_selection_path(path) or path.startswith("/api/tester/selection/") or path in {"/", "/frontend/index.html"}
         if not private:
             return await self.app(scope, receive, send)
 
