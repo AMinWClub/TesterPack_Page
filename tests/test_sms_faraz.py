@@ -40,6 +40,21 @@ class FakeHttpResponse:
         return self.body
 
 
+def simple_success_body():
+    """Synthetic provider fixture, including metadata that must never be persisted."""
+    return {
+        "status": "success", "message": "",
+        "data": {
+            "id": 15870343, "type": "simple", "status": "pending-approval",
+            "metadata": {
+                "text": "private-sms-text https://example.test/aB7xQ2mN9pR4tY6kL8",
+                "line_number": "PRO", "number_format": "english", "recipients": ["09120000000"],
+            },
+            "schedule": "2026-09-21T13:07:32.000000Z",
+        },
+    }
+
+
 class FarazSmsClientTests(unittest.TestCase):
     def setUp(self):
         # Fail closed: no test may read real credentials or make an HTTP call.
@@ -238,6 +253,48 @@ class FarazSmsClientTests(unittest.TestCase):
             self.assertEqual(response.data, data)
             self.assertFalse(hasattr(response, "request_id"))
 
+    def test_object_pending_approval_is_accepted_for_successful_http_statuses(self):
+        body = simple_success_body()
+        for status_code in (200, 201, 202, 299):
+            with self.subTest(status_code=status_code), patch(
+                "app.services.sms.faraz.urlopen", return_value=FakeHttpResponse(status_code, json.dumps(body).encode()),
+            ):
+                response = self.client.send_simple(recipient="09120000000", text="test message")
+            self.assertEqual(response.status_code, status_code)
+            self.assertEqual(response.data, 15870343)
+            self.assertIs(type(response.data), int)
+            self.assertEqual(response.body, body)
+            for private in ("private-sms-text", "09120000000", "aB7xQ2mN9pR4tY6kL8"):
+                self.assertNotIn(private, repr(response))
+
+    def test_object_success_requires_positive_integer_id_simple_type_and_known_state(self):
+        invalid_data = [
+            {}, [], None, "15870343", True,
+            *({"id": value, "type": "simple", "status": "pending-approval"}
+              for value in (None, True, False, 0, -1, 1.5, 42.0, "42", float("inf"))),
+            *({"id": 42, "type": value, "status": "pending-approval"}
+              for value in (None, "pattern", "Simple", "", [])),
+            *({"id": 42, "type": "simple", "status": value}
+              for value in (None, "success", "sent", "delivered", "failed", "pending", "PENDING-APPROVAL", [])),
+            {"id": 42, "type": "simple"}, {"id": 42, "status": "pending-approval"},
+        ]
+        for data in invalid_data:
+            body = {"status": "success", "data": data}
+            with self.subTest(data=data), patch(
+                "app.services.sms.faraz.urlopen", return_value=FakeHttpResponse(200, json.dumps(body).encode()),
+            ), self.assertRaises(SmsProviderError) as caught:
+                self.client.send_simple(recipient="09120000000", text="test message")
+            self.assertEqual(caught.exception.status_code, 200)
+
+    def test_valid_object_does_not_override_http_or_top_level_failure(self):
+        for http_status, provider_status in ((199, "success"), (300, "success"), (500, "success"),
+                                             (200, "error"), (200, "Success"), (200, None)):
+            body = {**simple_success_body(), "status": provider_status}
+            with self.subTest(http_status=http_status, provider_status=provider_status), patch(
+                "app.services.sms.faraz.urlopen", return_value=FakeHttpResponse(http_status, json.dumps(body).encode()),
+            ), self.assertRaises(SmsProviderError):
+                self.client.send_simple(recipient="09120000000", text="test message")
+
     def test_invalid_success_response_is_rejected(self):
         for body in ({}, [], {"data": 42}, {"status": "unknown", "data": 42},
                      {"status": "success"}, {"status": "success", "data": {"id": 42}},
@@ -260,6 +317,7 @@ class FarazSmsClientTests(unittest.TestCase):
     def test_sensitive_text_and_provider_data_are_not_logged(self):
         sensitive = "09120000000 test-key https://example.test/?token=private-token"
         cases = (
+            FakeHttpResponse(200, json.dumps(simple_success_body()).encode()),
             FakeHttpResponse(201, json.dumps({"status": "success", "data": 42, "messages": sensitive}).encode()),
             FakeHttpResponse(201, json.dumps({"status": "error", "data": None, "messages": sensitive}).encode()),
             HTTPError("https://provider.example", 400, sensitive, {}, io.BytesIO(sensitive.encode())),

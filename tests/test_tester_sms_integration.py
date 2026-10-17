@@ -19,7 +19,7 @@ from pymongo.asynchronous.collection import AsyncCollection
 
 from app.services.sms import FarazSmsClient, FarazSmsConfig
 from app.workers import tester_sms as worker
-from tests.test_sms_faraz import FakeHttpResponse
+from tests.test_sms_faraz import FakeHttpResponse, simple_success_body
 from tests.test_tester_sms_worker import GENDER_CASES
 
 
@@ -98,6 +98,34 @@ class MongoWorkerIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(notification["attempts"][0]["result"], "accepted")
         self.assertTrue((await self.collections["orders"].find_one({"_id": "order-1"}))["sms_sent"])
         await self.run_worker()
+        self.http.assert_called_once()
+
+    async def test_object_acceptance_persists_only_numeric_id_and_never_resends(self):
+        body = simple_success_body()
+        self.http.return_value = FakeHttpResponse(200, json.dumps(body).encode())
+        before = datetime.now(timezone.utc)
+        self.assertEqual((await self.run_worker())["accepted"], 1)
+        after = datetime.now(timezone.utc)
+        notification = await self.notification()
+        self.assertEqual((notification["status"], notification["response_status_code"], notification["provider_data"]),
+                         ("accepted", 200, 15870343))
+        self.assertIs(type(notification["provider_data"]), int)
+        self.assertTrue(notification["order_synced"])
+        self.assertTrue((await self.collections["orders"].find_one({"_id": "order-1"}))["sms_sent"])
+        # BSON dates have millisecond precision; allow only the truncated lower bound.
+        self.assertLessEqual(before.replace(microsecond=before.microsecond // 1000 * 1000), notification["accepted_at"])
+        self.assertLessEqual(notification["accepted_at"], after)
+        for key in ("error_code", "last_error_code", "next_retry_at"):
+            self.assertIsNone(notification[key])
+        self.assertEqual(notification["attempt_count"], 1)
+        self.assertEqual([row["result"] for row in notification["attempts"]], ["accepted"])
+        saved = repr(notification) + repr(await self.collections["selections"].find_one({"order_id": "order-1"}))
+        link = self.settings.selection_base_url + "/" + worker.token_for_order("order-1", self.settings.token_secret)
+        for private in ("metadata", body["data"]["schedule"], "private-sms-text", "09120000000", link,
+                        link.rsplit("/", 1)[1], "aB7xQ2mN9pR4tY6kL8"):
+            self.assertNotIn(private, saved)
+        await self.run_worker()
+        self.assertEqual(await self.notification(), notification)
         self.http.assert_called_once()
 
     async def test_date_gender_and_old_order_filter(self):
@@ -222,7 +250,7 @@ class MongoWorkerIntegrationTests(unittest.IsolatedAsyncioTestCase):
 
         def success_then_disconnect(*args, **kwargs):
             asyncio.run_coroutine_threadsafe(self.client.close(), loop).result(timeout=5)
-            return FakeHttpResponse()
+            return FakeHttpResponse(200, json.dumps(simple_success_body()).encode())
 
         self.http.side_effect = success_then_disconnect
         with self.assertRaises(PyMongoError):
@@ -237,6 +265,7 @@ class MongoWorkerIntegrationTests(unittest.IsolatedAsyncioTestCase):
             {"order_id": "order-1"}, {"$set": {"lease_expires_at": datetime.now(timezone.utc) - timedelta(seconds=1)}},
         )
         self.http.side_effect = None
+        self.http.return_value = FakeHttpResponse(200, json.dumps(simple_success_body()).encode())
         await self.run_worker()
         await self.make_retry_due()
         await self.run_worker()
@@ -255,6 +284,7 @@ class MongoWorkerIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.http.assert_called_once()
 
     async def test_accepted_record_survives_disconnect_before_order_sync(self):
+        self.http.return_value = FakeHttpResponse(200, json.dumps(simple_success_body()).encode())
         original_update = AsyncCollection.update_one
         disconnected = False
 
@@ -273,9 +303,11 @@ class MongoWorkerIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.db = self.client[self.database_name]
         self.collections = worker.worker_collections(self.db, self.settings)
         self.assertEqual((await self.notification())["status"], "accepted")
+        accepted_at = (await self.notification())["accepted_at"]
         self.assertNotIn("sms_sent", await self.collections["orders"].find_one({"_id": "order-1"}))
         result = await self.run_worker()
         self.assertEqual(result["repaired"], 1)
+        self.assertEqual((await self.notification())["accepted_at"], accepted_at)
         self.http.assert_called_once()
 
     async def test_global_errors_stop_run_before_next_order(self):

@@ -19,7 +19,7 @@ from pymongo.errors import AutoReconnect, DuplicateKeyError
 
 from app.services.sms import FarazSmsClient, FarazSmsConfig, SmsValidationError
 from app.workers import tester_sms as worker
-from tests.test_sms_faraz import FakeHttpResponse
+from tests.test_sms_faraz import FakeHttpResponse, simple_success_body
 
 
 def path_value(document, path):
@@ -582,6 +582,82 @@ class TesterWorkerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.notification()["status"], "retry_pending")
         await self.run_worker()
         self.sms.send_simple.assert_called_once()
+
+    async def test_object_pending_approval_is_accepted_without_metadata_or_resend(self):
+        self.http.return_value = FakeHttpResponse(200, json.dumps(simple_success_body()).encode())
+        before = datetime.now(timezone.utc)
+        with self.assertNoLogs(worker.logger.name, level="DEBUG"):
+            result = await self.run_worker()
+        after = datetime.now(timezone.utc)
+        notification = copy.deepcopy(self.notification())
+        self.assertEqual(result["accepted"], 1)
+        self.assertEqual(notification["status"], "accepted")
+        self.assertEqual(notification["response_status_code"], 200)
+        self.assertEqual(notification["provider_data"], 15870343)
+        self.assertIs(type(notification["provider_data"]), int)
+        self.assertTrue(notification["order_synced"])
+        self.assertTrue(self.db["preprocess_orders"].documents[0]["sms_sent"])
+        self.assertLessEqual(before, notification["accepted_at"])
+        self.assertLessEqual(notification["accepted_at"], after)
+        self.assertEqual(notification["accepted_at"].utcoffset(), timedelta(0))
+        for key in ("error_code", "last_error_code", "next_retry_at", "lease_expires_at"):
+            self.assertIsNone(notification[key])
+        self.assertEqual(notification["attempt_count"], 1)
+        attempt, = notification["attempts"]
+        self.assertEqual((attempt["attempt_number"], attempt["result"], attempt["http_status"], attempt["error_code"]),
+                         (1, "accepted", 200, None))
+        self.assertLessEqual(attempt["started_at"], attempt["finished_at"])
+        persisted = repr(self.db[worker.NOTIFICATIONS].documents + self.db[worker.SELECTIONS].documents)
+        link = self.sms.send_simple.call_args.kwargs["text"].split("\n")[-1]
+        for private in ("metadata", "private-sms-text", "09120000000", "aB7xQ2mN9pR4tY6kL8",
+                        "2026-09-21", "test-key", link, link.rsplit("/", 1)[1]):
+            self.assertNotIn(private, persisted)
+        await self.run_worker()
+        self.assertEqual(self.notification(), notification)
+        self.http.assert_called_once()
+
+    async def test_unknown_object_state_then_known_acceptance_retries_same_message(self):
+        unknown = simple_success_body()
+        unknown["data"]["status"] = "sent"
+        self.http.return_value = FakeHttpResponse(200, json.dumps(unknown).encode())
+        await self.run_worker()
+        self.assertEqual(self.notification()["status"], "retry_pending")
+        self.assertEqual(self.notification()["last_error_code"], "provider_outcome_unknown")
+        self.assertIsNone(self.notification()["accepted_at"])
+        self.assertNotIn("sms_sent", self.db["preprocess_orders"].documents[0])
+        await self.run_worker()
+        self.http.assert_called_once()
+        self.make_retry_due()
+        self.http.return_value = FakeHttpResponse(200, json.dumps(simple_success_body()).encode())
+        await self.run_worker()
+        notification = self.notification()
+        self.assertEqual((notification["status"], notification["attempt_count"], notification["provider_data"]),
+                         ("accepted", 2, 15870343))
+        self.assertIsNone(notification["error_code"])
+        self.assertIsNone(notification["last_error_code"])
+        self.assertEqual([attempt["result"] for attempt in notification["attempts"]], ["retry_pending", "accepted"])
+        self.assertEqual(self.http.call_args_list[0].args[0].data, self.http.call_args_list[1].args[0].data)
+        self.assertEqual(len(self.db[worker.SELECTIONS].documents), 1)
+        await self.run_worker()
+        self.assertEqual(self.http.call_count, 2)
+
+    async def test_object_acceptance_repairs_order_without_resending_or_resetting_acceptance(self):
+        self.http.return_value = FakeHttpResponse(200, json.dumps(simple_success_body()).encode())
+        orders = self.db["preprocess_orders"]
+        orders.fail_update = lambda update: "sms_sent" in update.get("$set", {})
+        await self.run_worker()
+        accepted_at = self.notification()["accepted_at"]
+        selection = copy.deepcopy(self.db[worker.SELECTIONS].documents)
+        self.assertEqual(self.notification()["status"], "accepted")
+        self.assertFalse(self.notification()["order_synced"])
+        self.assertNotIn("sms_sent", orders.documents[0])
+        orders.fail_update = None
+        self.assertEqual((await self.run_worker())["repaired"], 1)
+        self.assertTrue(orders.documents[0]["sms_sent"])
+        self.assertTrue(self.notification()["order_synced"])
+        self.assertEqual(self.notification()["accepted_at"], accepted_at)
+        self.assertEqual(self.db[worker.SELECTIONS].documents, selection)
+        self.http.assert_called_once()
 
     async def test_crash_after_dispatch_waits_for_lease_then_retry_delay(self):
         self.sms.send_simple.side_effect = SimulatedCrash()

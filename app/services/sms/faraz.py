@@ -73,14 +73,15 @@ class FarazSmsConfig:
 
 @dataclass(frozen=True)
 class FarazSmsResponse:
-    """Successful Simple response; data is the provider's numeric result."""
+    """Accepted Simple response; data exposes only the provider's numeric result."""
 
     status_code: int
-    body: Any
+    body: Any = field(repr=False)
 
     @property
     def data(self) -> int | float:
-        return self.body["data"]
+        data = self.body["data"]
+        return data["id"] if isinstance(data, Mapping) else data
 
 
 def normalize_recipient(value: str) -> str:
@@ -214,9 +215,18 @@ class FarazSmsClient:
                 body=body,
             )
         data = body.get("data")
-        if not isinstance(data, (int, float)) or isinstance(data, bool) or (
+        # Accept only the contracted Simple submission state, not delivery claims
+        # or undocumented states. Keep the legacy finite numeric response valid.
+        object_accepted = (
+            isinstance(data, Mapping)
+            and type(data.get("id")) is int and data["id"] > 0
+            and data.get("type") == "simple"
+            and data.get("status") == "pending-approval"
+        )
+        numeric_accepted = isinstance(data, (int, float)) and not isinstance(data, bool) and not (
             isinstance(data, float) and not math.isfinite(data)
-        ):
+        )
+        if not (object_accepted or numeric_accepted):
             raise SmsProviderError(
                 "FarazSMS returned an invalid Simple SMS response.",
                 status_code=status_code,

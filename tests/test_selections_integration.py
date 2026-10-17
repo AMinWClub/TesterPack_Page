@@ -2,11 +2,11 @@
 
 import asyncio
 import copy
+import json
 import os
 import unittest
 from datetime import datetime, timedelta, timezone
 from dataclasses import replace
-from types import SimpleNamespace
 from unittest.mock import Mock, patch
 from uuid import uuid4
 
@@ -22,6 +22,7 @@ from app.services.sms import FarazSmsClient, FarazSmsConfig
 from app.workers import tester_sms as worker
 from tests.test_selections import make_app, order, products, request, settings
 from tests.test_tester_sms_worker import SimulatedCrash
+from tests.test_sms_faraz import FakeHttpResponse, simple_success_body
 
 
 @unittest.skipUnless(os.getenv("TESTER_RUN_SELECTION_INTEGRATION") == "1", "Set TESTER_RUN_SELECTION_INTEGRATION=1 for isolated MongoDB tests")
@@ -87,9 +88,20 @@ class SelectionMongoTests(unittest.IsolatedAsyncioTestCase):
     async def test_worker_to_submission_to_readonly_and_worker_regression(self):
         await self.db[worker.NOTIFICATIONS].delete_one({"order_id": self.source_order["_id"]})
         sms = FarazSmsClient(FarazSmsConfig(api_key="test", base_url="https://provider.example.test", line_number="50001"))
-        sms.send_simple = Mock(return_value=SimpleNamespace(status_code=200, data=42))
+        sms.send_simple = Mock(wraps=sms.send_simple)
+        provider = patch("app.services.sms.faraz.urlopen", return_value=FakeHttpResponse(200, json.dumps(simple_success_body()).encode()))
+        http = provider.start()
+        self.addCleanup(provider.stop)
+        before = datetime.now(timezone.utc)
         result = await worker.run_once(self.db, replace(self.config, sms_enabled=True), sms=sms)
         self.assertEqual(result["accepted"], 1)
+        notification = await self.db[worker.NOTIFICATIONS].find_one({"order_id": self.source_order["_id"]})
+        accepted_at = notification["accepted_at"]
+        self.assertEqual(notification["provider_data"], 15870343)
+        self.assertGreaterEqual(accepted_at, before.replace(microsecond=before.microsecond // 1000 * 1000))
+        initial_context = (await self.call())[1]["selection"]
+        self.assertEqual(service.utc_date(datetime.fromisoformat(initial_context["expires_at"])), accepted_at + timedelta(minutes=30))
+        self.assertEqual(initial_context["availability"], "active")
         self.assertEqual(sms.send_simple.call_args.kwargs["text"], worker.TESTER_SMS_TEXT.format(link=self.config.selection_base_url + "/" + self.token))
         self.assertEqual((await self.call())[1]["order"]["phone"], "09123456789")
         self.assertEqual((await request(self.app, "/api/tester/catalog", method="GET"))[1]["total"], 498)
@@ -106,6 +118,8 @@ class SelectionMongoTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await self.selection(), saved)
         await worker.run_once(self.db, replace(self.config, sms_enabled=True), sms=sms)
         sms.send_simple.assert_called_once()
+        http.assert_called_once()
+        self.assertEqual((await self.db[worker.NOTIFICATIONS].find_one({"order_id": self.source_order["_id"]}))["accepted_at"], accepted_at)
         # Owned fixtures only: receipts must survive later stock disappearance.
         await self.db.products_api.delete_many({})
         self.assertEqual((await self.call())[1]["selection"]["selected_names"], expected)
