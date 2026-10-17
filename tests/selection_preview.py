@@ -52,7 +52,7 @@ async def lifespan(app):
             "longevity": {"votes": {"longLasting": 10}}, "sillage": {"votes": {"strong": 10}},
         } for i in range(1, 31)])
         fixtures = {}
-        for scenario in ("success", "uncertain", "lost_response", "unavailable", "expiry_expired", "expiry_waiting", "expiry_live"):
+        for scenario in ("success", "uncertain", "lost_response", "unavailable", "expiry_expired", "expiry_waiting", "expiry_live", "expiry_review"):
             # Exercise exact-case HMAC/Hash lookup and both URL-safe symbols.
             for _ in range(1000):
                 fixture = order(first_name="  مشتری  ", last_name=" آزمایشی ", phone="09120000000", id="OR-TEST-" + scenario)
@@ -68,8 +68,18 @@ async def lifespan(app):
             await db[worker.NOTIFICATIONS].insert_one({
                 "order_id": fixture["_id"], "status": "prepared" if scenario == "expiry_waiting" else "accepted",
                 "accepted_at": None if scenario == "expiry_waiting" else datetime.now(timezone.utc)
-                    - timedelta(minutes=31 if scenario == "expiry_expired" else 0, seconds=1),
+                    - timedelta(minutes=31 if scenario in {"expiry_expired", "expiry_review"} else 0, seconds=1),
             })
+            if scenario == "expiry_review":
+                intent_id = uuid4().hex
+                names = [row["name"] for row in rows[:10]]
+                await db[worker.SELECTIONS].update_one({"order_id": fixture["_id"]}, {"$set": {
+                    "status": "review_required", "review_reason": "unverified_order_write_time",
+                    "submission_id": intent_id, "selected_pids": [str(i) for i in range(1, 11)], "selected_names": names,
+                }})
+                await db.preprocess_orders.update_one({"_id": fixture["_id"]}, {"$set": {
+                    "recommended_products": names, "tester_selection_submission_id": intent_id,
+                }})
             fixtures[scenario] = {"path": "/" + token, "order_id": fixture["id"], "phone": fixture["phone"]}
         app.state.db, app.state.catalog, app.state.selection_settings = db, CatalogCache(db), config
         output = Path("test-artifacts/selection-preview.json")

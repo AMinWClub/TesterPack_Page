@@ -177,6 +177,18 @@ async function main() {
       assert(await evaluate('document.querySelector("#selectionNoticeDefault").textContent.includes("متناسب با جنسیتی")&&document.documentElement.scrollWidth<=innerWidth'));
       await evaluate('scrollTo({top:0,behavior:"instant"})');await screenshot('expired-'+width);
     }
+    // An expired incomplete order stays a support case, with no promise of a default box.
+    for(const [width,height] of [[1440,900],[390,844]]){
+      await load(fixtures.expiry_review.path,width,height);
+      assert(await evaluate('selectionState==="review_required"&&!canEditSelection()&&document.querySelector("#collection").hidden&&document.querySelector("#mobileSelectionBar").hidden'));
+      assert(await evaluate('document.querySelector("#selectionNoticeDefault").hidden&&!document.querySelector("#selectionNoticeSupport").hidden'));
+      assert(await evaluate('document.querySelector("#selectionNoticeTitle").textContent.includes("بررسی")&&!document.querySelector("#selectionNotice").innerText.includes("پک تستر پیش‌فرض")'));
+      assert(await evaluate('document.documentElement.scrollWidth<=innerWidth'));
+      const response=await evaluate(`(async()=>{const context=await selectionApi('context');const response=await fetch('/api/tester/selection/submit',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({token:selectionToken,pids:context.selection.selected_pids})});return {status:response.status,body:await response.json()};})()`);
+      assert.equal(response.status,409);
+      assert.equal(response.body.detail.code,'selection_review_required');
+      await evaluate('scrollTo({top:0,behavior:"instant"})');await screenshot('review-required-'+width);
+    }
     // A live page and an open final modal lock without Refresh; Date.now cannot extend it.
     await load(fixtures.expiry_live.path);await chooseTen();await review();
     setWindow('expiry_live',4);
@@ -198,7 +210,7 @@ async function main() {
     assert(await evaluate('selectionState==="preview"&&document.querySelector("#finalizeButton").disabled&&document.querySelector("#orderFields").hidden'));
     assert.equal(errors.length,0,JSON.stringify(errors));
     assert(headers.length>0&&headers.every(h=>h.noStore&&h.noReferrer&&h.noIndex),'Missing privacy headers');
-    fs.writeFileSync(path.join(artifacts,'browser-report.json'),JSON.stringify({responsive,privacyHeaders:headers.length,expiry:{responsiveWidths:[1440,390,320],liveModalLock:true,changedBrowserClock:true,directLateSubmit:410,awaitingAcceptance:true},assertions:'passed'},null,2));
+    fs.writeFileSync(path.join(artifacts,'browser-report.json'),JSON.stringify({responsive,privacyHeaders:headers.length,expiry:{responsiveWidths:[1440,390,320],liveModalLock:true,changedBrowserClock:true,directLateSubmit:410,awaitingAcceptance:true,expiredReviewNeedsSupport:true,noDefaultPackPromiseForReview:true},assertions:'passed'},null,2));
     console.log('PASS: real isolated Context/Submit, full phone, responsive, final review, double-click guard, readonly reload, saved names, lost-response recovery, ambiguous-network lock, inventory error, invalid link, preview blocked, privacy headers, no referrer/token leak, expired responsive page, awaiting SMS, live deadline modal lock, changed browser clock, parallel direct late submissions rejected.');
     await send('Browser.close');
   }finally{socket?.close();if(browser.exitCode===null)browser.kill();}

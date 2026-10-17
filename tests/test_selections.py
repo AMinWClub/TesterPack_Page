@@ -190,17 +190,17 @@ class SelectionTests(unittest.IsolatedAsyncioTestCase):
         orders = self.db["preprocess_orders"]
         original = orders.update_one
         async def expire_before_write(query, update, **kwargs):
-            if "recommended_products" in update.get("$set", {}):
+            if isinstance(update, list):
                 self.clock = self.accepted + timedelta(minutes=30)
             return await original(query, update, **kwargs)
         orders.update_one = expire_before_write
         status, result, _ = await self.call("submit", pids=self.pids)
-        self.assertEqual(status, 410)
-        self.assertEqual(result["detail"]["code"], "selection_expired")
+        self.assertEqual(status, 409)
+        self.assertEqual(result["detail"]["code"], "selection_review_required")
         self.assertEqual(self.selection["status"], "review_required")
         self.assertEqual(self.selection["review_reason"], "deadline_before_order_write")
         self.assertNotIn("recommended_products", self.stored_order)
-        self.assertEqual((await self.call())[1]["selection"]["availability"], "expired")
+        self.assertEqual((await self.call())[1]["selection"]["availability"], "review_required")
 
     async def test_crashed_intent_may_not_write_order_after_expiry(self):
         self.freeze_window()
@@ -211,12 +211,12 @@ class SelectionTests(unittest.IsolatedAsyncioTestCase):
         self.clock += timedelta(minutes=30)
         status, result, _ = await self.call()
         self.assertEqual(status, 200)
-        self.assertEqual(result["selection"]["availability"], "expired")
+        self.assertEqual(result["selection"]["availability"], "review_required")
         self.assertTrue(result["selection"]["requires_support"])
         self.assertEqual(self.selection["selected_pids"], intent["selected_pids"])
         self.assertEqual(self.selection["submission_id"], intent["submission_id"])
         self.assertNotIn("recommended_products", self.stored_order)
-        self.assertEqual((await self.call("submit", pids=self.pids))[0], 410)
+        self.assertEqual((await self.call("submit", pids=self.pids))[0], 409)
 
     async def test_on_time_order_write_recovers_receipt_after_deadline(self):
         self.freeze_window()
@@ -277,6 +277,55 @@ class SelectionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["availability"], "review_required")
         self.assertEqual(self.selection["review_reason"], "unverified_intent_time")
         self.assertNotIn("recommended_products", self.stored_order)
+
+    async def test_review_required_overrides_expired_and_missing_sms_timing_without_order_writes(self):
+        self.freeze_window()
+        with patch("app.selections.finish_intent", side_effect=SimulatedCrash):
+            with self.assertRaises(SimulatedCrash):
+                await service.submit(self.db, self.config, self.token, self.pids)
+        self.selection.update(status="review_required", review_reason="unverified_order_write_time")
+        # A pre-existing order write without a provable timestamp must not promise a default pack.
+        self.stored_order.update(recommended_products=self.selection["selected_names"],
+                                 **{service.ORDER_MARKER: self.selection["submission_id"]})
+        before_order, before_selection = copy.deepcopy(self.stored_order), copy.deepcopy(self.selection)
+        for accepted_at in (self.accepted, None, "invalid"):
+            self.clock = self.accepted + timedelta(hours=1)
+            self.db[worker.NOTIFICATIONS].documents[0]["accepted_at"] = accepted_at
+            result = (await self.call())[1]["selection"]
+            self.assertEqual((result["status"], result["availability"], result["code"]),
+                             ("review_required", "review_required", "selection_review_required"))
+            status, body, _ = await self.call("submit", pids=self.pids)
+            self.assertEqual(status, 409)
+            self.assertEqual(body["detail"]["code"], "selection_review_required")
+            self.assertEqual(self.stored_order, before_order)
+            self.assertEqual(self.selection, before_selection)
+
+    async def test_matched_but_expired_pipeline_is_noop_and_never_reported_as_success(self):
+        self.freeze_window()
+        orders = self.db["preprocess_orders"]
+        original = orders.update_one
+        results = []
+        async def stale_match(query, update, **kwargs):
+            if isinstance(update, list):
+                self.clock = self.accepted + timedelta(minutes=30)
+                # Simulate an outer match that passed: the pipeline must independently enforce the deadline.
+                query = {**query, "$expr": query["$expr"]["$and"][0]}
+            result = await original(query, update, **kwargs)
+            results.append(result)
+            return result
+        orders.update_one = stale_match
+        before = copy.deepcopy(self.stored_order)
+        status, body, _ = await self.call("submit", pids=self.pids)
+        self.assertEqual((results[0].matched_count, results[0].modified_count), (1, 0))
+        self.assertEqual((status, body["detail"]["code"]), (409, "selection_review_required"))
+        self.assertEqual(self.stored_order, before)
+        self.assertFalse(any(key in self.stored_order for key in ("recommended_products", service.ORDER_MARKER, service.ORDER_WRITTEN_AT)))
+
+    async def test_pipeline_keeps_source_names_with_dollar_signs_literal(self):
+        for index, product in enumerate(self.rows):
+            product["name"] = "$name" if index == 0 else f"$$source-name-{index}"
+        self.assertEqual((await self.call("submit", pids=self.pids))[0], 200)
+        self.assertEqual(self.stored_order["recommended_products"], [row["name"] for row in self.rows[:10]])
 
     async def test_valid_context_full_phone_trimmed_name_display_id_and_privacy(self):
         self.stored_order["sms_sent"] = True

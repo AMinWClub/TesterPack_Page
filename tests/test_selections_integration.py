@@ -261,21 +261,75 @@ class SelectionMongoTests(unittest.IsolatedAsyncioTestCase):
             {"$set": {"accepted_at": now - timedelta(minutes=29, seconds=55)}})
         original = AsyncCollection.update_one
         reached_order_write = False
+        write_results = []
         async def pause_order_write(collection, query, update, *args, **kwargs):
             nonlocal reached_order_write
-            if collection.database.name == self.database_name and "recommended_products" in update.get("$set", {}):
+            if collection.database.name == self.database_name and isinstance(update, list):
                 reached_order_write = True
                 deadline = query["$expr"]["$and"][-1]["$lt"][1]
                 server_now = service.utc_date((await self.db.command("hello"))["localTime"])
                 await asyncio.sleep(max(0, (deadline - server_now).total_seconds()) + .1)
+                # Even a successful outer match cannot bypass the pipeline's own clock guard.
+                query = {**query, "$expr": query["$expr"]["$and"][0]}
+                result = await original(collection, query, update, *args, **kwargs)
+                write_results.append((result.matched_count, result.modified_count))
+                return result
             return await original(collection, query, update, *args, **kwargs)
         with patch.object(AsyncCollection, "update_one", new=pause_order_write):
             result = await self.call("submit", pids=self.pids)
         self.assertTrue(reached_order_write)
-        self.assertEqual(result[0], 410)
+        self.assertEqual(write_results, [(1, 0)])
+        self.assertEqual(result[0], 409)
         self.assertNotIn("recommended_products", await self.stored_order())
         self.assertEqual((await self.selection())["status"], "review_required")
-        self.assertEqual((await self.call())[1]["selection"]["availability"], "expired")
+        self.assertEqual((await self.call())[1]["selection"]["availability"], "review_required")
+
+    async def test_real_pipeline_clock_consistency_exact_deadline_and_literal_names(self):
+        orders = self.db.preprocess_orders
+        intent = {"submission_id": "a" * 32, "selected_names": [f"$literal-name-{i}" for i in range(10)]}
+        now = service.utc_date((await self.db.command("hello"))["localTime"])
+        deadline = now + timedelta(seconds=3)
+        original = await self.stored_order()
+        result = await orders.update_one({"_id": original["_id"]}, service.order_write_pipeline(intent, {"expires_at": deadline}))
+        self.assertEqual((result.matched_count, result.modified_count), (1, 1))
+        saved = await self.stored_order()
+        self.assertEqual(saved["recommended_products"], intent["selected_names"])
+        self.assertEqual(saved[service.ORDER_MARKER], intent["submission_id"])
+        self.assertLess(saved[service.ORDER_WRITTEN_AT], deadline)
+        self.assertGreaterEqual(saved[service.ORDER_WRITTEN_AT], now)
+        self.assertEqual({key: value for key, value in saved.items() if key not in
+                          {"recommended_products", service.ORDER_MARKER, service.ORDER_WRITTEN_AT}}, original)
+        # Equality and one millisecond late are evaluated using the actual server's NOW,
+        # without a flaky client sleep or an application-clock approximation.
+        for expiry in ("$$NOW", {"$subtract": ["$$NOW", 1]}):
+            fixture = order()
+            await orders.insert_one(fixture)
+            result = await orders.update_one({"_id": fixture["_id"]}, service.order_write_pipeline(intent, {"expires_at": expiry}))
+            self.assertEqual((result.matched_count, result.modified_count), (1, 0))
+            self.assertEqual(await orders.find_one({"_id": fixture["_id"]}), fixture)
+
+    async def test_review_required_remains_support_state_after_expiry_or_missing_acceptance(self):
+        with patch("app.selections.finish_intent", side_effect=SimulatedCrash):
+            with self.assertRaises(SimulatedCrash):
+                await service.submit(self.db, self.config, self.token, self.pids)
+        intent = await self.selection()
+        await self.db.preprocess_orders.update_one({"_id": self.source_order["_id"]}, {"$set": {
+            "recommended_products": intent["selected_names"], service.ORDER_MARKER: intent["submission_id"],
+        }})
+        await self.db[worker.SELECTIONS].update_one({"_id": intent["_id"]}, {"$set": {
+            "status": "review_required", "review_reason": "unverified_order_write_time",
+        }})
+        before_order, before_selection = await self.stored_order(), await self.selection()
+        now = service.utc_date((await self.db.command("hello"))["localTime"])
+        for accepted in (now - timedelta(minutes=31), None):
+            await self.db[worker.NOTIFICATIONS].update_one({"order_id": self.source_order["_id"]}, {"$set": {"accepted_at": accepted}})
+            result = (await self.call())[1]["selection"]
+            self.assertEqual((result["status"], result["availability"], result["code"]),
+                             ("review_required", "review_required", "selection_review_required"))
+            status, error, _ = await self.call("submit", pids=self.pids)
+            self.assertEqual((status, error["detail"]["code"]), (409, "selection_review_required"))
+            self.assertEqual(await self.stored_order(), before_order)
+            self.assertEqual(await self.selection(), before_selection)
 
     async def test_crashed_intent_after_expiry_is_not_recovered_into_order_choices(self):
         with patch("app.selections.finish_intent", side_effect=SimulatedCrash):
@@ -287,7 +341,7 @@ class SelectionMongoTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(context["status"], "review_required")
         self.assertTrue(context["requires_support"])
         self.assertNotIn("recommended_products", await self.stored_order())
-        self.assertEqual((await self.call("submit", pids=self.pids))[0], 410)
+        self.assertEqual((await self.call("submit", pids=self.pids))[0], 409)
 
     async def test_on_time_order_write_can_finalize_after_deadline_without_rewriting_order(self):
         original = AsyncCollection.find_one_and_update

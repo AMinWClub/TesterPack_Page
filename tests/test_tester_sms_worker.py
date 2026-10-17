@@ -43,7 +43,9 @@ def expression(value, document, variables=None):
     """Evaluate only the Mongo operators used by the real date expression."""
     variables = variables or {}
     if isinstance(value, str) and value == "$$NOW":
-        return mongo_now()
+        return variables["NOW"] if "NOW" in variables else mongo_now()
+    if isinstance(value, str) and value == "$$ROOT":
+        return document
     if isinstance(value, str) and value.startswith("$$"):
         return path_value(variables, value[2:])
     if isinstance(value, str) and value.startswith("$"):
@@ -206,9 +208,15 @@ class FakeCollection:
 
     def apply_update(self, document, update):
         if isinstance(update, list):
+            variables = {"NOW": mongo_now()}
             for stage in update:
                 original = copy.deepcopy(document)
-                document.update({key: expression(value, original) for key, value in stage["$set"].items()})
+                if "$replaceWith" in stage:
+                    replacement = expression(stage["$replaceWith"], original, variables)
+                    document.clear()
+                    document.update(replacement)
+                else:
+                    document.update({key: expression(value, original, variables) for key, value in stage["$set"].items()})
         else:
             document.update(copy.deepcopy(update.get("$set", {})))
             document.update({key: mongo_now() for key in update.get("$currentDate", {})})
@@ -235,7 +243,7 @@ class FakeCollection:
 
     async def update_one(self, query, update, upsert=False, **kwargs):
         await asyncio.sleep(0)
-        update_view = {"$set": {key: value for stage in update for key, value in stage["$set"].items()}} if isinstance(update, list) else update
+        update_view = {"$set": {key: value for stage in update for key, value in stage.get("$set", {}).items()}} if isinstance(update, list) else update
         if self.fail_update and self.fail_update(update_view):
             raise AutoReconnect("simulated database failure")
         # No awaits after the match: mimic atomic single-document updates.

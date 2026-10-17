@@ -158,12 +158,12 @@ def response_context(selection, order, window=None):
     else:
         expires_at = window["expires_at"]
         remaining = max(0, (expires_at - window["now"]).total_seconds()) if expires_at else 0
-        if expires_at is None:
+        if selection["status"] == "review_required":
+            availability, code = "review_required", "selection_review_required"
+        elif expires_at is None:
             availability, code = "awaiting_sms", "sms_not_accepted"
         elif remaining == 0:
             availability, code = "expired", "selection_expired"
-        elif selection["status"] == "review_required":
-            availability, code = "review_required", "selection_review_required"
         else:
             availability, code = "active", None
     return {"order": order_display(order), "selection": {
@@ -183,6 +183,21 @@ def written_in_time(selection, order, window):
     started, written = utc_date(selection.get("submitting_at")), utc_date(order.get(ORDER_WRITTEN_AT))
     return (window["expires_at"] is not None and started is not None and written is not None
             and window["accepted_at"] <= started <= written < window["expires_at"])
+
+
+def order_write_pipeline(selection, window):
+    # The authoritative decision and timestamp share ONE pipeline's constant NOW.
+    # Do not rely on the earlier query predicate or a separate $currentDate clock.
+    # Expired commands leave the entire document unchanged, even if matched.
+    return [{"$replaceWith": {"$cond": [
+        deadline_guard(window),
+        {"$mergeObjects": ["$$ROOT", {
+            "recommended_products": {"$literal": selection["selected_names"]},
+            ORDER_MARKER: {"$literal": selection["submission_id"]},
+            ORDER_WRITTEN_AT: "$$NOW",
+        }]},
+        "$$ROOT",
+    ]}}]
 
 
 async def review_incomplete(collections, settings, selection, order, window, reason):
@@ -222,11 +237,10 @@ async def finish_intent(collections, settings, selection, order, window=None):
         match = eligible_order(settings)
         match["$expr"] = {"$and": [match["$expr"], deadline_guard(window)]}
         # Deadline and absence guard are evaluated by MongoDB in the SAME write.
-        result = await collections["orders"].update_one({
+        await collections["orders"].update_one({
             **match, "_id": selection["order_id"],
             "recommended_products": {"$exists": False}, ORDER_MARKER: {"$exists": False},
-        }, {"$set": {"recommended_products": selection["selected_names"], ORDER_MARKER: selection["submission_id"]},
-            "$currentDate": {ORDER_WRITTEN_AT: True}}, collation=SIMPLE)
+        }, order_write_pipeline(selection, window), collation=SIMPLE)
         order = await collections["orders"].find_one(
             {**eligible_order(settings), "_id": selection["order_id"]}, projection=ORDER_PROJECTION, collation=SIMPLE,
         )
@@ -237,8 +251,8 @@ async def finish_intent(collections, settings, selection, order, window=None):
                 existing_order_error()
             latest = await timed_selection(collections, {"_id": selection["_id"]})
             window = await link_window(collections, latest)
-            if not result.matched_count:
-                return await review_incomplete(collections, settings, latest, order, window, "deadline_before_order_write")
+            # A matched pipeline can intentionally be a no-op after expiration.
+            return await review_incomplete(collections, settings, latest, order, window, "deadline_before_order_write")
     if not written_in_time(selection, order, window):
         return await review_incomplete(collections, settings, selection, order, window, "unverified_order_write_time")
     finished = await collections["selections"].find_one_and_update({

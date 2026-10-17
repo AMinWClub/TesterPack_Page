@@ -215,13 +215,17 @@ PIDهای بالا نمونه‌اند؛ Body فقط `token` و ۱۰ PID رشت�
 
 بعد از اعتبارسنجی تازه، عملیات شرطی اتمیک `pending → submitting` با شرط `$$NOW < expires_at` فقط به یک درخواست اجازهٔ ثبت Intent می‌دهد. Intent شامل `submission_id`، ۱۰ `selected_pids`، ۱۰ `selected_names`، زمان‌ها و snapshot معتبر `sms_accepted_at` و `expires_at` است؛ درخواست دیگر نمی‌تواند آن را جایگزین یا تمدید کند. ساخت Intent به‌تنهایی ثبت نهایی نیست؛ موجودی رزرو یا کم نمی‌شود.
 
-سپس سفارش فقط با `_id` واقعی، همان شرایط tester_gender/تاریخ، شرط `recommended_products: {$exists: false}`، نبود Marker و بررسی مستقل `$$NOW < expires_at` در همان Update نوشته می‌شود. سه فیلد لازم به‌صورت اتمیک اضافه می‌شوند:
+سپس سفارش فقط با `_id` واقعی، همان شرایط tester_gender/تاریخ، شرط `recommended_products: {$exists: false}`، نبود Marker و بررسی `$$NOW < expires_at` نوشته می‌شود. علاوه بر Predicate اولیهٔ Query، یک Update Pipeline شرط مهلت را در خود `$cond` دوباره بررسی می‌کند؛ فقط در شاخهٔ مجاز، `$mergeObjects` هر سه فیلد را یکجا اضافه می‌کند و Timestamp از همان `$$NOW` ثابت Pipeline گرفته می‌شود. در لحظهٔ مساوی Deadline یا بعد از آن، خروجی `$$ROOT` است و کل سند بدون تغییر می‌ماند. نام‌ها و شناسهٔ ثبت با `$literal` درج می‌شوند. سه فیلد لازم:
 
 ```text
 recommended_products: [10 exact source names]
 tester_selection_submission_id: <same submission_id>
-tester_selection_written_at: UTC BSON Date (MongoDB $currentDate)
+tester_selection_written_at: UTC BSON Date (same pipeline $$NOW)
 ```
+
+`matched_count=1` ممکن است فقط به معنی اجرای شاخهٔ بدون تغییر باشد. نتیجه با خواندن دوبارهٔ سفارش و تطبیق نام‌ها، Marker و Timestamp معتبر بررسی می‌شود؛ شمارنده یا ACK به‌تنهایی موفقیت محسوب نمی‌شود. تصمیم شرطی Pipeline و Timestamp یک مبنای زمانی دارند و به یکسان‌بودن زمان ارزیابی Query اولیه و Update تکیه نمی‌کنند.
+
+تضمین زمانی بر مبنای `$$NOW` عملیات MongoDB است که در طول Pipeline ثابت می‌ماند. این Timestamp، زمان ACK شبکه یا پایان فیزیکی Journal/Commit نیست؛ MongoDB Standalone تضمین نمی‌کند ACK یا Commit فیزیکی نیز حتماً پیش از Deadline تمام شود. تأخیر اجرای عملیات یا شبکه می‌تواند مشاهدهٔ نتیجه را عقب بیندازد. ثبت جدید فقط با زمان ارزیابی همان عملیات، کوچک‌تر از Deadline مجاز است و هر سه فیلد همان تصمیم اتمیک را دنبال می‌کنند؛ تعیین مهلت سخت بر اساس لحظهٔ فیزیکی Commit با این API قابل تضمین نیست. [متغیر `NOW`](https://www.mongodb.com/docs/manual/reference/aggregation-variables/)، [Update Pipeline](https://www.mongodb.com/docs/manual/tutorial/update-documents-with-aggregation-pipeline/)
 
 Marker برای تشخیص ثبت همین Intent از آرایهٔ قدیمیِ احتمالا یکسان لازم است. زمان نوشتن سفارش برای اثبات ثبت پیش از Deadline و Recovery بعد از انقضا لازم است. پس از تأیید تطابق Marker، تمام نام‌ها و زمان معتبر نوشتن، Selection به `submitted` تغییر می‌کند. اطلاعات نهایی:
 
@@ -252,7 +256,7 @@ Intent متفاوت `409` می‌گیرد. Retry همان ۱۰ PID با همان
 
 Context زمان فعلی را از MongoDB با `$$NOW` می‌گیرد و همهٔ زمان‌ها در Backend به UTC تبدیل می‌شوند؛ BSON Date بدون Timezone نیز UTC محسوب می‌شود. نبود Notification پذیرفته‌شده، نبود/نوع نامعتبر `accepted_at` یا زمان پذیرش در آینده، وضعیت مجزای `awaiting_sms` می‌دهد و ثبت را فعال نمی‌کند. API زمان انقضا را از Body مشتری نمی‌پذیرد. Predicate اتمیک هر دو نوشتن، ساعت MongoDB را دوباره بررسی می‌کند؛ عبور از Deadline هنگام خواندن محصولات یا بین Intent و نوشتن سفارش، اجازهٔ ثبت جدید نمی‌دهد. دقیقاً در لحظهٔ Deadline نیز شرط `<` برقرار نیست. [ساعت `NOW` در MongoDB](https://www.mongodb.com/docs/manual/reference/aggregation-variables/)
 
-Context برای لینک معتبرِ منقضی همچنان `200` می‌دهد. `selection.status` وضعیت ذخیره‌شده است؛ `selection.availability` یکی از `active`، `awaiting_sms`، `expired`، `review_required` یا `submitted` است. `code=selection_expired` و `remaining_seconds=0` انقضا را مشخص می‌کنند؛ `expires_at` برای نبود پذیرش معتبر `null` است. `requires_support` رکورد نیمه‌تمام را مشخص می‌کند. Submit جدید پس از انقضا `410 selection_expired` می‌گیرد؛ یک رسید موفق قبلی همچنان `200` دارد.
+Context برای لینک معتبرِ منقضی همچنان `200` می‌دهد. `selection.status` وضعیت ذخیره‌شده است؛ `selection.availability` یکی از `active`، `awaiting_sms`، `expired`، `review_required` یا `submitted` است. اولویت ابتدا رسید `submitted` و سپس `review_required` است: مورد نیازمند پشتیبانی حتی پس از انقضا یا نبود اطلاعات زمانی معتبر، `availability=review_required` و `code=selection_review_required` دارد و وعدهٔ پک پیش‌فرض نمایش نمی‌دهد؛ Submit حل‌نشدهٔ آن `409 selection_review_required` می‌گیرد و سفارش را تغییر نمی‌دهد. برای `pending` منقضی، `code=selection_expired` و `remaining_seconds=0` انقضا را مشخص می‌کنند و Submit جدید `410` می‌گیرد. نبود پذیرش معتبر در حالت عادی `awaiting_sms` و `expires_at=null` می‌دهد. `requires_support` رکورد نیمه‌تمام را مشخص می‌کند. یک رسید موفق قبلی همچنان `200` دارد.
 
 مسیر `/<token>` بعد از انقضا حذف یا `404` نمی‌شود. فرانت به‌جای کاتالوگ و پنل انتخاب، پیام پایان مهلت و ارسال پک پیش‌فرض متناسب با جنسیت سفارش را نشان می‌دهد. تایمر محلی از `remaining_seconds` سرور، کسر زمان رفت‌وبرگشت و `performance.now()` استفاده می‌کند؛ تغییر `Date.now()` یا ساعت سیستم مهلت را تمدید نمی‌کند. صفحهٔ باز، Drawer و Modal تأیید نیز در موعد قفل/بسته می‌شوند و هنگام بازگشت به تب، Context دوباره بررسی می‌شود. مرجع نهایی ثبت همیشه Backend است.
 
