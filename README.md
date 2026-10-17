@@ -161,7 +161,16 @@ Content-Type: application/json
     "phone": "09123456789",
     "tester_count": 10
   },
-  "selection": {"status": "pending", "selected_pids": [], "selected_names": []}
+  "selection": {
+    "status": "pending",
+    "selected_pids": [],
+    "selected_names": [],
+    "availability": "active",
+    "code": null,
+    "expires_at": "2026-10-17T10:30:00+00:00",
+    "remaining_seconds": 1799.5,
+    "requires_support": false
+  }
 }
 ```
 
@@ -184,6 +193,8 @@ PIDهای بالا نمونه‌اند؛ Body فقط `token` و ۱۰ PID رشت�
 | `400` | فرمت توکن یا JSON/کلیدهای درخواست نامعتبر |
 | `404` | Selection/سفارش ناموجود، خارج از Cutoff یا لینک نامعتبر |
 | `409` | انتخاب متفاوت پس از Intent، فیلد قبلی سفارش، محصول ناموجود یا داده ناسازگار |
+| `409` | `sms_not_accepted` برای نبود پذیرش معتبر پیامک؛ `selection_review_required` برای ثبت نیمه‌تمام نیازمند پشتیبانی |
+| `410` | `selection_expired`؛ مهلت ثبت جدید تمام شده است |
 | `413` | Body بزرگ‌تر از ۸ KiB |
 | `422` | تعداد نامعتبر، PID تکراری یا PID با نوع/فرمت نامعتبر |
 | `429` | درخواست‌های بیش از حد؛ همراه `Retry-After` |
@@ -193,24 +204,26 @@ PIDهای بالا نمونه‌اند؛ Body فقط `token` و ۱۰ PID رشت�
 
 ### ثبت اتمیک، Idempotency و Recovery
 
-سه وضعیت در همان `tester_selections` استفاده می‌شوند:
+وضعیت‌های زیر در همان `tester_selections` استفاده می‌شوند:
 
 | وضعیت | معنی |
 | --- | --- |
-| `pending` | هنوز Intent ثبت نشده؛ انتخاب‌های صفحه قابل تغییرند |
-| `submitting` | یک Intent معتبر، ثابت و قابل ادامه ثبت شده است |
+| `pending` | هنوز Intent ثبت نشده؛ انتخاب فقط پس از پذیرش پیامک و پیش از Deadline مجاز است |
+| `submitting` | یک Intent معتبر و ثابت ثبت شده؛ نوشتن سفارش فقط پیش از Deadline مجاز است |
 | `submitted` | هر دو سند سازگارند و انتخاب‌ها برای همیشه فقط‌خواندنی‌اند |
+| `review_required` | ثبت نیمه‌تمامی که پس از Deadline نمی‌توان سفارش آن را نوشت، یا زمان نوشتن آن قابل اثبات نیست؛ برای بررسی پشتیبانی حفظ می‌شود |
 
-بعد از اعتبارسنجی تازه، عملیات شرطی اتمیک `pending → submitting` فقط به یک درخواست اجازهٔ ثبت Intent می‌دهد. Intent شامل `submission_id`، ۱۰ `selected_pids`، ۱۰ `selected_names` و زمان‌هاست؛ درخواست دیگر نمی‌تواند آن را جایگزین کند. همین Intent نقطهٔ پذیرش انتخاب‌های اعتبارسنجی‌شده است و در Recovery همان snapshot ادامه پیدا می‌کند؛ موجودی رزرو یا کم نمی‌شود.
+بعد از اعتبارسنجی تازه، عملیات شرطی اتمیک `pending → submitting` با شرط `$$NOW < expires_at` فقط به یک درخواست اجازهٔ ثبت Intent می‌دهد. Intent شامل `submission_id`، ۱۰ `selected_pids`، ۱۰ `selected_names`، زمان‌ها و snapshot معتبر `sms_accepted_at` و `expires_at` است؛ درخواست دیگر نمی‌تواند آن را جایگزین یا تمدید کند. ساخت Intent به‌تنهایی ثبت نهایی نیست؛ موجودی رزرو یا کم نمی‌شود.
 
-سپس سفارش فقط با `_id` واقعی، همان شرایط tester_gender/تاریخ، و شرط `recommended_products: {$exists: false}` و نبود Marker نوشته می‌شود. در یک Update اتمیک، فقط دو فیلد لازم اضافه می‌شوند:
+سپس سفارش فقط با `_id` واقعی، همان شرایط tester_gender/تاریخ، شرط `recommended_products: {$exists: false}`، نبود Marker و بررسی مستقل `$$NOW < expires_at` در همان Update نوشته می‌شود. سه فیلد لازم به‌صورت اتمیک اضافه می‌شوند:
 
 ```text
 recommended_products: [10 exact source names]
 tester_selection_submission_id: <same submission_id>
+tester_selection_written_at: UTC BSON Date (MongoDB $currentDate)
 ```
 
-Marker برای تشخیص ثبت همین Intent از آرایهٔ قدیمیِ احتمالا یکسان لازم است. پس از تأیید تطابق Marker و تمام نام‌ها، Selection به `submitted` تغییر می‌کند. اطلاعات نهایی:
+Marker برای تشخیص ثبت همین Intent از آرایهٔ قدیمیِ احتمالا یکسان لازم است. زمان نوشتن سفارش برای اثبات ثبت پیش از Deadline و Recovery بعد از انقضا لازم است. پس از تأیید تطابق Marker، تمام نام‌ها و زمان معتبر نوشتن، Selection به `submitted` تغییر می‌کند. اطلاعات نهایی:
 
 ```text
 order_id: ObjectId (unchanged)
@@ -220,13 +233,30 @@ submission_id: unique intent identifier
 selected_pids: [10 strings in customer order]
 selected_names: [10 exact products_api.name strings]
 submitting_at / submitted_at / updated_at: UTC datetime
+sms_accepted_at / expires_at: trusted UTC deadline snapshot
 ```
 
-اگر قبل از نوشتن سفارش Crash رخ دهد، Context یا Submit همان Intent را ادامه می‌دهد؛ Lease و پاک‌سازی زمان‌دار لازم نیست. اگر نوشتن سفارش موفق شد ولی پاسخ آن یا نهایی‌کردن Selection از دست رفت، Marker و اسامی از دیتابیس خوانده می‌شوند و فقط Selection تکمیل می‌شود. Intent متفاوت `409` می‌گیرد. Retry همان ۱۰ PID با همان ترتیب، پاسخ موفق قبلی را بازمی‌گرداند. Intent و سفارش ناسازگار خودکار بازنویسی نمی‌شوند و نیاز به بررسی دارند.
+اگر قبل از نوشتن سفارش Crash رخ دهد، Context یا Submit فقط تا پیش از Deadline همان Intent را ادامه می‌دهد. پس از انقضا، سفارش خالی باقی می‌ماند و Selection با `review_required` و `review_reason=deadline_before_order_write` برای پشتیبانی نگهداری می‌شود. Intent و اطلاعات Audit پاک یا جایگزین نمی‌شوند. اگر نوشتن سفارش پیش از Deadline موفق شده ولی پاسخ یا نهایی‌کردن Selection از دست رفته باشد، Marker، نام‌ها و `tester_selection_written_at` از دیتابیس بررسی می‌شوند و حتی پس از انقضا فقط Selection تکمیل می‌شود؛ سفارش دوباره نوشته نمی‌شود. یک نوشتن به‌موقع که هم‌زمان با ثبت وضعیت پشتیبانی کامل شده باشد نیز با همین شواهد قابل نهایی‌شدن است. زمان‌های ناموجود/نامعتبر در رکورد نیمه‌تمام، به‌جای حدس موفقیت، `review_reason=unverified_order_write_time` می‌گیرند. رسیدهای از قبل `submitted`، از جمله رسیدهای پیش از این تغییر که فیلد زمان جدید ندارند، حفظ می‌شوند. هیچ Migration اجرا نمی‌شود.
+
+Intent متفاوت `409` می‌گیرد. Retry همان ۱۰ PID با همان ترتیب پس از ثبت موفق، حتی بعد از انقضا، همان رسید قبلی را بازمی‌گرداند. Intent و سفارش ناسازگار خودکار بازنویسی نمی‌شوند.
+
+برای مشاهدهٔ موارد نیازمند پشتیبانی، در دیتابیس تنظیم‌شده فقط رکوردهای `tester_selections` با `{status: "review_required"}` را بررسی کنید. `review_reason` علت غیرحساس را نگه می‌دارد؛ زمان شروع Intent ناموجود یا خارج از مهلت نیز `unverified_intent_time` می‌گیرد و اجازهٔ نوشتن سفارش ندارد. این وضعیت به‌صورت خودکار به `pending` برنمی‌گردد و مهلت تمدید نمی‌شود.
 
 این روش به Transaction وابسته نیست و روی Standalone نیز کار می‌کند. Write Concern همان `majority` فعلی Worker است. ایندکس‌های یکتای `order_id` و `token_hash` فعلی حفظ می‌شوند؛ Collection، Worker، Queue یا Migration جدیدی وجود ندارد. `ensure_selection` همچنان فقط `$setOnInsert` دارد و Selection ثبت‌شده را Reset نمی‌کند.
 
 فرانت پیش از ثبت، فهرست ۱۰ نام را برای مرور نشان می‌دهد. هنگام ارسال، تغییر انتخاب‌ها و کلیک مجدد قفل می‌شوند. در خطای شبکه موفقیت حدس زده نمی‌شود؛ Context وضعیت واقعی را بررسی/بازیابی می‌کند. اگر آن هم در دسترس نبود، وضعیت نامشخص باقی می‌ماند و Retry فقط همان PIDهای ثابت را می‌فرستد. پس از موفقیت یا بازکردن دوباره لینک، رسید از نام‌های ذخیره‌شده نمایش داده می‌شود، حتی اگر محصول بعداً ناموجود باشد؛ کاتالوگ زنده برای نمایش رسید لازم نیست.
+
+### مهلت ۳۰ دقیقه‌ای لینک
+
+تنها مبنای مهلت، `accepted_at` از Notification همان سفارش با `status=accepted` است: `expires_at = accepted_at + 30 minutes`. ساخت Selection، تاریخ سفارش، بازکردن لینک و Retry ناموفق مهلت را شروع یا تمدید نمی‌کنند. Worker پس از پذیرش موفق دوباره ارسال نمی‌کند؛ `accepted_at` قبلی ثابت می‌ماند. تنظیم جدیدی در `.env` لازم نیست و مهلت ثابت است.
+
+Context زمان فعلی را از MongoDB با `$$NOW` می‌گیرد و همهٔ زمان‌ها در Backend به UTC تبدیل می‌شوند؛ BSON Date بدون Timezone نیز UTC محسوب می‌شود. نبود Notification پذیرفته‌شده، نبود/نوع نامعتبر `accepted_at` یا زمان پذیرش در آینده، وضعیت مجزای `awaiting_sms` می‌دهد و ثبت را فعال نمی‌کند. API زمان انقضا را از Body مشتری نمی‌پذیرد. Predicate اتمیک هر دو نوشتن، ساعت MongoDB را دوباره بررسی می‌کند؛ عبور از Deadline هنگام خواندن محصولات یا بین Intent و نوشتن سفارش، اجازهٔ ثبت جدید نمی‌دهد. دقیقاً در لحظهٔ Deadline نیز شرط `<` برقرار نیست. [ساعت `NOW` در MongoDB](https://www.mongodb.com/docs/manual/reference/aggregation-variables/)
+
+Context برای لینک معتبرِ منقضی همچنان `200` می‌دهد. `selection.status` وضعیت ذخیره‌شده است؛ `selection.availability` یکی از `active`، `awaiting_sms`، `expired`، `review_required` یا `submitted` است. `code=selection_expired` و `remaining_seconds=0` انقضا را مشخص می‌کنند؛ `expires_at` برای نبود پذیرش معتبر `null` است. `requires_support` رکورد نیمه‌تمام را مشخص می‌کند. Submit جدید پس از انقضا `410 selection_expired` می‌گیرد؛ یک رسید موفق قبلی همچنان `200` دارد.
+
+مسیر `/<token>` بعد از انقضا حذف یا `404` نمی‌شود. فرانت به‌جای کاتالوگ و پنل انتخاب، پیام پایان مهلت و ارسال پک پیش‌فرض متناسب با جنسیت سفارش را نشان می‌دهد. تایمر محلی از `remaining_seconds` سرور، کسر زمان رفت‌وبرگشت و `performance.now()` استفاده می‌کند؛ تغییر `Date.now()` یا ساعت سیستم مهلت را تمدید نمی‌کند. صفحهٔ باز، Drawer و Modal تأیید نیز در موعد قفل/بسته می‌شوند و هنگام بازگشت به تب، Context دوباره بررسی می‌شود. مرجع نهایی ثبت همیشه Backend است.
+
+هیچ محصول پیش‌فرض، انتخاب محلی یا آرایهٔ ناقصی پس از انقضا در `recommended_products` نوشته نمی‌شود. تخصیص واقعی پک پیش‌فرض خارج از این تغییر است.
 
 ### امنیت و استقرار
 
@@ -274,7 +304,7 @@ Remove-Item Env:TESTER_RUN_SELECTION_INTEGRATION
 ```
 
 در Linux: `TESTER_RUN_SELECTION_INTEGRATION=1 python -m unittest tests.test_selections_integration -v`.
-این تست‌ها شامل Worker تا ثبت نهایی، موجودی تازه، سقف ۴۹۸، ثبت هم‌زمان، عدم بازنویسی، قطع کلاینت واقعی MongoDB، Crash و بازیابی هر دو سند هستند. روی سفارش‌های واقعی هیچ تست ثبت انجام ندهید.
+این تست‌ها شامل Worker تا ثبت نهایی، موجودی تازه، سقف ۴۹۸، ثبت هم‌زمان، عدم بازنویسی، قطع کلاینت واقعی MongoDB، Crash و بازیابی هر دو سند هستند. تست‌های انقضا، مرز دقیق ۲۹:۵۹/۳۰:۰۰، نبود پذیرش پیامک، درخواست مستقیم و هم‌زمان، انقضا بین خواندن کاتالوگ/Intent/نوشتن سفارش، رسید بعد از انقضا و ثابت‌ماندن مهلت در اجرای دوباره Worker را پوشش می‌دهند؛ Predicateهای اتمیک و Recovery روی MongoDB واقعی نیز اجرا می‌شوند. روی سفارش‌های واقعی هیچ تست ثبت انجام ندهید.
 
 برای تست دستی و مرورگر، سرور کاملاً ایزولهٔ زیر را به جای وب‌سرور اصلی اجرا کنید:
 

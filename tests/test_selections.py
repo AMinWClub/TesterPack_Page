@@ -6,7 +6,7 @@ import hashlib
 import json
 import logging
 import unittest
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, patch
 
 from bson import ObjectId
@@ -94,6 +94,10 @@ class SelectionTests(unittest.IsolatedAsyncioTestCase):
         self.token = link.rsplit("/", 1)[1]
         self.db.collections[worker.SELECTIONS] = SelectionCollection(self.db, self.db[worker.SELECTIONS].documents)
         self.db[worker.SELECTIONS].documents[0]["_id"] = ObjectId()
+        self.db[worker.NOTIFICATIONS].documents.append({
+            "order_id": self.source_order["_id"], "status": "accepted",
+            "accepted_at": datetime.now(timezone.utc) - timedelta(seconds=1),
+        })
         self.app = make_app(self.db, self.config)
         self.rows = products()
         patcher = patch("app.selections.eligible_products", new_callable=AsyncMock, return_value=self.rows)
@@ -115,12 +119,174 @@ class SelectionTests(unittest.IsolatedAsyncioTestCase):
     def selection(self):
         return self.db[worker.SELECTIONS].documents[0]
 
+    def freeze_window(self):
+        self.clock = datetime(2026, 10, 17, 10, tzinfo=timezone.utc)
+        self.accepted = self.clock
+        self.db[worker.NOTIFICATIONS].documents[0]["accepted_at"] = self.accepted
+        patcher = patch("tests.test_tester_sms_worker.mongo_now", side_effect=lambda: self.clock)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    async def test_window_starts_at_acceptance_and_allows_29_minutes_59_seconds(self):
+        self.freeze_window()
+        self.selection["created_at"] = self.accepted - timedelta(days=20)
+        first = (await self.call())[1]["selection"]
+        self.assertEqual(first["availability"], "active")
+        self.assertEqual(first["remaining_seconds"], 1800)
+        self.assertEqual(first["expires_at"], (self.accepted + timedelta(minutes=30)).isoformat())
+        self.clock += timedelta(minutes=29, seconds=59)
+        self.assertEqual((await self.call())[1]["selection"]["remaining_seconds"], 1)
+        self.assertEqual((await self.call("submit", pids=self.pids))[0], 200)
+        self.assertEqual(self.stored_order[service.ORDER_WRITTEN_AT], self.clock)
+
+    async def test_exact_deadline_and_later_reject_direct_submit_without_changes(self):
+        self.freeze_window()
+        for elapsed in (timedelta(minutes=30), timedelta(hours=4)):
+            self.clock = self.accepted + elapsed
+            before_order, before_selection = copy.deepcopy(self.stored_order), copy.deepcopy(self.selection)
+            status, data, _ = await self.call()
+            self.assertEqual(status, 200)
+            self.assertEqual(data["selection"]["availability"], "expired")
+            self.assertEqual(data["selection"]["code"], "selection_expired")
+            status, data, _ = await self.call("submit", pids=self.pids)
+            self.assertEqual(status, 410)
+            self.assertEqual(data["detail"]["code"], "selection_expired")
+            self.assertEqual(self.stored_order, before_order)
+            self.assertEqual(self.selection, before_selection)
+
+    async def test_notification_status_and_invalid_acceptance_disable_selection(self):
+        self.freeze_window()
+        notification = self.db[worker.NOTIFICATIONS].documents[0]
+        for status, accepted in (("prepared", self.accepted), ("sending", self.accepted),
+                                 ("retry_pending", self.accepted), ("accepted", None),
+                                 ("accepted", "2026-10-17T10:00:00Z"), ("accepted", self.accepted + timedelta(minutes=1))):
+            notification.update(status=status, accepted_at=accepted)
+            result = (await self.call())[1]["selection"]
+            self.assertEqual(result["availability"], "awaiting_sms")
+            self.assertIsNone(result["expires_at"])
+            self.assertEqual((await self.call("submit", pids=self.pids))[0], 409)
+            self.assertNotIn("recommended_products", self.stored_order)
+        self.db[worker.NOTIFICATIONS].documents.clear()
+        self.assertEqual((await self.call())[1]["selection"]["availability"], "awaiting_sms")
+
+    async def test_naive_bson_accepted_at_is_utc(self):
+        self.freeze_window()
+        self.db[worker.NOTIFICATIONS].documents[0]["accepted_at"] = self.accepted.replace(tzinfo=None)
+        self.assertEqual((await self.call())[1]["selection"]["remaining_seconds"], 1800)
+
+    async def test_expiration_during_catalog_read_cannot_create_intent(self):
+        self.freeze_window()
+        async def slow_catalog(db):
+            self.clock += timedelta(minutes=30)
+            return self.rows
+        self.fresh_catalog.side_effect = slow_catalog
+        self.assertEqual((await self.call("submit", pids=self.pids))[0], 410)
+        self.assertEqual(self.selection["status"], "pending")
+        self.assertNotIn("selected_pids", self.selection)
+        self.assertNotIn("recommended_products", self.stored_order)
+
+    async def test_expiration_between_intent_and_order_write_blocks_write_and_flags_review(self):
+        self.freeze_window()
+        orders = self.db["preprocess_orders"]
+        original = orders.update_one
+        async def expire_before_write(query, update, **kwargs):
+            if "recommended_products" in update.get("$set", {}):
+                self.clock = self.accepted + timedelta(minutes=30)
+            return await original(query, update, **kwargs)
+        orders.update_one = expire_before_write
+        status, result, _ = await self.call("submit", pids=self.pids)
+        self.assertEqual(status, 410)
+        self.assertEqual(result["detail"]["code"], "selection_expired")
+        self.assertEqual(self.selection["status"], "review_required")
+        self.assertEqual(self.selection["review_reason"], "deadline_before_order_write")
+        self.assertNotIn("recommended_products", self.stored_order)
+        self.assertEqual((await self.call())[1]["selection"]["availability"], "expired")
+
+    async def test_crashed_intent_may_not_write_order_after_expiry(self):
+        self.freeze_window()
+        with patch("app.selections.finish_intent", side_effect=SimulatedCrash):
+            with self.assertRaises(SimulatedCrash):
+                await service.submit(self.db, self.config, self.token, self.pids)
+        intent = copy.deepcopy(self.selection)
+        self.clock += timedelta(minutes=30)
+        status, result, _ = await self.call()
+        self.assertEqual(status, 200)
+        self.assertEqual(result["selection"]["availability"], "expired")
+        self.assertTrue(result["selection"]["requires_support"])
+        self.assertEqual(self.selection["selected_pids"], intent["selected_pids"])
+        self.assertEqual(self.selection["submission_id"], intent["submission_id"])
+        self.assertNotIn("recommended_products", self.stored_order)
+        self.assertEqual((await self.call("submit", pids=self.pids))[0], 410)
+
+    async def test_on_time_order_write_recovers_receipt_after_deadline(self):
+        self.freeze_window()
+        collection = self.db[worker.SELECTIONS]
+        original = collection.find_one_and_update
+        async def crash_final(query, update, **kwargs):
+            if update["$set"]["status"] == "submitted":
+                raise AutoReconnect("lost final acknowledgment")
+            return await original(query, update, **kwargs)
+        collection.find_one_and_update = crash_final
+        self.assertEqual((await self.call("submit", pids=self.pids))[0], 503)
+        before = copy.deepcopy(self.stored_order)
+        self.clock += timedelta(hours=1)
+        collection.find_one_and_update = original
+        result = (await self.call())[1]
+        self.assertEqual(result["selection"]["status"], "submitted")
+        self.assertEqual(self.stored_order, before)
+        self.assertEqual((await self.call("submit", pids=self.pids))[1], result)
+        self.db[worker.NOTIFICATIONS].documents.clear()
+        self.assertEqual((await self.call())[1], result)
+
+    async def test_concurrent_late_requests_cannot_create_choices(self):
+        self.freeze_window()
+        async def expired_catalog(db):
+            self.clock = self.accepted + timedelta(minutes=30)
+            await asyncio.sleep(0)
+            return self.rows
+        self.fresh_catalog.side_effect = expired_catalog
+        results = await asyncio.gather(*(self.call("submit", pids=self.pids) for _ in range(5)))
+        self.assertTrue(all(result[0] == 410 for result in results))
+        self.assertEqual(self.selection["status"], "pending")
+        self.assertNotIn("recommended_products", self.stored_order)
+
+    async def test_client_cannot_set_deadline_or_accepted_timestamp(self):
+        self.freeze_window()
+        for key in ("expires_at", "accepted_at", "remaining_seconds", "status"):
+            self.assertEqual((await self.call("submit", pids=self.pids, **{key: "2099-01-01"}))[0], 400)
+        self.assertNotIn("expires_at", self.selection)
+
+    async def test_unverified_legacy_order_write_is_preserved_for_support(self):
+        with patch("app.selections.finish_intent", side_effect=SimulatedCrash):
+            with self.assertRaises(SimulatedCrash):
+                await service.submit(self.db, self.config, self.token, self.pids)
+        self.stored_order.update(recommended_products=self.selection["selected_names"],
+                                 **{service.ORDER_MARKER: self.selection["submission_id"]})
+        before = copy.deepcopy(self.stored_order)
+        result = (await self.call())[1]["selection"]
+        self.assertEqual(result["availability"], "review_required")
+        self.assertEqual(self.selection["review_reason"], "unverified_order_write_time")
+        self.assertEqual(self.stored_order, before)
+
+    async def test_legacy_intent_without_a_valid_start_time_cannot_write_order(self):
+        with patch("app.selections.finish_intent", side_effect=SimulatedCrash):
+            with self.assertRaises(SimulatedCrash):
+                await service.submit(self.db, self.config, self.token, self.pids)
+        self.selection.pop("submitting_at")
+        result = (await self.call())[1]["selection"]
+        self.assertEqual(result["availability"], "review_required")
+        self.assertEqual(self.selection["review_reason"], "unverified_intent_time")
+        self.assertNotIn("recommended_products", self.stored_order)
+
     async def test_valid_context_full_phone_trimmed_name_display_id_and_privacy(self):
         self.stored_order["sms_sent"] = True
         status, body, headers = await self.call()
         self.assertEqual(status, 200)
         self.assertEqual(body["order"], {"id": "OR0000087510", "customer_name": "احمد فرجی", "phone": "09123456789", "tester_count": 10})
-        self.assertEqual(body["selection"], {"status": "pending", "selected_pids": [], "selected_names": []})
+        self.assertEqual(body["selection"]["status"], "pending")
+        self.assertEqual(body["selection"]["selected_pids"], [])
+        self.assertEqual(body["selection"]["selected_names"], [])
+        self.assertEqual(body["selection"]["availability"], "active")
         for private in ("address", "payment_method", "tracking_code", "token_hash", str(self.source_order["_id"])):
             self.assertNotIn(private, json.dumps(body))
         self.assertEqual(headers["cache-control"], "no-store")
@@ -209,7 +375,7 @@ class SelectionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(body["selection"]["selected_pids"], pids)
         self.assertEqual(self.selection["status"], "submitted")
         self.assertIsInstance(self.selection["order_id"], ObjectId)
-        self.assertEqual({key: value for key, value in self.stored_order.items() if key not in {"recommended_products", service.ORDER_MARKER}}, original)
+        self.assertEqual({key: value for key, value in self.stored_order.items() if key not in {"recommended_products", service.ORDER_MARKER, service.ORDER_WRITTEN_AT}}, original)
         self.assertEqual(self.stored_order[service.ORDER_MARKER], self.selection["submission_id"])
         self.fresh_catalog.assert_awaited_once_with(self.db)
 

@@ -34,7 +34,10 @@ let submitBusy = false;
 let contextBusy = false;
 let submissionPids = null;
 let submittedNames = [];
-const canEditSelection = () => ['pending', 'preview'].includes(selectionState) && !submitBusy;
+let selectionDeadline = 0;
+let selectionExpiryTimer;
+const deadlinePassed = () => isSelectionPage && performance.now() >= selectionDeadline;
+const canEditSelection = () => ['pending', 'preview'].includes(selectionState) && !submitBusy && !deadlinePassed();
 
 function escapeHtml(str) {
   return String(str ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
@@ -204,7 +207,7 @@ function renderSelection() {
   $('#remainingLabel').textContent = n === MAX_TESTERS ? 'جعبه تکمیل شد ✦' : `${farsiNumber(remaining)} جای خالی`;
   $('#mobileRemaining').textContent = n === MAX_TESTERS ? 'آماده مرور انتخاب‌ها' : `${farsiNumber(remaining)} انتخاب باقی‌مانده`;
   $('#finalizeHint').textContent = n === MAX_TESTERS ? 'عالی! هر ۱۰ رایحه رو انتخاب کردی.' : `برای ادامه، ${farsiNumber(remaining)} عطر دیگه انتخاب کن.`;
-  $('#finalizeButton').disabled = n !== MAX_TESTERS || selectionState !== 'pending' || submitBusy;
+  $('#finalizeButton').disabled = n !== MAX_TESTERS || selectionState !== 'pending' || submitBusy || deadlinePassed();
   $('#mobileFinalize').disabled = $('#finalizeButton').disabled;
   if (selectionState === 'preview') $('#finalizeHint').textContent = 'برای ثبت واقعی، لینک اختصاصی پیامک را باز کنید.';
   $('#selectedList').innerHTML = selectedListTemplate();
@@ -417,6 +420,7 @@ function finishPerfumeClose() {
 }
 
 function openDrawer() {
+  if (!['pending', 'preview', 'submitting', 'uncertain'].includes(selectionState)) return;
   lastFocus = document.activeElement;
   $('#drawerBackdrop').hidden = false;
   const drawer = $('#mobileDrawer');
@@ -436,7 +440,7 @@ function closeDrawer() {
   lastFocus?.focus?.();
 }
 function openModal() {
-  if (selected.length !== MAX_TESTERS || selectionState !== 'pending' || submitBusy) return;
+  if (selected.length !== MAX_TESTERS || selectionState !== 'pending' || submitBusy || deadlinePassed()) return;
   if ($('#mobileDrawer').classList.contains('is-open')) closeDrawer();
   lastFocus = document.activeElement;
   $('#modalSelected').innerHTML = selected.map(id => `<li>${escapeHtml(getProduct(id).name)}</li>`).join('');
@@ -592,10 +596,51 @@ $('#demoModal').addEventListener('keydown', event => {
   else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
 });
 
-function selectionApi(action, extra = {}) {
-  return apiJson(`/api/tester/selection/${action}`, {
+async function selectionApi(action, extra = {}) {
+  const started = performance.now();
+  const data = await apiJson(`/api/tester/selection/${action}`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ token: selectionToken, ...extra }),
   });
+  data.requestDurationMs = performance.now() - started;
+  return data;
+}
+
+function closeSelectionOverlays() {
+  if ($('#perfumeDialog').open) $('#perfumeDialog').close();
+  if ($('#mobileDrawer').classList.contains('is-open')) closeDrawer();
+  $('#demoModal').inert = true;
+  $('#demoModal').setAttribute('aria-hidden', 'true');
+  $('#modalBackdrop').hidden = true;
+  document.body.style.overflow = '';
+}
+
+function checkSelectionDeadline() {
+  clearTimeout(selectionExpiryTimer);
+  if (!isSelectionPage || !['pending', 'submitting', 'uncertain'].includes(selectionState)) return;
+  const remaining = selectionDeadline - performance.now();
+  if (remaining > 0) {
+    selectionExpiryTimer = setTimeout(checkSelectionDeadline, Math.min(remaining, 30000));
+    return;
+  }
+  selectionState = 'expired';
+  closeSelectionOverlays();
+  updateSelectionPage();
+  $('#selectionNoticeTitle').focus({preventScroll:true});
+}
+
+function renderSelectionNotice() {
+  const expired = selectionState === 'expired';
+  const waiting = selectionState === 'awaiting_sms';
+  $('#selectionNotice').hidden = !['expired', 'awaiting_sms', 'review_required'].includes(selectionState);
+  $('#selectionNoticeTitle').textContent = expired ? 'مهلت انتخاب تسترهای شما به پایان رسیده است.'
+    : waiting ? 'در انتظار تأیید ارسال پیامک' : 'وضعیت انتخاب‌های شما نیاز به بررسی دارد.';
+  $('#selectionNoticeDescription').textContent = expired
+    ? 'مشتری عزیز، مهلت ۳۰ دقیقه‌ای انتخاب عطرهای پک تستر شما به پایان رسیده است.'
+    : waiting ? 'تأیید موفق ارسال پیامک هنوز ثبت نشده است. لطفاً کمی بعد وضعیت را دوباره بررسی کنید.'
+    : 'ثبت انتخاب‌های شما نیمه‌تمام است. لطفاً برای بررسی وضعیت با پشتیبانی تماس بگیرید.';
+  $('#selectionNoticeDefault').hidden = !expired;
+  $('#selectionNoticeDefault').textContent = 'پک تستر پیش‌فرض متناسب با جنسیتی که هنگام ثبت سفارش انتخاب کرده‌اید، برای شما ارسال خواهد شد.';
+  $('#refreshSelectionNotice').hidden = !waiting;
 }
 
 function updateSelectionPage() {
@@ -603,16 +648,17 @@ function updateSelectionPage() {
   $('#collection').hidden = !browsing;
   $('#mobileSelectionBar').hidden = !browsing;
   $('#submittedSelection').hidden = selectionState !== 'submitted';
+  renderSelectionNotice();
   $('.order-card').setAttribute('aria-busy', String(selectionState === 'loading'));
   $('#orderFields').hidden = ['loading', 'error', 'preview'].includes(selectionState);
-  $('#orderState').hidden = ['pending', 'submitted', 'submitting'].includes(selectionState);
+  $('#orderState').hidden = ['pending', 'submitted', 'submitting', 'expired', 'awaiting_sms', 'review_required'].includes(selectionState);
   $('#headerCount').disabled = !browsing;
   renderSelection();
   renderCatalog(false);
 }
 
 function applySelectionContext(data) {
-  if (!data.order || !['pending', 'submitted'].includes(data.selection?.status)
+  if (!data.order || !['pending', 'submitted', 'submitting', 'review_required'].includes(data.selection?.status)
       || data.order.tester_count !== MAX_TESTERS || typeof data.order.customer_name !== 'string'
       || typeof data.order.phone !== 'string' || typeof data.order.id !== 'string') throw new Error('Invalid context');
   const status = data.selection.status;
@@ -622,7 +668,12 @@ function applySelectionContext(data) {
   $('#orderCustomerName').textContent = data.order.customer_name;
   $('#orderNumber').textContent = data.order.id;
   $('#orderPhone').textContent = data.order.phone;
-  selectionState = status;
+  const availability = data.selection.availability;
+  if (!['active', 'expired', 'awaiting_sms', 'review_required', 'submitted'].includes(availability)) throw new Error('Invalid window');
+  if (availability === 'active' && (!Number.isFinite(data.selection.remaining_seconds) || data.selection.remaining_seconds <= 0)) throw new Error('Invalid window');
+  selectionDeadline = performance.now() + Math.max(0, (data.selection.remaining_seconds || 0) * 1000 - (data.requestDurationMs || 0));
+  selectionState = status === 'submitted' ? 'submitted' : availability === 'active' ? 'pending' : availability;
+  $('#selectionNoticeSupport').hidden = !data.selection.requires_support;
   submissionPids = null;
   if (status === 'submitted') {
     submittedNames = [...data.selection.selected_names];
@@ -631,7 +682,9 @@ function applySelectionContext(data) {
     data.selection.selected_pids.forEach((pid, i) => productsByPid.set(pid, { pid, name: submittedNames[i] }));
     $('#submittedList').innerHTML = submittedNames.map(name => `<li>${escapeHtml(name)}</li>`).join('');
   }
+  if (['expired', 'awaiting_sms', 'review_required'].includes(selectionState)) closeSelectionOverlays();
   updateSelectionPage();
+  checkSelectionDeadline();
 }
 
 async function loadSelectionContext() {
@@ -666,6 +719,7 @@ function showSubmissionSuccess() {
 
 async function submitSelection() {
   if (submitBusy || !isSelectionPage || !['pending', 'uncertain'].includes(selectionState) || selected.length !== MAX_TESTERS) return;
+  if (deadlinePassed()) { checkSelectionDeadline(); await loadSelectionContext(); return; }
   submissionPids = submissionPids || [...selected];
   submitBusy = true;
   selectionState = 'submitting';
@@ -687,7 +741,7 @@ async function submitSelection() {
       const result = await selectionApi('context');
       applySelectionContext(result);
       if (selectionState === 'submitted') showSubmissionSuccess();
-      else {
+      else if (selectionState === 'pending') {
         $('#submissionMessage').textContent = error.status ? error.message : 'ثبت انجام نشده است. اتصال را بررسی کنید و دوباره تلاش کنید.';
         $('#submissionMessage').hidden = false;
         $('#modalDone').textContent = 'تلاش دوباره برای ثبت';
@@ -697,7 +751,7 @@ async function submitSelection() {
         }
       }
     } catch {
-      selectionState = 'uncertain';
+      selectionState = error.code === 'selection_expired' || deadlinePassed() ? 'expired' : 'uncertain';
       $('#submissionMessage').textContent = 'نتیجهٔ ثبت مشخص نیست. انتخاب‌ها تا بررسی وضعیت قفل هستند؛ دوباره تلاش کنید.';
       $('#submissionMessage').hidden = false;
       $('#modalDone').textContent = 'بررسی وضعیت و تلاش دوباره';
@@ -709,8 +763,18 @@ async function submitSelection() {
     $('#closeModal').disabled = false;
     $('#modalBack').disabled = false;
     updateSelectionPage();
+    checkSelectionDeadline();
+    if (selectionState === 'expired') closeSelectionOverlays();
   }
 }
+
+$('#refreshSelectionNotice').addEventListener('click', loadSelectionContext);
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden && isSelectionPage && selectionState !== 'submitted') {
+    checkSelectionDeadline();
+    loadSelectionContext();
+  }
+});
 
 renderSelection();
 if (isSelectionPage) loadSelectionContext();

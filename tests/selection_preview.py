@@ -9,6 +9,7 @@ import argparse
 import json
 from contextlib import asynccontextmanager
 from dataclasses import replace
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from uuid import uuid4
 
@@ -51,7 +52,7 @@ async def lifespan(app):
             "longevity": {"votes": {"longLasting": 10}}, "sillage": {"votes": {"strong": 10}},
         } for i in range(1, 31)])
         fixtures = {}
-        for scenario in ("success", "uncertain", "lost_response", "unavailable"):
+        for scenario in ("success", "uncertain", "lost_response", "unavailable", "expiry_expired", "expiry_waiting", "expiry_live"):
             # Exercise exact-case HMAC/Hash lookup and both URL-safe symbols.
             for _ in range(1000):
                 fixture = order(first_name="  مشتری  ", last_name=" آزمایشی ", phone="09120000000", id="OR-TEST-" + scenario)
@@ -64,6 +65,11 @@ async def lifespan(app):
                 raise RuntimeError("Could not prepare a mixed-case URL-safe preview fixture.")
             await db.preprocess_orders.insert_one(fixture)
             token = (await worker.ensure_selection(db[worker.SELECTIONS], fixture["_id"], config)).rsplit("/", 1)[1]
+            await db[worker.NOTIFICATIONS].insert_one({
+                "order_id": fixture["_id"], "status": "prepared" if scenario == "expiry_waiting" else "accepted",
+                "accepted_at": None if scenario == "expiry_waiting" else datetime.now(timezone.utc)
+                    - timedelta(minutes=31 if scenario == "expiry_expired" else 0, seconds=1),
+            })
             fixtures[scenario] = {"path": "/" + token, "order_id": fixture["id"], "phone": fixture["phone"]}
         app.state.db, app.state.catalog, app.state.selection_settings = db, CatalogCache(db), config
         output = Path("test-artifacts/selection-preview.json")
@@ -74,6 +80,30 @@ async def lifespan(app):
         if owned:
             assert name.startswith("tester_selection_preview_") and name != MONGODB_DB_NAME
             await client.drop_database(name)
+        await client.close()
+
+
+async def set_preview_window(scenario, remaining_seconds):
+    """Browser-test helper; can only touch a named synthetic, owned preview order."""
+    metadata = json.loads(Path("test-artifacts/selection-preview.json").read_text(encoding="utf-8"))
+    name = metadata["database"]
+    assert name.startswith("tester_selection_preview_") and name != MONGODB_DB_NAME
+    assert len(name.removeprefix("tester_selection_preview_")) == 32
+    assert scenario in {"expiry_live", "expiry_expired", "expiry_waiting"}
+    assert -60 <= remaining_seconds <= 1800
+    client = AsyncMongoClient(MONGODB_URI, timeoutMS=MONGODB_TIMEOUT_MS, tz_aware=True)
+    try:
+        db = client[name]
+        order_id = metadata["fixtures"][scenario]["order_id"]
+        assert order_id == "OR-TEST-" + scenario
+        fixture = await db.preprocess_orders.find_one({"id": order_id})
+        assert fixture is not None
+        now = (await db.command("hello"))["localTime"]
+        result = await db[worker.NOTIFICATIONS].update_one({"order_id": fixture["_id"]}, {"$set": {
+            "status": "accepted", "accepted_at": now - timedelta(minutes=30) + timedelta(seconds=remaining_seconds),
+        }})
+        assert result.matched_count == 1
+    finally:
         await client.close()
 
 

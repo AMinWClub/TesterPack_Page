@@ -4,7 +4,7 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const assert = require('node:assert/strict');
-const { spawn } = require('node:child_process');
+const { spawn, execFileSync } = require('node:child_process');
 
 async function main() {
   const { fixtures, database } = JSON.parse(fs.readFileSync('test-artifacts/selection-preview.json', 'utf8'));
@@ -79,7 +79,7 @@ async function main() {
     const load=async(route,width=390,height=844)=>{
       await send('Emulation.setDeviceMetricsOverride',{width,height,deviceScaleFactor:1,mobile:width<=680});
       await send('Page.navigate',{url:base+route});
-      await until('typeof selectionState!=="undefined" && ["pending","submitted","error","preview"].includes(selectionState)');
+      await until('typeof selectionState!=="undefined" && ["pending","submitted","error","preview","expired","awaiting_sms","review_required"].includes(selectionState)');
       await evaluate('document.fonts.ready.then(()=>true)');
     };
     const screenshot=async name=>{const shot=await send('Page.captureScreenshot',{format:'png'});fs.writeFileSync(path.join(artifacts,name+'.png'),Buffer.from(shot.data,'base64'));};
@@ -95,6 +95,7 @@ async function main() {
       assert(await evaluate('document.querySelectorAll("#modalSelected li").length===10'));
     };
     await send('Page.enable');await send('Runtime.enable');await send('Network.enable');
+    await send('Page.addScriptToEvaluateOnNewDocument',{source:'Date.now=()=>4070908800000;'});
     await send('Network.setCacheDisabled',{cacheDisabled:true});
     await send('Emulation.setEmulatedMedia',{features:[{name:'prefers-reduced-motion',value:'reduce'}]});
     await send('Fetch.enable',{patterns:[{urlPattern:'*/api/tester/selection/*',requestStage:'Request'},{urlPattern:'*/api/tester/selection/submit',requestStage:'Response'}]});
@@ -159,6 +160,37 @@ async function main() {
     await click('#modalDone');await until('selectionState==="pending"&&!submitBusy&&!document.querySelector("#submissionMessage").hidden');
     assert(await evaluate('document.querySelector("#submissionMessage").textContent.includes("موجود نیست")&&canEditSelection()'));
     await click('#modalBack');modes.submit='real';
+
+    // No successful notification means no editable selection, independently of creation time.
+    await load(fixtures.expiry_waiting.path);
+    assert(await evaluate('selectionState==="awaiting_sms"&&!canEditSelection()&&document.querySelector("#collection").hidden'));
+    assert(await evaluate('!document.querySelector("#selectionNotice").hidden&&document.querySelector("#selectionNoticeDefault").hidden'));
+    const python=process.env.SELECTION_TEST_PYTHON || path.resolve(process.platform==='win32'?'.venv/Scripts/python.exe':'.venv/bin/python');
+    const setWindow=(scenario,seconds)=>execFileSync(python,['-c',`import asyncio; from tests.selection_preview import set_preview_window; asyncio.run(set_preview_window(${JSON.stringify(scenario)}, ${seconds}))`],{windowsHide:true,stdio:'pipe'});
+    setWindow('expiry_waiting',1800);
+    await click('#refreshSelectionNotice');await until('selectionState==="pending"&&catalogState==="ready"');
+
+    for(const [width,height] of [[1440,900],[390,844],[320,740]]){
+      await load(fixtures.expiry_expired.path,width,height);
+      assert(await evaluate('selectionState==="expired"&&document.querySelector("#collection").hidden&&document.querySelector("#mobileSelectionBar").hidden&&!canEditSelection()'));
+      assert(await evaluate('document.querySelector("#selectionNoticeTitle").textContent==="مهلت انتخاب تسترهای شما به پایان رسیده است."'));
+      assert(await evaluate('document.querySelector("#selectionNoticeDefault").textContent.includes("متناسب با جنسیتی")&&document.documentElement.scrollWidth<=innerWidth'));
+      await evaluate('scrollTo({top:0,behavior:"instant"})');await screenshot('expired-'+width);
+    }
+    // A live page and an open final modal lock without Refresh; Date.now cannot extend it.
+    await load(fixtures.expiry_live.path);await chooseTen();await review();
+    setWindow('expiry_live',4);
+    await evaluate('(async()=>{applySelectionContext(await selectionApi("context"));Date.now=()=>0;})()');
+    assert(await evaluate('canEditSelection()&&document.querySelector("#demoModal").getAttribute("aria-hidden")==="false"'));
+    await until('selectionState==="expired"');
+    assert(await evaluate('selected.length===10&&!canEditSelection()&&document.querySelector("#demoModal").getAttribute("aria-hidden")==="true"&&document.querySelector("#collection").hidden'));
+    const beforeExpiredClick=submits;
+    await evaluate('document.querySelector("#modalDone").click();toggleProduct(selected[0]);');
+    assert.equal(submits,beforeExpiredClick);
+    // Direct parallel HTTP requests still hit the real expired backend.
+    const direct=await evaluate(`Promise.all(Array.from({length:3},async()=>{const response=await fetch('/api/tester/selection/submit',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({token:selectionToken,pids:selected})});return {status:response.status,body:await response.json()};}))`);
+    assert(direct.every(row=>row.status===410&&row.body.detail.code==='selection_expired'),JSON.stringify(direct));
+    await load(fixtures.expiry_live.path);assert(await evaluate('selectionState==="expired"'));
     await load('/'+'9'.repeat(18));
     assert(await evaluate('selectionState==="error"&&document.querySelector("#orderFields").hidden&&document.querySelector("#collection").hidden'));
     await screenshot('invalid-link-mobile');
@@ -166,8 +198,8 @@ async function main() {
     assert(await evaluate('selectionState==="preview"&&document.querySelector("#finalizeButton").disabled&&document.querySelector("#orderFields").hidden'));
     assert.equal(errors.length,0,JSON.stringify(errors));
     assert(headers.length>0&&headers.every(h=>h.noStore&&h.noReferrer&&h.noIndex),'Missing privacy headers');
-    fs.writeFileSync(path.join(artifacts,'browser-report.json'),JSON.stringify({responsive,privacyHeaders:headers.length,assertions:'passed'},null,2));
-    console.log('PASS: real isolated Context/Submit, full phone, responsive, final review, double-click guard, readonly reload, saved names, lost-response recovery, ambiguous-network lock, inventory error, invalid link, preview blocked, privacy headers, no referrer/token leak.');
+    fs.writeFileSync(path.join(artifacts,'browser-report.json'),JSON.stringify({responsive,privacyHeaders:headers.length,expiry:{responsiveWidths:[1440,390,320],liveModalLock:true,changedBrowserClock:true,directLateSubmit:410,awaitingAcceptance:true},assertions:'passed'},null,2));
+    console.log('PASS: real isolated Context/Submit, full phone, responsive, final review, double-click guard, readonly reload, saved names, lost-response recovery, ambiguous-network lock, inventory error, invalid link, preview blocked, privacy headers, no referrer/token leak, expired responsive page, awaiting SMS, live deadline modal lock, changed browser clock, parallel direct late submissions rejected.');
     await send('Browser.close');
   }finally{socket?.close();if(browser.exitCode===null)browser.kill();}
 }

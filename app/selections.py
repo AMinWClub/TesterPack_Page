@@ -4,7 +4,7 @@ import hashlib
 import json
 import logging
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 
 from bson import ObjectId
@@ -23,7 +23,9 @@ router = APIRouter(prefix="/api/tester/selection", tags=["selection"])
 logger = logging.getLogger(__name__)
 COUNT = 10
 ORDER_MARKER = "tester_selection_submission_id"
-ORDER_PROJECTION = {key: 1 for key in ("_id", "id", "first_name", "last_name", "phone", "recommended_products", ORDER_MARKER)}
+ORDER_WRITTEN_AT = "tester_selection_written_at"
+SELECTION_WINDOW = timedelta(minutes=30)
+ORDER_PROJECTION = {key: 1 for key in ("_id", "id", "first_name", "last_name", "phone", "recommended_products", ORDER_MARKER, ORDER_WRITTEN_AT)}
 SIMPLE = Collation(locale="simple")
 
 
@@ -71,10 +73,10 @@ def order_display(order):
 async def linked_order(db, settings, token):
     digest = validate_token(token)
     collections = worker_collections(db, settings)
-    selection = await collections["selections"].find_one({"token_hash": digest}, collation=SIMPLE)
+    selection = await timed_selection(collections, {"token_hash": digest})
     if (not selection or not isinstance(selection.get("order_id"), ObjectId)
             or type(selection.get("token_version")) is not int or selection["token_version"] != TOKEN_VERSION
-            or selection.get("status") not in {"pending", "submitting", "submitted"}):
+            or selection.get("status") not in {"pending", "submitting", "submitted", "review_required"}):
         fail(404, "invalid_link", "لینک انتخاب تستر معتبر نیست یا سفارش در دسترس نیست.")
     order = await collections["orders"].find_one(
         {**eligible_order(settings), "_id": selection["order_id"]}, projection=ORDER_PROJECTION, collation=SIMPLE,
@@ -83,6 +85,54 @@ async def linked_order(db, settings, token):
         fail(404, "invalid_link", "لینک انتخاب تستر معتبر نیست یا سفارش در دسترس نیست.")
     order_display(order)
     return collections, selection, order
+
+
+async def timed_selection(collections, match):
+    # Use MongoDB's clock for both Context and atomic write predicates.
+    cursor = await collections["selections"].aggregate([
+        {"$match": match}, {"$limit": 1}, {"$set": {"_server_now": "$$NOW"}},
+    ], collation=SIMPLE)
+    async for row in cursor:
+        return row
+    return None
+
+
+def utc_date(value):
+    if not isinstance(value, datetime):
+        return None
+    # BSON dates decoded by the application's default client are naive UTC.
+    return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value.astimezone(timezone.utc)
+
+
+async def link_window(collections, selection):
+    notification = await collections["notifications"].find_one(
+        {"order_id": selection["order_id"], "status": "accepted"}, projection={"accepted_at": 1},
+    )
+    now = utc_date(selection["_server_now"])
+    accepted_at = utc_date(notification.get("accepted_at")) if notification else None
+    if accepted_at is None or accepted_at > now:
+        return {"now": now, "accepted_at": None, "expires_at": None}
+    expires_at = accepted_at + SELECTION_WINDOW
+    # A frozen intent deadline may shorten, but can never extend, this window.
+    frozen = utc_date(selection.get("expires_at"))
+    if frozen is not None:
+        expires_at = min(expires_at, frozen)
+    return {"now": now, "accepted_at": accepted_at, "expires_at": expires_at}
+
+
+def deadline_guard(window):
+    return {"$lt": ["$$NOW", window["expires_at"]]}
+
+
+def require_active(window):
+    if window["expires_at"] is None:
+        fail(409, "sms_not_accepted", "تأیید ارسال پیامک هنوز ثبت نشده است. لطفاً کمی بعد دوباره بررسی کنید.")
+    if window["now"] >= window["expires_at"]:
+        expired_error()
+
+
+def expired_error():
+    fail(410, "selection_expired", "مهلت انتخاب تسترهای شما به پایان رسیده است.")
 
 
 def intent_valid(selection):
@@ -100,10 +150,28 @@ def owns_order(selection, order):
             and order.get("recommended_products") == selection["selected_names"])
 
 
-def response_context(selection, order):
+def response_context(selection, order, window=None):
+    if selection["status"] == "submitted":
+        availability, code = "submitted", None
+        expires_at = utc_date(selection.get("expires_at"))
+        remaining = 0
+    else:
+        expires_at = window["expires_at"]
+        remaining = max(0, (expires_at - window["now"]).total_seconds()) if expires_at else 0
+        if expires_at is None:
+            availability, code = "awaiting_sms", "sms_not_accepted"
+        elif remaining == 0:
+            availability, code = "expired", "selection_expired"
+        elif selection["status"] == "review_required":
+            availability, code = "review_required", "selection_review_required"
+        else:
+            availability, code = "active", None
     return {"order": order_display(order), "selection": {
         "status": selection["status"], "selected_pids": selection.get("selected_pids", []),
         "selected_names": selection.get("selected_names", []),
+        "availability": availability, "code": code,
+        "expires_at": expires_at.isoformat() if expires_at else None,
+        "remaining_seconds": remaining, "requires_support": selection["status"] == "review_required",
     }}
 
 
@@ -111,32 +179,73 @@ def existing_order_error():
     fail(409, "already_selected", "این سفارش قبلاً انتخاب ثبت‌شده دارد و قابل بازنویسی نیست. در صورت نیاز با پشتیبانی تماس بگیرید.")
 
 
-async def finish_intent(collections, settings, selection, order):
-    """Only continue the winning intent. No lease, expiry or replacement of its choices."""
+def written_in_time(selection, order, window):
+    started, written = utc_date(selection.get("submitting_at")), utc_date(order.get(ORDER_WRITTEN_AT))
+    return (window["expires_at"] is not None and started is not None and written is not None
+            and window["accepted_at"] <= started <= written < window["expires_at"])
+
+
+async def review_incomplete(collections, settings, selection, order, window, reason):
+    await collections["selections"].update_one({
+        "_id": selection["_id"], "status": "submitting", "submission_id": selection["submission_id"],
+    }, {"$set": {"status": "review_required", "review_reason": reason}, "$currentDate": {"updated_at": True}})
+    latest = await timed_selection(collections, {"_id": selection["_id"]})
+    if latest is None:
+        fail(404, "invalid_link", "سفارش در دسترس نیست.")
+    window = await link_window(collections, latest)
+    order = await collections["orders"].find_one(
+        {**eligible_order(settings), "_id": selection["order_id"]}, projection=ORDER_PROJECTION, collation=SIMPLE,
+    )
+    if order is None:
+        fail(404, "invalid_link", "سفارش در دسترس نیست.")
+    # An on-time write racing this diagnostic update may still be finalized.
+    if owns_order(latest, order) and written_in_time(latest, order, window):
+        return await finish_intent(collections, settings, latest, order, window)
+    return response_context(latest, order, window)
+
+
+async def finish_intent(collections, settings, selection, order, window=None):
+    """Resume the frozen intent, but never create order choices after its deadline."""
     if not intent_valid(selection):
         fail(409, "inconsistent_selection", "وضعیت انتخاب‌های این سفارش نیاز به بررسی پشتیبانی دارد.")
+    window = window or await link_window(collections, selection)
     if not owns_order(selection, order):
         if "recommended_products" in order or ORDER_MARKER in order:
             existing_order_error()
-        # Both fields are written in ONE atomic update. The marker distinguishes our
-        # intent from pre-existing names, even if an old list happens to be identical.
-        await collections["orders"].update_one({
-            **eligible_order(settings), "_id": selection["order_id"],
+        if selection["status"] == "review_required" or window["expires_at"] is None:
+            return response_context(selection, order, window)
+        if window["now"] >= window["expires_at"]:
+            return await review_incomplete(collections, settings, selection, order, window, "deadline_before_order_write")
+        started = utc_date(selection.get("submitting_at"))
+        if started is None or not window["accepted_at"] <= started < window["expires_at"]:
+            return await review_incomplete(collections, settings, selection, order, window, "unverified_intent_time")
+        match = eligible_order(settings)
+        match["$expr"] = {"$and": [match["$expr"], deadline_guard(window)]}
+        # Deadline and absence guard are evaluated by MongoDB in the SAME write.
+        result = await collections["orders"].update_one({
+            **match, "_id": selection["order_id"],
             "recommended_products": {"$exists": False}, ORDER_MARKER: {"$exists": False},
-        }, {"$set": {"recommended_products": selection["selected_names"], ORDER_MARKER: selection["submission_id"]}}, collation=SIMPLE)
+        }, {"$set": {"recommended_products": selection["selected_names"], ORDER_MARKER: selection["submission_id"]},
+            "$currentDate": {ORDER_WRITTEN_AT: True}}, collation=SIMPLE)
         order = await collections["orders"].find_one(
             {**eligible_order(settings), "_id": selection["order_id"]}, projection=ORDER_PROJECTION, collation=SIMPLE,
         )
         if order is None:
             fail(404, "invalid_link", "سفارش در دسترس نیست.")
         if not owns_order(selection, order):
-            existing_order_error()
-    now = datetime.now(timezone.utc)
+            if "recommended_products" in order or ORDER_MARKER in order:
+                existing_order_error()
+            latest = await timed_selection(collections, {"_id": selection["_id"]})
+            window = await link_window(collections, latest)
+            if not result.matched_count:
+                return await review_incomplete(collections, settings, latest, order, window, "deadline_before_order_write")
+    if not written_in_time(selection, order, window):
+        return await review_incomplete(collections, settings, selection, order, window, "unverified_order_write_time")
     finished = await collections["selections"].find_one_and_update({
-        "_id": selection["_id"], "order_id": selection["order_id"], "status": "submitting",
+        "_id": selection["_id"], "order_id": selection["order_id"], "status": {"$in": ["submitting", "review_required"]},
         "submission_id": selection["submission_id"],
         "selected_pids": selection["selected_pids"], "selected_names": selection["selected_names"],
-    }, {"$set": {"status": "submitted", "submitted_at": now, "updated_at": now}},
+    }, {"$set": {"status": "submitted", "submitted_at": order[ORDER_WRITTEN_AT]}, "$currentDate": {"updated_at": True}},
         return_document=ReturnDocument.AFTER, collation=SIMPLE)
     if finished is None:
         finished = await collections["selections"].find_one({"_id": selection["_id"]}, collation=SIMPLE)
@@ -147,27 +256,40 @@ async def finish_intent(collections, settings, selection, order):
 
 async def context(db, settings, token):
     collections, selection, order = await linked_order(db, settings, token)
-    if selection["status"] == "submitting":
-        return await finish_intent(collections, settings, selection, order)
     if selection["status"] == "submitted":
         if not owns_order(selection, order):
             fail(409, "inconsistent_selection", "وضعیت انتخاب‌های این سفارش نیاز به بررسی پشتیبانی دارد.")
-    elif "recommended_products" in order or ORDER_MARKER in order:
+        return response_context(selection, order)
+    window = await link_window(collections, selection)
+    if selection["status"] in {"submitting", "review_required"}:
+        return await finish_intent(collections, settings, selection, order, window)
+    if window["expires_at"] is not None and window["now"] >= window["expires_at"]:
+        return response_context(selection, order, window)
+    if "recommended_products" in order or ORDER_MARKER in order:
         existing_order_error()
-    return response_context(selection, order)
+    return response_context(selection, order, window)
 
 
 async def submit(db, settings, token, pids):
     collections, selection, order = await linked_order(db, settings, token)
     validate_pids(pids)
-    if selection["status"] in {"submitting", "submitted"}:
+    if selection["status"] in {"submitting", "submitted", "review_required"}:
         if selection.get("selected_pids") != pids:
             fail(409, "different_submission", "انتخاب‌های این سفارش قبلاً برای ثبت دریافت شده‌اند و قابل تغییر نیستند.")
-        if selection["status"] == "submitting":
-            return await finish_intent(collections, settings, selection, order)
-        if not owns_order(selection, order):
-            fail(409, "inconsistent_selection", "وضعیت انتخاب‌های این سفارش نیاز به بررسی پشتیبانی دارد.")
-        return response_context(selection, order)
+        if selection["status"] == "submitted":
+            if not owns_order(selection, order):
+                fail(409, "inconsistent_selection", "وضعیت انتخاب‌های این سفارش نیاز به بررسی پشتیبانی دارد.")
+            return response_context(selection, order)
+        result = await finish_intent(collections, settings, selection, order)
+        if result["selection"]["status"] == "submitted":
+            return result
+        if result["selection"]["code"] == "selection_expired":
+            expired_error()
+        if result["selection"]["code"] == "sms_not_accepted":
+            fail(409, "sms_not_accepted", "تأیید ارسال پیامک هنوز ثبت نشده است. لطفاً دوباره بررسی کنید.")
+        fail(409, "selection_review_required", "وضعیت انتخاب‌های شما نیاز به بررسی پشتیبانی دارد.")
+    window = await link_window(collections, selection)
+    require_active(window)
     if "recommended_products" in order or ORDER_MARKER in order:
         existing_order_error()
     # One fresh primary-source query, including the current sorted 498-product cap.
@@ -184,16 +306,23 @@ async def submit(db, settings, token, pids):
     names = [by_pid[pid] for pid in pids]
     if any(not isinstance(name, str) or not name.strip() for name in names):
         fail(409, "invalid_products", "نام یکی از عطرها در دسترس نیست. لطفاً انتخاب‌ها را بررسی کنید.")
-    now = datetime.now(timezone.utc)
     selection = await collections["selections"].find_one_and_update({
         "_id": selection["_id"], "order_id": selection["order_id"], "token_hash": selection["token_hash"], "status": "pending",
+        "$expr": deadline_guard(window),
     }, {"$set": {"status": "submitting", "submission_id": uuid4().hex,
-                 "selected_pids": pids, "selected_names": names, "submitting_at": now, "updated_at": now}},
+                 "selected_pids": pids, "selected_names": names, "expires_at": window["expires_at"],
+                 "sms_accepted_at": window["accepted_at"]}, "$currentDate": {"submitting_at": True, "updated_at": True}},
         return_document=ReturnDocument.AFTER, collation=SIMPLE)
     if selection is None:
         # Another request won; reload its immutable intent and compare this request.
+        latest = await timed_selection(collections, {"token_hash": validate_token(token)})
+        if latest is None:
+            fail(404, "invalid_link", "سفارش در دسترس نیست.")
+        if latest["status"] == "pending":
+            expired_error()
         return await submit(db, settings, token, pids)
-    return await finish_intent(collections, settings, selection, order)
+    # Refresh server time after catalog validation and the intent write.
+    return await submit(db, settings, token, pids)
 
 
 async def read_body(request, *, submitting):

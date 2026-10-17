@@ -35,9 +35,15 @@ def path_value(document, path):
     return path_value(value, tail) if tail else value
 
 
+def mongo_now():
+    return datetime.now(timezone.utc)
+
+
 def expression(value, document, variables=None):
     """Evaluate only the Mongo operators used by the real date expression."""
     variables = variables or {}
+    if isinstance(value, str) and value == "$$NOW":
+        return mongo_now()
     if isinstance(value, str) and value.startswith("$$"):
         return path_value(variables, value[2:])
     if isinstance(value, str) and value.startswith("$"):
@@ -205,6 +211,7 @@ class FakeCollection:
                 document.update({key: expression(value, original) for key, value in stage["$set"].items()})
         else:
             document.update(copy.deepcopy(update.get("$set", {})))
+            document.update({key: mongo_now() for key in update.get("$currentDate", {})})
 
     def with_options(self, **kwargs):
         self.write_concern = kwargs["write_concern"]
@@ -258,6 +265,9 @@ class FakeCollection:
         for stage in pipeline:
             if "$match" in stage:
                 documents = [document for document in documents if matches(document, stage["$match"])]
+            elif "$set" in stage:
+                for document in documents:
+                    self.apply_update(document, [stage])
             elif "$sort" in stage:
                 fields = list(stage["$sort"])
                 documents.sort(key=lambda document: tuple(document[field] for field in fields))
