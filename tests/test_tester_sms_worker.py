@@ -84,7 +84,8 @@ def expression(value, document, variables=None):
         return evaluate(operands[1] if evaluate(operands[0]) else operands[2])
     if operator == "$type":
         item = evaluate(operands)
-        return "string" if isinstance(item, str) else "date" if isinstance(item, datetime) else "other"
+        return ("string" if isinstance(item, str) else "date" if isinstance(item, datetime)
+                else "array" if isinstance(item, list) else "other")
     if operator == "$regexFind":
         match = re.search(operands["regex"], evaluate(operands["input"]))
         return {"captures": list(match.groups())} if match else None
@@ -310,7 +311,7 @@ class FakeCollection:
         for stage in pipeline:
             if "$match" in stage:
                 documents = [document for document in documents if matches(document, stage["$match"])]
-            elif "$set" in stage:
+            elif "$set" in stage or "$replaceWith" in stage:
                 for document in documents:
                     self.apply_update(document, [stage])
             elif "$sort" in stage:
@@ -1039,6 +1040,27 @@ class WorkerSettingsAndTokenTests(unittest.TestCase):
             self.assertEqual(worker.main(), 1)
         self.assertIn("TESTER_TOKEN_SECRET", stderr.getvalue())
         self.assertIn("Worker configuration error", stderr.getvalue())
+
+    def test_cli_release_errors_return_nonzero_with_json_and_safe_log(self):
+        summary = {"release_errors": 2, "accepted": 1, "released_expired": 3}
+        output = io.StringIO()
+        with patch("sys.argv", ["tester_sms", "--once"]), patch("sys.stdout", output), \
+                patch.object(worker, "run_command", new=AsyncMock(return_value=summary)), \
+                self.assertLogs(worker.logger.name, level="ERROR") as logs:
+            self.assertEqual(worker.main(), 1)
+        self.assertEqual(json.loads(output.getvalue()), summary)
+        self.assertIn("2 error(s)", "".join(logs.output))
+
+    def test_cli_success_and_existing_http_failure_keep_exit_codes(self):
+        cases = [({"release_errors": 0, "accepted": 1}, 0), ({"indexes": "ready"}, 0),
+                 ({"release_errors": 0, "halted_http_status": 429}, 1)]
+        for summary, exit_code in cases:
+            output = io.StringIO()
+            with self.subTest(summary=summary), patch("sys.argv", ["tester_sms", "--once"]), \
+                    patch("sys.stdout", output), self.assertNoLogs(worker.logger.name, level="ERROR"), \
+                    patch.object(worker, "run_command", new=AsyncMock(return_value=summary)):
+                self.assertEqual(worker.main(), exit_code)
+            self.assertEqual(json.loads(output.getvalue()), summary)
 
     def test_missing_or_invalid_settings_fail_with_setting_name(self):
         for key, invalid in (("TESTER_SMS_START_AT", "invalid"),

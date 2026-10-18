@@ -262,7 +262,7 @@ class TesterReleaseTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_index_is_checked_and_never_created_by_regular_run(self):
         self.add(age=31)
-        self.collections["orders"].indexes.pop(worker.RELEASE_INDEX)
+        self.collections["notifications"].indexes.pop(worker.RELEASE_SOURCE_INDEX)
         with self.assertRaisesRegex(worker.WorkerConfigurationError, "create-indexes"):
             await self.release()
         self.assertEqual(self.db.writes, 0)
@@ -272,12 +272,12 @@ class TesterReleaseTests(unittest.IsolatedAsyncioTestCase):
         self.collections["orders"].documents.append(order(state="pending"))
         settings = replace(self.settings, sms_enabled=True)
         sms = FarazSmsClient(FarazSmsConfig(api_key="test", line_number="50001"))
-        original = self.collections["orders"].aggregate
+        original = self.collections["notifications"].aggregate
         async def fail_release_query(pipeline, **kwargs):
-            if kwargs.get("hint") == worker.RELEASE_INDEX:
+            if kwargs.get("hint") == worker.RELEASE_SOURCE_INDEX:
                 raise AutoReconnect("synthetic database interruption")
             return await original(pipeline, **kwargs)
-        with patch.object(self.collections["orders"], "aggregate", side_effect=fail_release_query), \
+        with patch.object(self.collections["notifications"], "aggregate", side_effect=fail_release_query), \
                 patch("app.services.sms.faraz.urlopen", return_value=FakeHttpResponse()):
             summary = await worker.run_once(self.db, settings, sms=sms)
         self.assertEqual((summary["release_errors"], summary["accepted"]), (1, 1))

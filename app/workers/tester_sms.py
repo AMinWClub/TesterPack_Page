@@ -47,6 +47,8 @@ ORDER_INDEX_KEYS = [(ORDER_DATE_FIELD, 1), ("_id", 1)]
 ORDER_INDEX_FILTER = {"tester_gender": {"$exists": True}}
 RELEASE_INDEX = "tester_pending_release"
 RELEASE_INDEX_KEYS = [("state", 1), (ORDER_DATE_FIELD, 1), ("_id", 1)]
+RELEASE_SOURCE_INDEX = "tester_notification_repair"
+RELEASE_SOURCE_INDEX_KEYS = [("status", 1), ("order_synced", 1), ("accepted_at", 1)]
 TESTER_SMS_TEXT = (
     "مشتری عزیز سراد\n\n"
     "برای تکمیل سفارش پک تستر خود، لطفاً از طریق لینک زیر اقدام فرمایید:\n\n"
@@ -211,8 +213,8 @@ async def create_indexes(collections: dict) -> None:
 
 
 async def check_release_index(collections: dict) -> None:
-    index = (await collections["orders"].index_information()).get(RELEASE_INDEX, {})
-    if (index.get("key") != RELEASE_INDEX_KEYS or index.get("partialFilterExpression") != ORDER_INDEX_FILTER
+    index = (await collections["notifications"].index_information()).get(RELEASE_SOURCE_INDEX, {})
+    if (index.get("key") != RELEASE_SOURCE_INDEX_KEYS or index.get("partialFilterExpression") is not None
             or index.get("unique") or index.get("sparse")
             or index.get("collation", {}).get("locale", "simple") != "simple"):
         raise WorkerConfigurationError("Required release index is missing; run --create-indexes first.")
@@ -594,22 +596,34 @@ def release_pipeline(settings: WorkerSettings, *, after: dict | None = None, lim
         {"$min": ["$_deadline", "$_selection.expires_at"]}, "$_deadline",
     ]}
     return [
-        {"$match": match}, {"$sort": {ORDER_DATE_FIELD: 1, "_id": 1}},
-        {"$lookup": {"from": NOTIFICATIONS, "localField": "_id", "foreignField": "order_id",
-                     "pipeline": [{"$match": {"status": "accepted", "$expr": {"$and": [
-                         {"$eq": [{"$type": "$accepted_at"}, "date"]}, {"$lte": ["$accepted_at", "$$NOW"]},
-                         {"$eq": ["$status", "accepted"]},
-                     ]}}}, {"$project": {"accepted_at": 1}}], "as": "_notification"}},
-        {"$match": {"_notification.0": {"$exists": True}}},
-        {"$set": {"_accepted_at": {"$arrayElemAt": ["$_notification.accepted_at", 0]}}},
+        # Start from accepted notifications using the existing status-prefix index.
+        # Missing/failed notifications never cause an order or receipt lookup.
+        {"$match": {"status": "accepted", "$expr": {"$and": [
+            {"$eq": [{"$type": "$accepted_at"}, "date"]}, {"$lte": ["$accepted_at", "$$NOW"]},
+            {"$eq": ["$status", "accepted"]},
+        ]}}},
+        # Keep this an equality lookup; apply the full order filter immediately
+        # afterwards instead of running a validation sub-pipeline for every join.
+        {"$lookup": {"from": settings.orders_collection, "localField": "order_id", "foreignField": "_id",
+                     "as": "_order"}},
+        {"$match": {"_order.0": {"$exists": True}}},
+        {"$replaceWith": {"$mergeObjects": [{"$arrayElemAt": ["$_order", 0]}, {"_accepted_at": "$accepted_at"}]}},
+        {"$match": match},
         {"$set": {"_deadline": {"$add": ["$_accepted_at", int(SELECTION_WINDOW.total_seconds() * 1000)]}}},
+        {"$set": {"_expired": {"$gte": ["$$NOW", "$_deadline"]}}},
+        # Before expiry, a submitted receipt necessarily has these order fields.
+        # This is only a prefilter; the complete receipt proof below stays intact.
+        {"$match": {"$or": [{"_expired": True}, {"$expr": {"$and": [
+            {"$eq": [{"$type": "$recommended_products"}, "array"]},
+            {"$eq": [{"$type": f"${ORDER_MARKER}"}, "string"]},
+            {"$eq": [{"$type": f"${ORDER_WRITTEN_AT}"}, "date"]},
+        ]}}]}},
         {"$lookup": {"from": SELECTIONS, "localField": "_id", "foreignField": "order_id",
                      "pipeline": [{"$match": {"status": "submitted", "$jsonSchema": receipt_schema}},
                                   {"$project": {key: 1 for key in (
                                       "status", "submission_id", "selected_pids", "selected_names", "submitting_at", "expires_at",
                                   )}}], "as": "_submitted"}},
-        {"$set": {"_selection": {"$ifNull": [{"$arrayElemAt": ["$_submitted", 0]}, {}]},
-                  "_expired": {"$gte": ["$$NOW", "$_deadline"]}}},
+        {"$set": {"_selection": {"$ifNull": [{"$arrayElemAt": ["$_submitted", 0]}, {}]}}},
         {"$set": {"_valid_receipt": {"$and": [
             {"$eq": ["$_selection.status", "submitted"]},
             {"$eq": [f"${ORDER_MARKER}", "$_selection.submission_id"]},
@@ -620,6 +634,7 @@ def release_pipeline(settings: WorkerSettings, *, after: dict | None = None, lim
             {"$lt": [f"${ORDER_WRITTEN_AT}", receipt_deadline]},
         ]}}},
         {"$match": {"$or": [{"_expired": True}, {"_valid_receipt": True}]}},
+        {"$sort": {ORDER_DATE_FIELD: 1, "_id": 1}},
         {"$limit": settings.release_batch_size if limit is None else limit},
         {"$project": {key: 1 for key in (
             "_id", ORDER_DATE_FIELD, "_accepted_at", "_deadline", "_selection", "_expired", "_valid_receipt",
@@ -643,9 +658,9 @@ async def release_resolved_tester_orders(collections: dict, settings: WorkerSett
             # Keyset pages bypass failed/racing candidates within this run too.
             # Never let a permanently failing first order monopolize a small batch.
             remaining = settings.release_batch_size - completed
-            cursor = await collections["orders"].aggregate(
+            cursor = await collections["notifications"].aggregate(
                 release_pipeline(settings, after=after, limit=remaining), batchSize=remaining,
-                collation=Collation(locale="simple"), hint=RELEASE_INDEX,
+                collation=Collation(locale="simple"), hint=RELEASE_SOURCE_INDEX,
             )
             page_count = 0
             async for candidate in cursor:
@@ -800,7 +815,11 @@ def main() -> int:
     try:
         summary = asyncio.run(run_command(args))
         print(json.dumps(summary, sort_keys=True, default=str))
-        return 1 if summary.get("halted_http_status") else 0
+        release_failed = summary.get("release_errors", 0) > 0
+        if release_failed:
+            logger.error("Tester order release finished with %s error(s); exiting unsuccessfully after SMS processing.",
+                         summary["release_errors"])
+        return 1 if release_failed or summary.get("halted_http_status") else 0
     except (WorkerConfigurationError, SmsConfigurationError) as error:
         # Our configuration errors never include setting values or credentials.
         print(f"Worker configuration error: {error}", file=sys.stderr)

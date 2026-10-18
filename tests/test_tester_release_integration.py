@@ -2,13 +2,14 @@
 
 import asyncio
 import copy
+import io
 import json
 import os
 import unittest
 from dataclasses import replace
 from datetime import timedelta
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 from uuid import uuid4
 
 from pymongo import AsyncMongoClient
@@ -18,9 +19,11 @@ from fastapi import HTTPException
 
 from app import selections as selection_api
 from app.workers import tester_sms as worker
-from tests.test_selections import products, settings
+from app.services.sms import FarazSmsClient, FarazSmsConfig
+from tests.test_selections import order, products, settings
 from tests.test_tester_release import fixture
 from tests.test_tester_sms_worker import GENDER_CASES
+from tests.test_sms_faraz import FakeHttpResponse
 
 
 @unittest.skipUnless(os.getenv("TESTER_RUN_MONGO_INTEGRATION") == "1", "Set TESTER_RUN_MONGO_INTEGRATION=1 for isolated MongoDB tests")
@@ -135,22 +138,23 @@ class TesterReleaseMongoTests(unittest.IsolatedAsyncioTestCase):
         await self.collections["orders"].insert_many(noise)
         await worker.check_indexes(self.collections)
         explained = await self.db.command({"explain": {
-            "aggregate": self.settings.orders_collection, "pipeline": worker.release_pipeline(self.settings),
-            "cursor": {}, "hint": worker.RELEASE_INDEX, "collation": {"locale": "simple"},
+            "aggregate": worker.NOTIFICATIONS, "pipeline": worker.release_pipeline(self.settings),
+            "cursor": {}, "hint": worker.RELEASE_SOURCE_INDEX, "collation": {"locale": "simple"},
         }, "verbosity": "executionStats"})
         cursor = explained["stages"][0]["$cursor"]
-        plan = json.dumps(cursor["queryPlanner"]["winningPlan"])
+        plan = json.dumps(cursor["queryPlanner"]["winningPlan"], default=str)
         self.assertIn("IXSCAN", plan)
         self.assertNotIn("COLLSCAN", plan)
         lookups = [stage for stage in explained["stages"] if "$lookup" in stage]
         self.assertEqual(len(lookups), 2)
         for lookup in lookups:
             self.assertEqual(lookup["collectionScans"], 0)
-        self.assertIn("tester_notification_order_unique", lookups[0]["indexesUsed"])
+        self.assertIn("_id_", lookups[0]["indexesUsed"])
         self.assertIn("tester_selection_order_unique", lookups[1]["indexesUsed"])
         self.assertLess(cursor["executionStats"]["totalDocsExamined"], 100)
-        report = {"fixture_orders": 3030, "orders_documents_examined": cursor["executionStats"]["totalDocsExamined"],
-                  "orders_keys_examined": cursor["executionStats"]["totalKeysExamined"],
+        report = {"fixture_orders": 3030, "source_collection": worker.NOTIFICATIONS,
+                  "source_documents_examined": cursor["executionStats"]["totalDocsExamined"],
+                  "source_keys_examined": cursor["executionStats"]["totalKeysExamined"],
                   "lookup_indexes": [lookup["indexesUsed"] for lookup in lookups],
                   "lookup_collection_scans": [lookup["collectionScans"] for lookup in lookups]}
         folder = Path(__file__).resolve().parents[1] / "test-artifacts"
@@ -266,6 +270,41 @@ class TesterReleaseMongoTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await self.stored(good))["state"], "not_seen")
         self.assertEqual((await self.stored(source))["state"], "pending")
         self.assertEqual((await self.release())["released_expired"], 1)
+
+    async def test_release_failure_allows_mock_sms_then_cli_fails_and_next_run_succeeds(self):
+        broken, _, _ = await self.add(age=31)
+        new_order = order(state="pending")
+        await self.collections["orders"].insert_one(copy.deepcopy(new_order))
+        config = replace(self.settings, sms_enabled=True)
+        sms = FarazSmsClient(FarazSmsConfig(api_key="synthetic-key", line_number="50001"))
+        original = AsyncCollection.update_one
+        async def fail_release(collection, query, update, *args, **kwargs):
+            if collection.database.name == self.name and update == {"$set": {"state": "not_seen"}}:
+                raise AutoReconnect("private synthetic database details")
+            return await original(collection, query, update, *args, **kwargs)
+        with patch.object(AsyncCollection, "update_one", new=fail_release), \
+                patch("app.services.sms.faraz.urlopen", return_value=FakeHttpResponse()) as http:
+            summary = await worker.run_once(self.db, config, sms=sms)
+        self.assertEqual((summary["release_errors"], summary["accepted"]), (1, 1))
+        self.assertEqual((await self.stored(broken))["state"], "pending")
+        self.assertTrue((await self.stored(new_order))["sms_sent"])
+        http.assert_called_once()
+        output = io.StringIO()
+        with patch("sys.argv", ["tester_sms", "--once"]), patch("sys.stdout", output), \
+                patch.object(worker, "run_command", new=AsyncMock(return_value=summary)), \
+                self.assertLogs(worker.logger.name, level="ERROR") as logs:
+            self.assertEqual(await asyncio.to_thread(worker.main), 1)
+        self.assertEqual(json.loads(output.getvalue()), summary)
+        self.assertNotIn("private synthetic database details", "".join(logs.output))
+        # Successful retry repairs the release only; an accepted SMS is not resent.
+        with patch("app.services.sms.faraz.urlopen", side_effect=AssertionError("No resending accepted SMS")):
+            repaired = await worker.run_once(self.db, config, sms=sms)
+        self.assertEqual((repaired["release_errors"], repaired["released_expired"]), (0, 1))
+        output = io.StringIO()
+        with patch("sys.argv", ["tester_sms", "--once"]), patch("sys.stdout", output), \
+                patch.object(worker, "run_command", new=AsyncMock(return_value=repaired)):
+            self.assertEqual(await asyncio.to_thread(worker.main), 0)
+        self.assertEqual(json.loads(output.getvalue()), repaired)
 
 
 if __name__ == "__main__":

@@ -456,7 +456,7 @@ python -m app.workers.tester_sms --create-indexes
 
 این فرمان روی سفارش‌ها ایندکس جدید `tester_gender_created` با کلیدهای `(date_created, _id)` صعودی، Collation ساده و `partialFilterExpression: {tester_gender: {$exists: true}}` ایجاد می‌کند. تاریخ در ابتدای ایندکس برای بازه و ترتیب Cursor است؛ شرط Partial فقط سفارش‌های دارای فیلد را وارد ایندکس می‌کند، از جمله `null` و سایر انواع مجاز. شرط `$ne: ""` در خود Query باقی می‌ماند؛ این عملگر در Partial Filter پشتیبانی نمی‌شود. [مستندات Partial Index در MongoDB](https://www.mongodb.com/docs/manual/core/index-partial/)
 در `tester_sms_notifications` ایندکس یکتای `order_id` و ایندکس‌های بازیابی/اصلاح/Retry، و در `tester_selections` ایندکس‌های یکتای `order_id` و `token_hash` ایجاد می‌شوند.
-ایندکس `tester_pending_release` روی `(state, date_created, _id)` صعودی نیز با همان Partial Filter وجود `tester_gender` و Collation ساده ساخته می‌شود. صف آزادسازی با Hint همین ایندکس شروع می‌شود و فقط سفارش‌های `pending` از Cutoff به بعد را می‌خواند؛ `sms_sent=true` مانع آن نیست. Lookupها از ایندکس‌های یکتای `order_id` در Notification و Selection استفاده می‌کنند. `check_release_index` مشخصات ایندکس جدید و `check_indexes` سازگاری مسیر استاندارد را بررسی می‌کنند. هیچ ایندکس قدیمی حذف نمی‌شود.
+ایندکس نسخهٔ قبلی `tester_pending_release` روی `(state, date_created, _id)` با همان Partial Filter حفظ می‌شود و خودکار حذف نمی‌شود. Query آزادسازی اکنون با Hint ایندکس موجود `tester_notification_repair` روی `(status, order_synced, accepted_at)` از Notificationهای `accepted` شروع می‌شود؛ ایندکس تازه‌ای لازم نیست. سفارش مرتبط با `_id_` و رسید با `tester_selection_order_unique` خوانده می‌شوند. سفارش فقط در `state=pending` و محدودهٔ Cutoff وارد صف می‌شود؛ `sms_sent=true` مانع نیست. `check_release_index` نام/کلیدها، نبود Partial/Sparse و Collation ایندکس مبدأ را بررسی می‌کند؛ `check_indexes` بررسی استاندارد سایر ایندکس‌ها را نیز حفظ می‌کند.
 پیش از فعال‌کردن Cron نسخهٔ جدید، همین فرمان را اجرا کنید تا ایندکس سفارش‌ها اضافه شود؛ ایندکس‌های قبلی حذف یا بازنویسی نمی‌شوند. `check_indexes` نام، کلیدها، Partial Filter و Collation مورد انتظار را کنترل می‌کند و Query با Hint نام `tester_gender_created` اجرا می‌شود. در نبود ایندکس سازگار، ارسال پیش از Claim متوقف می‌شود و پیام اجرای `--create-indexes` می‌دهد؛ Dry Run نیز برای Query به همین ایندکس نیاز دارد. هیچ ایندکسی هنگام Import یا اجرای عادی خودکار ساخته نمی‌شود.
 
 حذف ایندکس قدیمی `tester_product_created` برای کارکرد نسخهٔ جدید لازم نیست. هنگام استقرار، Cron/اجرای نسخهٔ قبلی را متوقف کنید، ایندکس جدید را با فرمان بالا بسازید، Dry Run و Explain را بررسی کنید و سپس Cron نسخهٔ جدید را فعال کنید. این تغییر هیچ دادهٔ سفارش یا ایندکس واقعی را خودکار حذف نمی‌کند.
@@ -519,9 +519,10 @@ python -m app.workers.tester_sms --once --limit 50
 
 اگر پیامک هیچ‌گاه Accepted نشده یا `accepted_at` معتبر ندارد، سفارش **Deadline معتبر ندارد** و به دلیل گذشت زمان از `created_at` یا تاریخ خرید آزاد نمی‌شود. تعیین تکلیف این سفارش‌ها به تصمیم کسب‌وکاری جداگانه نیاز دارد؛ Retry و گزارش `exhausted` فعلی حفظ می‌شوند.
 
-Batch آزادسازی مستقل است و ظرفیت ارسال SMS را کم نمی‌کند. Cursor از ایندکس سفارش‌های منتظر شروع می‌شود و Lookupهای ایندکس‌شده و شرط آماده‌بودن قبل از Limit اجرا می‌شوند. هر صفحه محدود است و حداکثر `TESTER_RELEASE_BATCH_SIZE` سفارش در یک اجرا واقعاً آزاد می‌شود. در خطا یا رقابت، صفحهٔ بعد با Keyset از `(date_created, _id)` ادامه پیدا می‌کند؛ بنابراین حتی Batch یک‌تایی و یک سفارش دائماً خطادار، سفارش‌های سالم بعدی را پشت Limit نگه نمی‌دارند. ممکن است برای پرکردن Batch، تعداد بیشتری سفارش منتظر بررسی شود؛ تمام Collection سفارش‌ها اسکن نمی‌شود. آزادشده‌ها به دلیل تغییر `state` از صف بعدی حذف می‌شوند. خطای Query مرحلهٔ آزادسازی نیز مانع تلاش مرحلهٔ SMS نیست. خطاهای فراز و حتی اعتبارنامهٔ نامعتبر SMS پس از اجرای آزادسازی بررسی می‌شوند.
+Batch آزادسازی مستقل است و ظرفیت ارسال SMS را کم نمی‌کند. Cursor از ایندکس Notificationهای پذیرفته‌شده شروع می‌شود؛ سفارش بدون Notification یا با ارسال ناموفق وارد Lookup سفارش نمی‌شود. پیش از Lookup رسید، سفارشِ هنوز در مهلت و فاقد فیلدهای لازمِ ثبت کنار گذاشته می‌شود؛ بررسی کامل رسید همچنان بعد از این فیلتر انجام می‌شود. Lookupهای ایندکس‌شده و شرط آماده‌بودن قبل از Sort/Limit اجرا می‌شوند. هر صفحه محدود است و حداکثر `TESTER_RELEASE_BATCH_SIZE` سفارش در یک اجرا واقعاً آزاد می‌شود. در خطا یا رقابت، صفحهٔ بعد با Keyset از `(date_created, _id)` ادامه پیدا می‌کند؛ بنابراین حتی Batch یک‌تایی و یک سفارش دائماً خطادار، سفارش‌های سالم بعدی را پشت Limit نگه نمی‌دارند. تعداد Notificationهای `accepted`، شامل سفارش‌های قبلاً آزادشده، هنوز بر هزینهٔ Query اثر دارد؛ برای هرکدام وضعیت فعلی سفارش با Lookup بررسی می‌شود. خطای Query مرحلهٔ آزادسازی نیز مانع تلاش مرحلهٔ SMS نیست. خطاهای فراز و حتی اعتبارنامهٔ نامعتبر SMS پس از اجرای آزادسازی بررسی می‌شوند.
 
 خروجی JSON شامل `released_submitted`، `released_expired`، `release_ready`، `release_skipped`، `release_errors` و `release_enabled` است. `release_ready` تعداد کاندیداهای خوانده‌شده است و هنگام خطا/رقابت ممکن است از سقف موفقیت بیشتر شود. `release_skipped` شامل رقابت با Worker دیگر یا تغییر شرط هنگام Update است؛ خطای عمومی بدون اطلاعات مشتری لاگ می‌شود. در اجرای بعدی سفارش موفق دوباره شمارش نمی‌شود.
+اگر `release_errors>0` باشد، مرحلهٔ SMS همچنان اجرا می‌شود، سپس خلاصهٔ JSON چاپ، تعداد خطاها بدون جزئیات محرمانه در لاگ `ERROR` ثبت و Exit Code برابر `1` می‌شود. اجرای سالم همچنان `0` و توقف ناشی از HTTP سراسری فراز همچنان `1` است؛ منطق Retry تغییری ندارد.
 
 برای Preview آزادسازی بدون ارسال SMS، در همان محیط اجرا `TESTER_SMS_ENABLED=false` و `TESTER_RELEASE_ENABLED=true` را تنظیم و فرمان زیر را اجرا کنید؛ ابتدا ایندکس‌ها باید از مسیر `--create-indexes` آماده شده باشند:
 
@@ -605,6 +606,25 @@ TESTER_RUN_MONGO_INTEGRATION=1 python -m unittest tests.test_tester_sms_integrat
 Integration شامل انواع مقدار `tester_gender` (از جمله `null`، عدد، Boolean و آرایه)، نبود/خالی‌بودن فیلد، مستقل‌بودن از محصول خریداری‌شده، فیلتر دقیق تاریخ، `$lookup`، ایندکس Partial، باقی‌ماندن ایندکس قدیمی، Claim هم‌زمان، Retry، حفظ نتیجهٔ پذیرفته‌شده و عدم تغییر دیتابیس در Dry Run است. تست‌های Selection نیز Context/Submit را با همین شرط جدید، ثبت ۱۰ نام دقیق، Idempotency و Recovery بررسی می‌کنند.
 خلاصهٔ Explain روی دادهٔ ساختگی در `test-artifacts/tester-worker-explain.json` ذخیره می‌شود؛ این پوشه وارد Git نمی‌شود.
 تست‌های آزادسازی در `tests.test_tester_release` و `tests.test_tester_release_integration` قرار دارند؛ Integration فقط دیتابیس موقت `tester_release_it_<uuid>` را تغییر می‌دهد و پس از اجرا حذف می‌کند. سناریوها شامل مرز برابر Deadline، همهٔ وضعیت‌ها، نبود زمان معتبر، Batch کوچک و رسید خراب، دو Worker هم‌زمان، حفظ Audit/Recovery، Dry Run و شکست قابل بازیابی دیتابیس است. Explain صف آزادسازی در `test-artifacts/tester-release-explain.json` ذخیره می‌شود؛ هیچ درخواست واقعی فراز در این تست‌ها مجاز نیست.
+
+تست Performance مستقل و اختیاری، ۲۰٬۰۰۰ سفارش `pending` در دیتابیس موقت `tester_release_perf_<uuid>` می‌سازد: ۸٬۰۰۰ بدون Notification، ۶٬۰۰۰ با Notification ناموفق، ۵٬۹۰۰ پذیرفته‌شده و هنوز منتظر انتخاب، ۵۰ منقضی و ۵۰ رسید معتبر `submitted`. سفارش‌های آماده عمداً انتهای ترتیب هستند. Query سه بار برای Batch پنجاه‌تایی و سه بار پس از خالی‌شدن صف آماده اجرا می‌شود؛ هیچ SMS واقعی ارسال نمی‌شود و دیتابیس تست در پایان حذف می‌شود:
+
+```powershell
+$env:TESTER_RUN_RELEASE_PERFORMANCE = "1"
+python -m unittest tests.test_tester_release_performance -v
+Remove-Item Env:TESTER_RUN_RELEASE_PERFORMANCE
+```
+
+اندازه‌گیری همین محیط روی MongoDB `8.0.1` در ۱۸ اکتبر ۲۰۲۶، قبل/بعد از بهینه‌سازی:
+
+| حالت | میانهٔ Query قبل/بعد (ms) | مجموع DocsExamined قبل/بعد | مجموع KeysExamined قبل/بعد | بررسی ردیفی Lookup قبل/بعد |
+| --- | --- | --- | --- | --- |
+| آماده‌ها در انتهای ۲۰٬۰۰۰ سفارش؛ خروجی ۵۰ | 9973.34 / 803.15 | 37900 / 12100 | 37900 / 12101 | 25900 / 6100 |
+| بدون سفارش آماده؛ ۱۹٬۹۰۰ Pending باقی‌مانده | 11264.40 / 827.47 | 37700 / 12000 | 37700 / 12001 | 25800 / 6000 |
+
+در نسخهٔ بهینه، زمان سه اجرای حالت اول `803.15, 612.22, 1069.36 ms` و حالت دوم `827.47, 642.98, 1159.25 ms` بود. هر Query دو مرحلهٔ Lookup دارد؛ «بررسی ردیفی» جمع `nReturned` آن مرحله‌هاست، نه تعداد درخواست شبکه. مجموع Docs/Keys، Cursor مبدأ و هر دو Lookup را جمع می‌کند. Cursor مبدأ ۶٬۰۰۰ Notification پذیرفته‌شده را بررسی کرد؛ Lookup سفارش با `_id_` و Lookup رسید با ایندکس یکتای سفارش انجام شد. در حالت بدون کار، Lookup رسید هیچ ردیفی پردازش نکرد؛ هیچ Collection Scan در Lookupها نبود. نتایج، Benchmark همین محیط و توزیع داده هستند و تضمین زمان ثابت برای حجم‌های دیگر نیستند. Timeout Production تغییر نکرده است؛ بودجهٔ بزرگ‌تر فقط در تست اجازهٔ اندازه‌گیری Query کند قبلی را می‌دهد.
+
+گزارش JSON و Explain در `test-artifacts/tester-release-performance.json` و `test-artifacts/tester-release-performance-explain.json` ذخیره می‌شوند؛ این پوشه وارد Git نمی‌شود.
 
 ## ساختار
 
