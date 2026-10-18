@@ -61,7 +61,12 @@ def expression(value, document, variables=None):
     if operator == "$literal":
         return operands
     if operator == "$add":
-        return sum(evaluate(item) for item in operands)
+        items = [evaluate(item) for item in operands]
+        if isinstance(items[0], datetime):
+            return items[0] + timedelta(milliseconds=sum(items[1:]))
+        return sum(items)
+    if operator == "$min":
+        return min(evaluate(item) for item in operands)
     if operator == "$concatArrays":
         return [item for array in operands for item in evaluate(array)]
     if operator == "$mergeObjects":
@@ -79,12 +84,13 @@ def expression(value, document, variables=None):
         return evaluate(operands[1] if evaluate(operands[0]) else operands[2])
     if operator == "$type":
         item = evaluate(operands)
-        return "string" if isinstance(item, str) else "other"
+        return "string" if isinstance(item, str) else "date" if isinstance(item, datetime) else "other"
     if operator == "$regexFind":
         match = re.search(operands["regex"], evaluate(operands["input"]))
         return {"captures": list(match.groups())} if match else None
     if operator == "$arrayElemAt":
-        return evaluate(operands[0])[operands[1]]
+        array = evaluate(operands[0])
+        return array[operands[1]] if array and len(array) > operands[1] else None
     if operator == "$ifNull":
         first = evaluate(operands[0])
         return evaluate(operands[1]) if first is None else first
@@ -100,6 +106,8 @@ def expression(value, document, variables=None):
             return None
     if operator == "$and":
         return all(evaluate(item) for item in operands)
+    if operator == "$or":
+        return any(evaluate(item) for item in operands)
     left, right = (evaluate(item) for item in operands)
     if operator == "$eq":
         return left == right
@@ -109,6 +117,8 @@ def expression(value, document, variables=None):
         return left is not None and right is not None and left >= right
     if operator == "$lt":
         return left is not None and right is not None and left < right
+    if operator == "$lte":
+        return left is not None and right is not None and left <= right
     raise AssertionError(f"Unsupported expression: {operator}")
 
 
@@ -142,6 +152,8 @@ def condition(value, expected, *, exists=None):
             return False
         if operator == "$gte" and (value is None or type(value) is not type(operand) or value < operand):
             return False
+        if operator == "$gt" and (value is None or type(value) is not type(operand) or value <= operand):
+            return False
         if operator == "$lte" and (value is None or value > operand):
             return False
         if operator == "$lt" and (value is None or value >= operand):
@@ -161,7 +173,10 @@ def condition(value, expected, *, exists=None):
 
 def matches(document, query):
     for key, expected in query.items():
-        if key == "$expr":
+        if key == "$jsonSchema":
+            if not schema_matches(document, expected):
+                return False
+        elif key == "$expr":
             if not expression(expected, document):
                 return False
         elif key == "$or":
@@ -172,6 +187,28 @@ def matches(document, query):
                 return False
         elif not condition(path_value(document, key), expected, exists=path_exists(document, key)):
             return False
+    return True
+
+
+def schema_matches(value, schema):
+    """Small fake for query-only schema predicates; real MongoDB verifies semantics."""
+    types = {"string": str, "array": list, "date": datetime}
+    if "bsonType" in schema and not isinstance(value, types[schema["bsonType"]]):
+        return False
+    if "pattern" in schema and not re.search(schema["pattern"].replace("(*UCP)", ""), value):
+        return False
+    if isinstance(value, str) and not schema.get("minLength", 0) <= len(value) <= schema.get("maxLength", len(value)):
+        return False
+    if isinstance(value, dict):
+        if any(key not in value for key in schema.get("required", [])):
+            return False
+        return all(schema_matches(value[key], child) for key, child in schema.get("properties", {}).items() if key in value)
+    if isinstance(value, list):
+        if not schema.get("minItems", 0) <= len(value) <= schema.get("maxItems", len(value)):
+            return False
+        if schema.get("uniqueItems") and len(set(map(repr, value))) != len(value):
+            return False
+        return all(schema_matches(item, schema.get("items", {})) for item in value)
     return True
 
 
@@ -1067,7 +1104,7 @@ class WorkerSettingsAndTokenTests(unittest.TestCase):
             self.assertEqual(match["tester_gender"], {"$exists": True, "$ne": ""})
 
     def test_retry_settings_accept_only_positive_integers(self):
-        for key in ("TESTER_SMS_RETRY_DELAY_MINUTES", "TESTER_SMS_MAX_ATTEMPTS"):
+        for key in ("TESTER_SMS_RETRY_DELAY_MINUTES", "TESTER_SMS_MAX_ATTEMPTS", "TESTER_RELEASE_BATCH_SIZE"):
             for value in ("", "0", "-1", "+1", "1.5", "true", "1_000"):
                 with self.subTest(key=key, value=value), patch.dict(os.environ, {**self.environment, key: value}, clear=True):
                     with self.assertRaisesRegex(worker.WorkerConfigurationError, key):
@@ -1075,6 +1112,17 @@ class WorkerSettingsAndTokenTests(unittest.TestCase):
         with patch.dict(os.environ, {**self.environment, "TESTER_SMS_RETRY_DELAY_MINUTES": "7", "TESTER_SMS_MAX_ATTEMPTS": "4"}, clear=True):
             settings = worker.WorkerSettings.from_environment()
         self.assertEqual((settings.retry_delay_minutes, settings.max_attempts), (7, 4))
+
+    def test_release_settings_default_to_sms_mode_and_can_be_overridden(self):
+        for value, expected in (("", None), ("true", True), ("false", False)):
+            with patch.dict(os.environ, {**self.environment, "TESTER_RELEASE_ENABLED": value,
+                                         "TESTER_RELEASE_BATCH_SIZE": "7"}, clear=True):
+                settings = worker.WorkerSettings.from_environment()
+            self.assertIs(settings.release_enabled, expected)
+            self.assertEqual(settings.release_batch_size, 7)
+        with patch.dict(os.environ, {**self.environment, "TESTER_RELEASE_ENABLED": "yes"}, clear=True):
+            with self.assertRaisesRegex(worker.WorkerConfigurationError, "TESTER_RELEASE_ENABLED"):
+                worker.WorkerSettings.from_environment()
 
     def test_variable_fraction_precision_and_invalid_dates(self):
         settings = worker.WorkerSettings("preprocess_orders", datetime(2026, 10, 13, 20, 30, 0, 500000, timezone.utc))

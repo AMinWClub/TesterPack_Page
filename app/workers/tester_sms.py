@@ -45,6 +45,8 @@ UTC_DATE_PATTERN = r"^([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2})(?:
 ORDER_INDEX = "tester_gender_created"
 ORDER_INDEX_KEYS = [(ORDER_DATE_FIELD, 1), ("_id", 1)]
 ORDER_INDEX_FILTER = {"tester_gender": {"$exists": True}}
+RELEASE_INDEX = "tester_pending_release"
+RELEASE_INDEX_KEYS = [("state", 1), (ORDER_DATE_FIELD, 1), ("_id", 1)]
 TESTER_SMS_TEXT = (
     "مشتری عزیز سراد\n\n"
     "برای تکمیل سفارش پک تستر خود، لطفاً از طریق لینک زیر اقدام فرمایید:\n\n"
@@ -66,6 +68,8 @@ class WorkerSettings:
     token_secret: str = field(default="", repr=False)
     retry_delay_minutes: int = 5
     max_attempts: int = 3
+    release_enabled: bool | None = None  # Unset follows sms_enabled, preserving disabled read-only runs.
+    release_batch_size: int = 50
 
     @classmethod
     def from_environment(cls, *, require_delivery: bool = False) -> WorkerSettings:
@@ -88,8 +92,12 @@ class WorkerSettings:
         enabled = os.getenv("TESTER_SMS_ENABLED", "false").strip().lower()
         if enabled not in {"true", "false"}:
             raise WorkerConfigurationError("TESTER_SMS_ENABLED must be true or false.")
+        release = os.getenv("TESTER_RELEASE_ENABLED", "").strip().lower()
+        if release not in {"", "true", "false"}:
+            raise WorkerConfigurationError("TESTER_RELEASE_ENABLED must be true or false, or unset.")
         retry_settings = {}
-        for name, default in (("TESTER_SMS_RETRY_DELAY_MINUTES", "5"), ("TESTER_SMS_MAX_ATTEMPTS", "3")):
+        for name, default in (("TESTER_SMS_RETRY_DELAY_MINUTES", "5"), ("TESTER_SMS_MAX_ATTEMPTS", "3"),
+                              ("TESTER_RELEASE_BATCH_SIZE", "50")):
             raw = os.getenv(name, default).strip()
             if not re.fullmatch(r"[0-9]+", raw):
                 raise WorkerConfigurationError(f"{name} must be a positive integer.")
@@ -108,6 +116,8 @@ class WorkerSettings:
             token_secret=os.getenv("TESTER_TOKEN_SECRET", ""),
             retry_delay_minutes=retry_settings["TESTER_SMS_RETRY_DELAY_MINUTES"],
             max_attempts=retry_settings["TESTER_SMS_MAX_ATTEMPTS"],
+            release_enabled=None if not release else release == "true",
+            release_batch_size=retry_settings["TESTER_RELEASE_BATCH_SIZE"],
         )
         if require_delivery and settings.sms_enabled:
             settings.validate_delivery()
@@ -188,6 +198,10 @@ async def create_indexes(collections: dict) -> None:
         partialFilterExpression=ORDER_INDEX_FILTER,
         collation=Collation(locale="simple"),
     )
+    await collections["orders"].create_index(
+        RELEASE_INDEX_KEYS, name=RELEASE_INDEX, partialFilterExpression=ORDER_INDEX_FILTER,
+        collation=Collation(locale="simple"),
+    )
     await collections["notifications"].create_index("order_id", unique=True, name="tester_notification_order_unique")
     await collections["notifications"].create_index([("status", 1), ("lease_expires_at", 1)], name="tester_notification_recovery")
     await collections["notifications"].create_index([("status", 1), ("next_retry_at", 1)], name="tester_notification_retry")
@@ -196,7 +210,17 @@ async def create_indexes(collections: dict) -> None:
     await collections["selections"].create_index("token_hash", unique=True, name="tester_selection_token_unique")
 
 
-async def check_indexes(collections: dict) -> None:
+async def check_release_index(collections: dict) -> None:
+    index = (await collections["orders"].index_information()).get(RELEASE_INDEX, {})
+    if (index.get("key") != RELEASE_INDEX_KEYS or index.get("partialFilterExpression") != ORDER_INDEX_FILTER
+            or index.get("unique") or index.get("sparse")
+            or index.get("collation", {}).get("locale", "simple") != "simple"):
+        raise WorkerConfigurationError("Required release index is missing; run --create-indexes first.")
+
+
+async def check_indexes(collections: dict, *, require_release: bool = True) -> None:
+    if require_release:
+        await check_release_index(collections)
     required = {
         "orders": [(False, ORDER_INDEX_KEYS)],
         "notifications": [
@@ -535,6 +559,145 @@ async def process_order(order: dict, collections: dict, settings: WorkerSettings
         logger.warning("SMS accepted; order flag update is pending a later repair.")
     return "accepted", None
 
+def release_order_filter(settings: WorkerSettings) -> dict:
+    match = {key: value for key, value in order_filter(settings).items() if key != "sms_sent"}
+    match["state"] = "pending"
+    match["$expr"] = {"$and": [match["$expr"], {"$eq": [{"$type": "$state"}, "string"]}]}
+    return match
+
+
+def release_pipeline(settings: WorkerSettings, *, after: dict | None = None, limit: int | None = None) -> list[dict]:
+    # Lazy import avoids the existing selections -> worker import cycle and reuses
+    # the receipt field names/window rather than defining another selection model.
+    from app.selections import COUNT, ORDER_MARKER, ORDER_WRITTEN_AT, SELECTION_WINDOW
+
+    match = release_order_filter(settings)
+    if after is not None:
+        match["$or"] = [
+            {ORDER_DATE_FIELD: {"$gt": after[ORDER_DATE_FIELD]}},
+            {ORDER_DATE_FIELD: after[ORDER_DATE_FIELD], "_id": {"$gt": after["_id"]}},
+        ]
+    # Validate before LIMIT: malformed or inconsistent old receipts cannot starve
+    # later ready orders. This is a query predicate, not a collection validator.
+    strings = {"bsonType": "array", "minItems": COUNT, "maxItems": COUNT,
+               "items": {"bsonType": "string", "pattern": r"(*UCP)[^\s\x1c-\x1f]"}}
+    receipt_schema = {
+        "required": ["submission_id", "selected_pids", "selected_names", "submitting_at"],
+        "properties": {
+            "submission_id": {"bsonType": "string", "minLength": 32, "maxLength": 32, "pattern": "^[a-f0-9]{32}$"},
+            "selected_pids": {**strings, "uniqueItems": True}, "selected_names": strings,
+            "submitting_at": {"bsonType": "date"},
+        },
+    }
+    receipt_deadline = {"$cond": [
+        {"$eq": [{"$type": "$_selection.expires_at"}, "date"]},
+        {"$min": ["$_deadline", "$_selection.expires_at"]}, "$_deadline",
+    ]}
+    return [
+        {"$match": match}, {"$sort": {ORDER_DATE_FIELD: 1, "_id": 1}},
+        {"$lookup": {"from": NOTIFICATIONS, "localField": "_id", "foreignField": "order_id",
+                     "pipeline": [{"$match": {"status": "accepted", "$expr": {"$and": [
+                         {"$eq": [{"$type": "$accepted_at"}, "date"]}, {"$lte": ["$accepted_at", "$$NOW"]},
+                         {"$eq": ["$status", "accepted"]},
+                     ]}}}, {"$project": {"accepted_at": 1}}], "as": "_notification"}},
+        {"$match": {"_notification.0": {"$exists": True}}},
+        {"$set": {"_accepted_at": {"$arrayElemAt": ["$_notification.accepted_at", 0]}}},
+        {"$set": {"_deadline": {"$add": ["$_accepted_at", int(SELECTION_WINDOW.total_seconds() * 1000)]}}},
+        {"$lookup": {"from": SELECTIONS, "localField": "_id", "foreignField": "order_id",
+                     "pipeline": [{"$match": {"status": "submitted", "$jsonSchema": receipt_schema}},
+                                  {"$project": {key: 1 for key in (
+                                      "status", "submission_id", "selected_pids", "selected_names", "submitting_at", "expires_at",
+                                  )}}], "as": "_submitted"}},
+        {"$set": {"_selection": {"$ifNull": [{"$arrayElemAt": ["$_submitted", 0]}, {}]},
+                  "_expired": {"$gte": ["$$NOW", "$_deadline"]}}},
+        {"$set": {"_valid_receipt": {"$and": [
+            {"$eq": ["$_selection.status", "submitted"]},
+            {"$eq": [f"${ORDER_MARKER}", "$_selection.submission_id"]},
+            {"$eq": ["$recommended_products", "$_selection.selected_names"]},
+            {"$eq": [{"$type": f"${ORDER_WRITTEN_AT}"}, "date"]},
+            {"$gte": ["$_selection.submitting_at", "$_accepted_at"]},
+            {"$lte": ["$_selection.submitting_at", f"${ORDER_WRITTEN_AT}"]},
+            {"$lt": [f"${ORDER_WRITTEN_AT}", receipt_deadline]},
+        ]}}},
+        {"$match": {"$or": [{"_expired": True}, {"_valid_receipt": True}]}},
+        {"$limit": settings.release_batch_size if limit is None else limit},
+        {"$project": {key: 1 for key in (
+            "_id", ORDER_DATE_FIELD, "_accepted_at", "_deadline", "_selection", "_expired", "_valid_receipt",
+            "recommended_products", ORDER_MARKER, ORDER_WRITTEN_AT,
+        )}},
+    ]
+
+
+async def release_resolved_tester_orders(collections: dict, settings: WorkerSettings, *, dry_run: bool = False) -> dict:
+    from app.selections import ORDER_MARKER, ORDER_WRITTEN_AT, owns_order, utc_date, written_in_time
+
+    summary = {"released_submitted": 0, "released_expired": 0, "release_ready": 0,
+               "release_skipped": 0, "release_errors": 0}
+    if type(settings.release_batch_size) is not int or settings.release_batch_size <= 0:
+        raise WorkerConfigurationError("TESTER_RELEASE_BATCH_SIZE must be a positive integer.")
+    after = None
+    completed = 0
+    try:
+        await check_release_index(collections)
+        while completed < settings.release_batch_size:
+            # Keyset pages bypass failed/racing candidates within this run too.
+            # Never let a permanently failing first order monopolize a small batch.
+            remaining = settings.release_batch_size - completed
+            cursor = await collections["orders"].aggregate(
+                release_pipeline(settings, after=after, limit=remaining), batchSize=remaining,
+                collation=Collation(locale="simple"), hint=RELEASE_INDEX,
+            )
+            page_count = 0
+            async for candidate in cursor:
+                page_count += 1
+                after = candidate
+                summary["release_ready"] += 1
+                try:
+                    expired = candidate["_expired"]
+                    selection = candidate["_selection"]
+                    accepted_at, deadline = utc_date(candidate["_accepted_at"]), utc_date(candidate["_deadline"])
+                    frozen = utc_date(selection.get("expires_at"))
+                    window = {"accepted_at": accepted_at, "expires_at": min(deadline, frozen) if frozen else deadline}
+                    valid_receipt = (candidate["_valid_receipt"] and owns_order(selection, candidate)
+                                     and written_in_time(selection, candidate, window))
+                    if not expired and not valid_receipt:
+                        summary["release_skipped"] += 1
+                        continue
+                    if dry_run:
+                        completed += 1
+                        continue
+                    match = release_order_filter(settings)
+                    exact_date = match.pop("$expr")
+                    # Recheck the actual order proof in the atomic write. The
+                    # expired fallback has no dependency on a Selection receipt.
+                    paths = []
+                    if not expired and valid_receipt:
+                        proof = [{"$eq": [f"${key}", {"$literal": candidate[key]}]}
+                                 for key in ("recommended_products", ORDER_MARKER, ORDER_WRITTEN_AT)]
+                        paths.append(("submitted", {"$and": [{"$lt": ["$$NOW", deadline]}, *proof]}))
+                    paths.append(("expired", {"$gte": ["$$NOW", deadline]}))
+                    for reason, guard in paths:
+                        result = await collections["orders"].update_one({
+                            **match, "_id": candidate["_id"],
+                            "$expr": {"$and": [exact_date, {"$gte": ["$$NOW", accepted_at]}, guard]},
+                        }, {"$set": {"state": "not_seen"}}, collation=Collation(locale="simple"))
+                        if result.modified_count:
+                            summary[f"released_{reason}"] += 1
+                            completed += 1
+                            break
+                    else:
+                        summary["release_skipped"] += 1
+                except PyMongoError:
+                    summary["release_errors"] += 1
+                    logger.warning("Tester order release failed; a later run can retry.")
+            if page_count < remaining:
+                break
+    except PyMongoError:
+        summary["release_errors"] += 1
+        logger.warning("Tester release query unavailable; SMS processing can continue.")
+    return summary
+
+
 async def run_once(db, settings: WorkerSettings, *, limit: int | None = None,
                    dry_run: bool = False, sms: FarazSmsClient | None = None) -> dict:
     limit = settings.batch_size if limit is None else limit
@@ -543,7 +706,12 @@ async def run_once(db, settings: WorkerSettings, *, limit: int | None = None,
     collections = worker_collections(db, settings)
     match = order_filter(settings)
     readonly = dry_run or not settings.sms_enabled
+    release_enabled = settings.sms_enabled if settings.release_enabled is None else settings.release_enabled
     summary = {"eligible": 0, "accepted": 0, "failed": 0, "retry_pending": 0, "exhausted": 0, "skipped": 0, "database_errors": 0}
+    summary.update({"released_submitted": 0, "released_expired": 0, "release_ready": 0,
+                    "release_skipped": 0, "release_errors": 0, "release_enabled": release_enabled})
+    if release_enabled:
+        summary.update(await release_resolved_tester_orders(collections, settings, dry_run=dry_run))
     if not readonly:
         settings.validate_delivery()
         sms = sms or FarazSmsClient()
@@ -562,7 +730,7 @@ async def run_once(db, settings: WorkerSettings, *, limit: int | None = None,
             raise WorkerConfigurationError("FARAZ_LINE_NUMBER must contain only digits.")
         # Validate the Simple SMS payload without generating a token or sending.
         sms.build_simple_payload(recipient="09120000000", text=TESTER_SMS_TEXT.format(link="https://validation.invalid"))
-        await check_indexes(collections)
+        await check_indexes(collections, require_release=False)
         summary.update(await recover_notifications(collections, match, limit, settings))
     cursor = await collections["orders"].aggregate(
         eligible_pipeline(match, limit, settings.max_attempts), batchSize=min(limit, settings.batch_size),
@@ -584,12 +752,14 @@ async def run_once(db, settings: WorkerSettings, *, limit: int | None = None,
             summary["database_errors"] += 1
             logger.warning("Order database operation failed; unfinished attempts will recover after lease expiry.")
     summary["exhausted_total"] = (await exhausted_report(collections, match, 0))["exhausted_total"]
-    summary["read_only"] = readonly
+    summary["read_only"] = readonly and (dry_run or not release_enabled)
     return summary
 
 
 async def run_command(args) -> dict:
-    settings = WorkerSettings.from_environment(require_delivery=args.once and not args.dry_run)
+    # Delivery validation belongs after release, so broken SMS credentials cannot
+    # prevent already-resolved orders from leaving the selection waiting state.
+    settings = WorkerSettings.from_environment()
     # Reuse the application's MongoDB settings without changing its lifespan.
     try:
         from app.config import MONGODB_DB_NAME, MONGODB_TIMEOUT_MS, MONGODB_URI

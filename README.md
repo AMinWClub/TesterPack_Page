@@ -389,7 +389,7 @@ python -m unittest tests.test_sms_faraz tests.test_tester_sms_worker -v
 
 ## Worker سفارش‌های پک تستر
 
-Worker مستقل، هر بار تعداد محدودی سفارش را از همان MongoDB پروژه بررسی می‌کند و سپس خارج می‌شود.
+Worker یک‌نوبتی، در همان اجرا ابتدا آزادسازی سفارش‌های تعیین‌تکلیف‌شده، سپس Recovery پیامک و در پایان ارسال‌های جدید/Retry را انجام می‌دهد و خارج می‌شود. Cron یا Worker دیگری لازم نیست.
 تاریخ سفارش در `date_created` به‌صورت رشتهٔ ISO با UTC و پسوند `Z`، و موبایل در `phone` است.
 وجود، مقدار و نوع `product_id` هیچ نقشی در واجد شرایط بودن سفارش، اعتبار لینک یا ثبت نهایی ندارد. تنظیم `TESTER_PACK_PRODUCT_ID` حذف شده و حتی اگر در `.env` قدیمی باقی مانده باشد، خوانده نمی‌شود.
 
@@ -424,14 +424,16 @@ Notificationهای `accepted`، `exhausted` و خطای دائمی داده دو
 | `TESTER_ORDERS_COLLECTION` | Collection موجود سفارش‌ها؛ پیش‌فرض `preprocess_orders` |
 | `TESTER_SMS_START_AT` | تاریخ شروع inclusive با Timezone؛ الزامی |
 | `TESTER_WORKER_BATCH_SIZE` | حداکثر سفارش‌های ارسال در هر اجرا؛ پیش‌فرض `50` |
-| `TESTER_SMS_ENABLED` | فقط `true` یا `false`؛ پیش‌فرض `false`، حالت فقط خواندنی |
+| `TESTER_SMS_ENABLED` | فقط `true` یا `false`؛ پیش‌فرض `false`، مرحلهٔ SMS فقط خواندنی |
+| `TESTER_RELEASE_ENABLED` | خالی/تنظیم‌نشده: تابع `TESTER_SMS_ENABLED`؛ `true`: آزادسازی مستقل از SMS؛ `false`: توقف آزادسازی |
+| `TESTER_RELEASE_BATCH_SIZE` | سقف مستقل آزادسازی هر اجرا؛ عدد صحیح مثبت، پیش‌فرض `50`؛ با `--limit` تغییر نمی‌کند |
 | `TESTER_SELECTION_BASE_URL` | فقط Origin مانند `https://tester.example.com`، بدون مسیر؛ هنگام ارسال الزامی |
 | `TESTER_TOKEN_SECRET` | Secret تصادفی و ثابت با حداقل ۳۲ بایت؛ هنگام ارسال الزامی |
 | `TESTER_SMS_RETRY_DELAY_MINUTES` | فاصلهٔ Retry به دقیقه؛ فقط عدد صحیح مثبت، پیش‌فرض `5` |
 | `TESTER_SMS_MAX_ATTEMPTS` | سقف کل تلاش‌ها، شامل ارسال اول؛ فقط عدد صحیح مثبت، پیش‌فرض `3` |
 
 تنظیمات `MONGODB_*` و `FARAZ_*` همان تنظیمات موجود پروژه هستند. برای ارسال، API Key و شمارهٔ خط فراز باید تنظیم شده باشند.
-برای Dry Run و حالت غیرفعال، تنظیمات لینک، Secret و اعتبارنامهٔ پیامک ضروری نیستند.
+برای Dry Run، SMS غیرفعال و آزادسازی مستقل، تنظیمات لینک، Secret و اعتبارنامهٔ پیامک ضروری نیستند.
 Secret را یک بار مثلاً با `python -c "import secrets; print(secrets.token_urlsafe(48))"` تولید و در `.env` قرار دهید؛ آن را ثابت نگه دارید.
 توکن Base64 URL-safe نسخهٔ ۳ از HMAC-SHA256 با همان Secret ثابت، شناسهٔ دارای نوع سفارش و نسخه ساخته می‌شود: خروجی HMAC با `urlsafe_b64encode` کدگذاری می‌شود و ۱۸ کاراکتر اول با همان حروف اصلی نگهداری می‌شوند. در این بخش ابتدایی Padding وجود ندارد. تبدیل عددی و پیمانه‌گیری حذف شده‌اند؛ شمارهٔ نمایشی سفارش و شمارنده مبنای توکن نیستند. بزرگی و کوچکی حروف و علائم در لینک، JavaScript، Body و Hash حفظ می‌شوند. همهٔ Retryهای یک سفارش با Secret و نسخهٔ ثابت دقیقاً همان لینک را می‌فرستند.
 
@@ -454,6 +456,7 @@ python -m app.workers.tester_sms --create-indexes
 
 این فرمان روی سفارش‌ها ایندکس جدید `tester_gender_created` با کلیدهای `(date_created, _id)` صعودی، Collation ساده و `partialFilterExpression: {tester_gender: {$exists: true}}` ایجاد می‌کند. تاریخ در ابتدای ایندکس برای بازه و ترتیب Cursor است؛ شرط Partial فقط سفارش‌های دارای فیلد را وارد ایندکس می‌کند، از جمله `null` و سایر انواع مجاز. شرط `$ne: ""` در خود Query باقی می‌ماند؛ این عملگر در Partial Filter پشتیبانی نمی‌شود. [مستندات Partial Index در MongoDB](https://www.mongodb.com/docs/manual/core/index-partial/)
 در `tester_sms_notifications` ایندکس یکتای `order_id` و ایندکس‌های بازیابی/اصلاح/Retry، و در `tester_selections` ایندکس‌های یکتای `order_id` و `token_hash` ایجاد می‌شوند.
+ایندکس `tester_pending_release` روی `(state, date_created, _id)` صعودی نیز با همان Partial Filter وجود `tester_gender` و Collation ساده ساخته می‌شود. صف آزادسازی با Hint همین ایندکس شروع می‌شود و فقط سفارش‌های `pending` از Cutoff به بعد را می‌خواند؛ `sms_sent=true` مانع آن نیست. Lookupها از ایندکس‌های یکتای `order_id` در Notification و Selection استفاده می‌کنند. `check_release_index` مشخصات ایندکس جدید و `check_indexes` سازگاری مسیر استاندارد را بررسی می‌کنند. هیچ ایندکس قدیمی حذف نمی‌شود.
 پیش از فعال‌کردن Cron نسخهٔ جدید، همین فرمان را اجرا کنید تا ایندکس سفارش‌ها اضافه شود؛ ایندکس‌های قبلی حذف یا بازنویسی نمی‌شوند. `check_indexes` نام، کلیدها، Partial Filter و Collation مورد انتظار را کنترل می‌کند و Query با Hint نام `tester_gender_created` اجرا می‌شود. در نبود ایندکس سازگار، ارسال پیش از Claim متوقف می‌شود و پیام اجرای `--create-indexes` می‌دهد؛ Dry Run نیز برای Query به همین ایندکس نیاز دارد. هیچ ایندکسی هنگام Import یا اجرای عادی خودکار ساخته نمی‌شود.
 
 حذف ایندکس قدیمی `tester_product_created` برای کارکرد نسخهٔ جدید لازم نیست. هنگام استقرار، Cron/اجرای نسخهٔ قبلی را متوقف کنید، ایندکس جدید را با فرمان بالا بسازید، Dry Run و Explain را بررسی کنید و سپس Cron نسخهٔ جدید را فعال کنید. این تغییر هیچ دادهٔ سفارش یا ایندکس واقعی را خودکار حذف نمی‌کند.
@@ -473,7 +476,7 @@ orders.dropIndex("tester_product_created");
 فیلتر و Join با Notification در MongoDB انجام می‌شوند؛ Limit بعد از حذف وضعیت‌های غیرقابل ارسال و Retryهای زودتر از موعد اعمال می‌شود.
 Cursor مرحله‌ای خوانده می‌شود، `skip` استفاده نمی‌شود و پردازش همهٔ سفارش‌ها در حافظه انجام نمی‌شود.
 
-Dry Run فقط خلاصهٔ تعداد سفارش‌های واجد شرایط تا سقف Limit را نمایش می‌دهد؛ توکن، Selection، Notification، ایندکس یا پیامک ایجاد نمی‌کند:
+Dry Run خلاصهٔ تعداد سفارش‌های SMS تا سقف Limit و، در صورت فعال‌بودن آزادسازی، `release_ready` تا سقف Batch مستقل را نشان می‌دهد. شمارنده‌های `released_*` صفر می‌مانند؛ هیچ سند، توکن، Selection، Notification، ایندکس یا پیامکی ایجاد/تغییر نمی‌کند:
 
 ```shell
 python -m app.workers.tester_sms --dry-run --limit 10
@@ -486,15 +489,47 @@ python -m app.workers.tester_sms --once --limit 50
 ```
 
 `--limit` سقف پیش‌فرض Batch را جایگزین می‌کند. پیش از ارسال واقعی، `TESTER_SMS_ENABLED=true` را خودتان تنظیم کنید.
-با مقدار `false`، حتی `--once` فقط خلاصهٔ خواندنی می‌دهد و هیچ وضعیتی به `sending` یا `accepted` تغییر نمی‌کند.
+با مقدار `false` و تنظیم خالی/تنظیم‌نشدهٔ `TESTER_RELEASE_ENABLED`، حتی `--once` فقط خلاصهٔ خواندنی می‌دهد. اگر صریحاً `TESTER_RELEASE_ENABLED=true` باشد، فقط آزادسازی اجازهٔ تغییر سفارش دارد؛ هیچ ارسال یا Repair پیامکی انجام نمی‌شود. `--dry-run` در همهٔ ترکیب‌ها کاملاً خواندنی است. `read_only` در JSON مشخص می‌کند کل اجرا خواندنی بوده است یا نه.
 اصلاح سفارش‌های پذیرفته‌شده و بازیابی وضعیت‌های معلق، هر کدام نیز تا سقف Limit در همان اجرا انجام می‌شوند.
 هیچ API یا Worker همیشگی راه‌اندازی نمی‌شود؛ در اجرای مستقل، اتصال AsyncMongoClient ایجاد و در پایان بسته می‌شود.
 
-نمونهٔ Cron در Linux، هر دو دقیقه؛ مسیر پروژه را جایگزین کنید:
+نمونهٔ Cron در Linux، هر دقیقه؛ همان Worker به‌صورت One-Shot اجرا می‌شود. مسیر پروژه را جایگزین کنید:
 
 ```cron
-*/2 * * * * cd /srv/TesterPack_Page && /srv/TesterPack_Page/.venv/bin/python -m app.workers.tester_sms --once >> /srv/TesterPack_Page/tester-worker.log 2>&1
+* * * * * cd /srv/TesterPack_Page && /srv/TesterPack_Page/.venv/bin/python -m app.workers.tester_sms --once >> /srv/TesterPack_Page/tester-worker.log 2>&1
 ```
+
+### آزادسازی سفارش برای تولید
+
+`release_resolved_tester_orders` صف مستقلی از ارسال SMS دارد؛ چون سفارش پذیرفته‌شده معمولاً `sms_sent=true` است و از صف ارسال خارج شده است. فقط `state` دقیقاً برابر رشتهٔ `pending` با یک Update شرطی روی همان `_id` واقعی به `not_seen` تبدیل می‌شود. سایر فیلدهای سفارش، به‌ویژه `recommended_products`، Marker و زمان ثبت انتخاب، دست‌نخورده می‌مانند. فیلتر اصلی `tester_gender` و تاریخ دقیق UTC همان فیلتر ارسال است؛ شرط `sms_sent` حذف می‌شود و هیچ شرط پرداخت جدیدی وجود ندارد.
+
+هر دو مسیر به Notification دارای `status=accepted` و `accepted_at` از نوع BSON Date معتبر و غیرآینده نیاز دارند:
+
+| وضعیت انتخاب | قبل از `accepted_at + 30 minutes` | دقیقاً در Deadline و بعد از آن |
+| --- | --- | --- |
+| `submitted` معتبر و سازگار با سفارش | آزادسازی | آزادسازی |
+| `pending`، `submitting`، `review_required` یا Selection ناموجود | بدون تغییر | آزادسازی مستقل از Selection |
+| رسید `submitted` ناسازگار | بدون تغییر | آزادسازی بدون اصلاح رسید |
+
+آزادسازی زودهنگام علاوه بر `submitted` واقعی، ۱۰ PID یکتا، ۱۰ نام معتبر، تطابق کامل نام‌ها و Marker با سفارش و اثبات زمان نوشتن قبل از Deadline را بررسی می‌کند. صرف وجود `recommended_products` کافی نیست. وضعیت و زمان‌های معتبر در Query قبل از Limit بررسی می‌شوند؛ رسید ناقص و سفارش منتظر انتخاب، Batch را پر نمی‌کنند و مانع سفارش‌های آمادهٔ بعدی نمی‌شوند. بررسی ساختار رسید با [`$jsonSchema` در Query](https://www.mongodb.com/docs/manual/reference/operator/query/jsonschema/) انجام می‌شود؛ Validator یا مدل جدیدی روی Collection نصب نمی‌شود.
+
+در Update اتمیک، `state=pending`، فیلتر اصلی، ساعت `$$NOW` MongoDB و مدارک سفارش دوباره بررسی می‌شوند. مسیر زودهنگام شرط `< Deadline` دارد؛ اگر مهلت بین Query و Update تمام شود، مسیر مستقل انقضا با شرط `>= Deadline` امتحان می‌شود. بنابراین هیچ درخواست هم‌زمانی سفارشِ قبلاً آزادشده یا وارد تولیدشده را بازنویسی نمی‌کند. `released_submitted` و `released_expired` فقط از `modified_count` واقعی همان مسیر افزایش می‌یابند. محدودیت زمان فیزیکی Commit/ACK که در بخش انقضای لینک توضیح داده شده، همچنان برقرار است.
+
+پس از انقضا، `submitting` و `review_required` هم سفارش را متوقف نمی‌کنند. آزادسازی به معنی حل مشکل پشتیبانی یا تأیید انتخاب نیست: تمام Intent و Audit باقی می‌مانند، انتخاب واقعاً نوشته‌شده حفظ می‌شود و مقدار پیش‌فرضی در `recommended_products` ساخته نمی‌شود. Recovery رسیدِ نوشته‌شده پیش از Deadline و مشاهدهٔ مشتری همچنان ممکن است؛ ثبت انتخاب جدید بعد از Deadline همچنان ممنوع است.
+
+اگر پیامک هیچ‌گاه Accepted نشده یا `accepted_at` معتبر ندارد، سفارش **Deadline معتبر ندارد** و به دلیل گذشت زمان از `created_at` یا تاریخ خرید آزاد نمی‌شود. تعیین تکلیف این سفارش‌ها به تصمیم کسب‌وکاری جداگانه نیاز دارد؛ Retry و گزارش `exhausted` فعلی حفظ می‌شوند.
+
+Batch آزادسازی مستقل است و ظرفیت ارسال SMS را کم نمی‌کند. Cursor از ایندکس سفارش‌های منتظر شروع می‌شود و Lookupهای ایندکس‌شده و شرط آماده‌بودن قبل از Limit اجرا می‌شوند. هر صفحه محدود است و حداکثر `TESTER_RELEASE_BATCH_SIZE` سفارش در یک اجرا واقعاً آزاد می‌شود. در خطا یا رقابت، صفحهٔ بعد با Keyset از `(date_created, _id)` ادامه پیدا می‌کند؛ بنابراین حتی Batch یک‌تایی و یک سفارش دائماً خطادار، سفارش‌های سالم بعدی را پشت Limit نگه نمی‌دارند. ممکن است برای پرکردن Batch، تعداد بیشتری سفارش منتظر بررسی شود؛ تمام Collection سفارش‌ها اسکن نمی‌شود. آزادشده‌ها به دلیل تغییر `state` از صف بعدی حذف می‌شوند. خطای Query مرحلهٔ آزادسازی نیز مانع تلاش مرحلهٔ SMS نیست. خطاهای فراز و حتی اعتبارنامهٔ نامعتبر SMS پس از اجرای آزادسازی بررسی می‌شوند.
+
+خروجی JSON شامل `released_submitted`، `released_expired`، `release_ready`، `release_skipped`، `release_errors` و `release_enabled` است. `release_ready` تعداد کاندیداهای خوانده‌شده است و هنگام خطا/رقابت ممکن است از سقف موفقیت بیشتر شود. `release_skipped` شامل رقابت با Worker دیگر یا تغییر شرط هنگام Update است؛ خطای عمومی بدون اطلاعات مشتری لاگ می‌شود. در اجرای بعدی سفارش موفق دوباره شمارش نمی‌شود.
+
+برای Preview آزادسازی بدون ارسال SMS، در همان محیط اجرا `TESTER_SMS_ENABLED=false` و `TESTER_RELEASE_ENABLED=true` را تنظیم و فرمان زیر را اجرا کنید؛ ابتدا ایندکس‌ها باید از مسیر `--create-indexes` آماده شده باشند:
+
+```shell
+python -m app.workers.tester_sms --dry-run --limit 10
+```
+
+پس از بررسی، همان `--once` مرحلهٔ آزادسازی مستقل را اجرا می‌کند. غیرفعال‌کردن صریح آزادسازی با `TESTER_RELEASE_ENABLED=false` ممکن است. این تنظیمات Production در اجرای تست‌ها تغییر داده نمی‌شوند.
 
 ### وضعیت ارسال و خطاها
 
@@ -556,18 +591,20 @@ python -m unittest discover -s tests -v
 
 ```powershell
 $env:TESTER_RUN_MONGO_INTEGRATION = "1"
-python -m unittest tests.test_tester_sms_integration -v
+python -m unittest tests.test_tester_sms_integration tests.test_tester_release_integration -v
+Remove-Item Env:TESTER_RUN_MONGO_INTEGRATION
 ```
 
 در Linux:
 
 ```shell
-TESTER_RUN_MONGO_INTEGRATION=1 python -m unittest tests.test_tester_sms_integration -v
+TESTER_RUN_MONGO_INTEGRATION=1 python -m unittest tests.test_tester_sms_integration tests.test_tester_release_integration -v
 ```
 
 قطع ارتباط با بستن واقعی کلاینت MongoDB و اتصال دوباره آزمایش می‌شود؛ سرویس MongoDB مشترک متوقف نمی‌شود.
 Integration شامل انواع مقدار `tester_gender` (از جمله `null`، عدد، Boolean و آرایه)، نبود/خالی‌بودن فیلد، مستقل‌بودن از محصول خریداری‌شده، فیلتر دقیق تاریخ، `$lookup`، ایندکس Partial، باقی‌ماندن ایندکس قدیمی، Claim هم‌زمان، Retry، حفظ نتیجهٔ پذیرفته‌شده و عدم تغییر دیتابیس در Dry Run است. تست‌های Selection نیز Context/Submit را با همین شرط جدید، ثبت ۱۰ نام دقیق، Idempotency و Recovery بررسی می‌کنند.
 خلاصهٔ Explain روی دادهٔ ساختگی در `test-artifacts/tester-worker-explain.json` ذخیره می‌شود؛ این پوشه وارد Git نمی‌شود.
+تست‌های آزادسازی در `tests.test_tester_release` و `tests.test_tester_release_integration` قرار دارند؛ Integration فقط دیتابیس موقت `tester_release_it_<uuid>` را تغییر می‌دهد و پس از اجرا حذف می‌کند. سناریوها شامل مرز برابر Deadline، همهٔ وضعیت‌ها، نبود زمان معتبر، Batch کوچک و رسید خراب، دو Worker هم‌زمان، حفظ Audit/Recovery، Dry Run و شکست قابل بازیابی دیتابیس است. Explain صف آزادسازی در `test-artifacts/tester-release-explain.json` ذخیره می‌شود؛ هیچ درخواست واقعی فراز در این تست‌ها مجاز نیست.
 
 ## ساختار
 
