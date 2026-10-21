@@ -40,7 +40,7 @@ class MongoWorkerIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await self.db.list_collection_names(), [])
         self.owned = True
         self.settings = worker.WorkerSettings(
-            "preprocess_orders", datetime(2026, 10, 13, 20, 30, tzinfo=timezone.utc), sms_enabled=True,
+            "preprocess_orders", sms_enabled=True,
             selection_base_url="https://tester.example.test", token_secret="integration-secret-" + "x" * 40,
         )
         self.sms = FarazSmsClient(FarazSmsConfig(
@@ -75,7 +75,7 @@ class MongoWorkerIntegrationTests(unittest.IsolatedAsyncioTestCase):
             await self.client.close()
 
     def order(self, order_id="order-1", **changes):
-        return {"_id": order_id, "tester_gender": "female", "date_created": "2026-10-13T20:30:00Z",
+        return {"_id": order_id, "state": "pending", "tester_gender": "female", "date_created": "2026-10-13T20:30:00Z",
                 "phone": "09120000000", **changes}
 
     async def run_worker(self, **kwargs):
@@ -100,13 +100,13 @@ class MongoWorkerIntegrationTests(unittest.IsolatedAsyncioTestCase):
         await self.run_worker()
         self.http.assert_called_once()
 
-    async def test_real_shipping_nin_semantics_and_existing_filters(self):
+    async def test_real_shipping_is_ignored_and_no_resend(self):
         await self.collections["orders"].insert_many([
             self.order("shipping-" + name, **fields) for name, fields, _ in SHIPPING_CASES
         ])
         expected = {"order-1"} | {"shipping-" + name for name, _, eligible in SHIPPING_CASES if eligible}
         raw_matches = await self.collections["orders"].find(
-            {"shipping_method": {"$nin": ["تحویل حضوری", "ارسال فوری"]}}, {"_id": 1},
+            worker.sms_order_filter(self.settings), {"_id": 1},
         ).to_list(length=None)
         self.assertEqual({row["_id"] for row in raw_matches}, expected)
         self.assertEqual((await self.run_worker())["accepted"], len(expected))
@@ -117,26 +117,26 @@ class MongoWorkerIntegrationTests(unittest.IsolatedAsyncioTestCase):
         await self.run_worker()
         self.assertEqual(self.http.call_count, len(expected))
 
-    async def test_real_due_retry_waits_for_shipping_to_become_allowed(self):
+    async def test_real_due_retry_waits_for_pending(self):
         self.http.side_effect = TimeoutError("synthetic timeout")
         await self.run_worker()
         await self.make_retry_due()
         before = await self.notification()
         self.http.side_effect = None
-        for shipping in ("تحویل حضوری", "ارسال فوری"):
-            await self.collections["orders"].update_one({"_id": "order-1"}, {"$set": {"shipping_method": shipping}})
+        for state in ("production", "not_seen"):
+            await self.collections["orders"].update_one({"_id": "order-1"}, {"$set": {"state": state}})
             self.assertEqual((await self.run_worker())["eligible"], 0)
             self.assertEqual(await self.notification(), before)
         self.http.assert_called_once()
-        await self.collections["orders"].update_one({"_id": "order-1"}, {"$set": {"shipping_method": "پست"}})
+        await self.collections["orders"].update_one({"_id": "order-1"}, {"$set": {"state": "pending"}})
         await self.run_worker()
         self.assertEqual(((await self.notification())["status"], (await self.notification())["attempt_count"]), ("accepted", 2))
         self.assertEqual(self.http.call_args_list[0].args[0].data, self.http.call_args_list[1].args[0].data)
 
-    async def test_real_shipping_change_after_query_is_rechecked(self):
+    async def test_real_state_change_after_query_is_rechecked(self):
         original = worker.process_order
         async def change_shipping(*args, **kwargs):
-            await self.collections["orders"].update_one({"_id": "order-1"}, {"$set": {"shipping_method": "تحویل حضوری"}})
+            await self.collections["orders"].update_one({"_id": "order-1"}, {"$set": {"state": "production"}})
             return await original(*args, **kwargs)
         with patch.object(worker, "process_order", side_effect=change_shipping):
             summary = await self.run_worker()
@@ -144,11 +144,11 @@ class MongoWorkerIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await self.collections["notifications"].count_documents({}), 0)
         self.http.assert_not_called()
 
-    async def test_real_shipping_change_while_preparing_selection_does_not_claim(self):
+    async def test_real_state_change_while_preparing_selection_does_not_claim(self):
         original = worker.ensure_selection
         async def change_shipping(*args, **kwargs):
             link = await original(*args, **kwargs)
-            await self.collections["orders"].update_one({"_id": "order-1"}, {"$set": {"shipping_method": "ارسال فوری"}})
+            await self.collections["orders"].update_one({"_id": "order-1"}, {"$set": {"state": "not_seen"}})
             return link
         with patch.object(worker, "ensure_selection", side_effect=change_shipping):
             self.assertEqual((await self.run_worker())["skipped"], 1)
@@ -156,7 +156,7 @@ class MongoWorkerIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((notification["status"], notification["attempt_count"]), ("prepared", 0))
         self.http.assert_not_called()
         saved = await self.collections["selections"].find_one({"order_id": "order-1"})
-        await self.collections["orders"].update_one({"_id": "order-1"}, {"$set": {"shipping_method": "پست"}})
+        await self.collections["orders"].update_one({"_id": "order-1"}, {"$set": {"state": "pending"}})
         await self.run_worker()
         self.assertEqual(await self.collections["selections"].find_one({"order_id": "order-1"}), saved)
         self.assertEqual((await self.notification())["attempt_count"], 1)
@@ -189,24 +189,24 @@ class MongoWorkerIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await self.notification(), notification)
         self.http.assert_called_once()
 
-    async def test_date_gender_and_old_order_filter(self):
-        await self.collections["orders"].insert_many([
-            self.order("old", date_created="2026-10-13T20:29:59.999999Z"),
-            self.order("fraction", date_created="2026-10-13T20:30:00.83444Z", product_id=[123]),
-            self.order("other", product_id=["1234"]), self.order("scalar", product_id="123"),
-            self.order("paid-collection-only", status="arbitrary-paid-status"), self.order("sent", sms_sent=True),
-            self.order("invalid-date", date_created="2026-13-14T00:00:00Z"),
-            self.order("empty-gender", tester_gender="", product_id=["123"]),
-        ])
-        old_notification = {"order_id": "old", "status": "submission_unknown"}
-        await self.collections["notifications"].insert_one(old_notification)
-        before = await self.collections["notifications"].find_one({"order_id": "old"})
-        result = await self.run_worker()
-        self.assertEqual(result["accepted"], 5)
-        self.assertEqual(await self.collections["notifications"].find_one({"order_id": "old"}), before)
-        self.assertNotIn("sms_sent", await self.collections["orders"].find_one({"_id": "old"}))
+    async def test_only_pending_eligibility_ignores_all_legacy_order_fields(self):
+        fixtures = [
+            self.order("old", date_created="2001", tester_gender=""),
+            self.order("pickup", shipping_method="تحویل حضوری"), self.order("express", shipping_method="ارسال فوری"),
+            {"_id": "minimal", "state": "pending", "phone": "09120000000"},
+            self.order("sent", sms_sent=True),
+        ]
+        for index, state in enumerate((None, "production", "not_seen", ["pending"], "Pending", "pending ")):
+            fixtures.append(self.order(f"excluded-{index}", state=state))
+        fixtures.append({"_id": "missing", "phone": "09120000000"})
+        await self.collections["orders"].insert_many(fixtures)
+        self.assertEqual((await self.run_worker())["accepted"], 5)
+        records = await self.collections["notifications"].find({}).to_list(length=None)
+        self.assertEqual({row["order_id"] for row in records}, {"order-1", "old", "pickup", "express", "minimal"})
+        await self.run_worker()
+        self.assertEqual(self.http.call_count, 5)
 
-    async def test_real_gender_type_semantics_partial_index_and_no_resend(self):
+    async def test_real_all_gender_values_are_eligible_without_resend(self):
         fixtures = []
         for name, fields, _ in GENDER_CASES:
             document = self.order(name, product_id=["unrelated"])
@@ -215,7 +215,7 @@ class MongoWorkerIntegrationTests(unittest.IsolatedAsyncioTestCase):
         await self.collections["orders"].insert_many(fixtures)
         expected = {name for name, _, eligible in GENDER_CASES if eligible} | {"order-1"}
         raw_matches = await self.collections["orders"].find(
-            {"tester_gender": {"$exists": True, "$ne": ""}}, {"_id": 1},
+            worker.sms_order_filter(self.settings), {"_id": 1},
         ).to_list(length=None)
         self.assertEqual({row["_id"] for row in raw_matches}, expected)
         result = await self.run_worker()
@@ -230,17 +230,21 @@ class MongoWorkerIntegrationTests(unittest.IsolatedAsyncioTestCase):
         orders = self.collections["orders"]
         await orders.create_index([("product_id", 1), ("date_created", 1), ("_id", 1)],
                                   name="tester_product_created", collation=Collation(locale="simple"))
+        await orders.create_index([("date_created", 1), ("_id", 1)], name="tester_gender_created",
+                                  partialFilterExpression={"tester_gender": {"$exists": True}}, collation=Collation(locale="simple"))
         old_index = (await orders.index_information())["tester_product_created"]
+        old_partial = (await orders.index_information())["tester_gender_created"]
         await worker.create_indexes(self.collections)
         await worker.check_indexes(self.collections)
         indexes = await orders.index_information()
         self.assertEqual(indexes["tester_product_created"], old_index)
-        self.assertEqual(indexes[worker.ORDER_INDEX]["key"], [("date_created", 1), ("_id", 1)])
-        self.assertEqual(indexes[worker.ORDER_INDEX]["partialFilterExpression"], {"tester_gender": {"$exists": True}})
+        self.assertEqual(indexes["tester_gender_created"], old_partial)
+        self.assertEqual(indexes[worker.ORDER_INDEX]["key"], [("state", 1), ("_id", 1)])
+        self.assertNotIn("partialFilterExpression", indexes[worker.ORDER_INDEX])
         await self.run_worker()
         self.http.assert_called_once()
 
-    async def test_recovery_and_order_sync_respect_changed_gender_scope(self):
+    async def test_recovery_and_order_sync_ignore_removed_gender_scope(self):
         orders, notifications = self.collections["orders"], self.collections["notifications"]
         fixtures, records = [], []
         for status in ("submission_unknown", "accepted"):
@@ -255,13 +259,13 @@ class MongoWorkerIntegrationTests(unittest.IsolatedAsyncioTestCase):
         await notifications.insert_many(records)
         before = {row["order_id"]: row for row in await notifications.find({}).to_list(length=None)}
         result = await worker.recover_notifications(self.collections, worker.order_filter(self.settings), 50, self.settings)
-        self.assertEqual((result["recovered_retry"], result["repaired"]), (1, 1))
+        self.assertEqual((result["recovered_retry"], result["repaired"]), (3, 3))
         for row in await notifications.find({}).to_list(length=None):
             fixture = await orders.find_one({"_id": row["order_id"]})
-            if row["order_id"] == "accepted-null":
+            if row["order_id"].startswith("accepted-"):
                 self.assertTrue(row["order_synced"])
                 self.assertTrue(fixture["sms_sent"])
-            elif row["order_id"] == "submission_unknown-null":
+            elif row["order_id"].startswith("submission_unknown-"):
                 self.assertEqual(row["status"], "retry_pending")
                 self.assertNotIn("sms_sent", fixture)
             else:
@@ -366,8 +370,8 @@ class MongoWorkerIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await self.notification())["status"], "accepted")
         accepted_at = (await self.notification())["accepted_at"]
         self.assertNotIn("sms_sent", await self.collections["orders"].find_one({"_id": "order-1"}))
-        # Shipping exclusion applies to dispatch, not to repair of an accepted send.
-        await self.collections["orders"].update_one({"_id": "order-1"}, {"$set": {"shipping_method": "ارسال فوری"}})
+        # Accepted repair remains possible even after leaving the pending queue.
+        await self.collections["orders"].update_one({"_id": "order-1"}, {"$set": {"state": "production"}})
         result = await self.run_worker()
         self.assertEqual(result["repaired"], 1)
         self.assertEqual((await self.notification())["accepted_at"], accepted_at)
@@ -382,17 +386,15 @@ class MongoWorkerIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await self.collections["notifications"].count_documents({}), 1)
         self.assertEqual((await self.notification())["status"], "retry_pending")
 
-    async def test_precise_fraction_boundary_is_enforced_by_real_mongodb(self):
-        from dataclasses import replace
-        self.settings = replace(self.settings, start_at=self.settings.start_at.replace(microsecond=500000))
+    async def test_date_precision_no_longer_filters_pending_orders(self):
         await self.collections["orders"].insert_many([
             self.order("before", date_created="2026-10-13T20:30:00.499999Z"),
             self.order("boundary", date_created="2026-10-13T20:30:00.5Z"),
             self.order("after", date_created="2026-10-13T20:30:00.500000001Z"),
         ])
         result = await self.run_worker()
-        self.assertEqual(result["accepted"], 2)
-        self.assertNotIn("sms_sent", await self.collections["orders"].find_one({"_id": "before"}))
+        self.assertEqual(result["accepted"], 4)
+        self.assertTrue((await self.collections["orders"].find_one({"_id": "before"}))["sms_sent"])
 
     async def test_exhaustion_is_reported(self):
         self.http.side_effect = TimeoutError("timeout")
@@ -445,8 +447,9 @@ class MongoWorkerIntegrationTests(unittest.IsolatedAsyncioTestCase):
         await self.collections["orders"].insert_many([
             {key: value for key, value in self.order(
                 f"bulk-{index:04d}",
+                state="pending" if index % 100 == 0 else "production",
                 date_created="2026-10-13T20:30:00.123456Z" if index % 2 == 0 else "2026-10-12T00:00:00Z",
-            ).items() if key != "tester_gender" or index % 100 == 0}
+            ).items() if key != "tester_gender"}
             for index in range(3000)
         ])
         pipeline = worker.eligible_pipeline(worker.sms_order_filter(self.settings), 10, self.settings.max_attempts)

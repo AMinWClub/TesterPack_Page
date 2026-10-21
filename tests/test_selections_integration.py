@@ -98,6 +98,9 @@ class SelectionMongoTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await self.stored_order())["recommended_products"], saved)
 
     async def test_worker_to_submission_to_readonly_and_worker_regression(self):
+        await self.db.preprocess_orders.update_one({"_id": self.source_order["_id"]}, {
+            "$set": {"date_created": "2001", "shipping_method": "تحویل حضوری"}, "$unset": {"tester_gender": ""},
+        })
         await self.db[worker.NOTIFICATIONS].delete_one({"order_id": self.source_order["_id"]})
         sms = FarazSmsClient(FarazSmsConfig(api_key="test", base_url="https://provider.example.test", line_number="50001"))
         sms.send_simple = Mock(wraps=sms.send_simple)
@@ -148,14 +151,51 @@ class SelectionMongoTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await self.call())[1], result)
         self.assertEqual((await self.call("submit", pids=self.pids))[1], result)
 
-    async def test_missing_or_empty_gender_rejects_context_submit_without_writes(self):
-        for update in ({"$unset": {"tester_gender": ""}}, {"$set": {"tester_gender": ""}}):
-            await self.db.preprocess_orders.update_one({"_id": self.source_order["_id"]}, update)
-            before_order, before_selection = await self.stored_order(), await self.selection()
-            self.assertEqual((await self.call())[0], 404)
-            self.assertEqual((await self.call("submit", pids=self.pids))[0], 404)
-            self.assertEqual(await self.stored_order(), before_order)
-            self.assertEqual(await self.selection(), before_selection)
+    async def test_old_order_without_gender_can_submit_and_receipt_survives_release(self):
+        await self.db.preprocess_orders.update_one({"_id": self.source_order["_id"]}, {
+            "$unset": {"tester_gender": "", "date_created": ""}, "$set": {"shipping_method": "ارسال فوری"},
+        })
+        self.assertEqual((await self.call())[0], 200)
+        self.assertEqual((await self.call("submit", pids=self.pids))[0], 200)
+        summary = await worker.release_resolved_tester_orders(worker.worker_collections(self.db, self.config), self.config)
+        self.assertEqual(summary["released_submitted"], 1)
+        saved = await self.stored_order()
+        self.assertEqual((saved["state"], saved["tester_gender"]), ("not_seen", "تستر انتخابی"))
+        self.assertEqual((await self.call())[1]["selection"]["status"], "submitted")
+        self.assertEqual((await self.call("submit", pids=self.pids))[0], 200)
+        self.assertEqual((await self.call("submit", pids=list(reversed(self.pids))))[0], 409)
+        self.assertEqual(await self.stored_order(), saved)
+
+    async def test_real_nonpending_cannot_submit_and_expired_link_survives_release(self):
+        for state in ("production", "not_seen", None, ["pending"]):
+            await self.db.preprocess_orders.update_one({"_id": self.source_order["_id"]}, {"$set": {"state": state}})
+            before = await self.stored_order()
+            self.assertEqual((await self.call())[0], 409)
+            self.assertEqual((await self.call("submit", pids=self.pids))[0], 409)
+            self.assertEqual(await self.stored_order(), before)
+        await self.db[worker.NOTIFICATIONS].update_one({"order_id": self.source_order["_id"]}, {
+            "$set": {"accepted_at": datetime.now(timezone.utc) - timedelta(minutes=31)},
+        })
+        await self.db.preprocess_orders.update_one({"_id": self.source_order["_id"]}, {"$set": {"state": "pending"}})
+        summary = await worker.release_resolved_tester_orders(worker.worker_collections(self.db, self.config), self.config)
+        self.assertEqual(summary["released_expired"], 1)
+        before = await self.stored_order()
+        self.assertEqual((await self.call())[1]["selection"]["availability"], "expired")
+        self.assertEqual((await self.call("submit", pids=self.pids))[0], 410)
+        self.assertEqual(await self.stored_order(), before)
+
+    async def test_real_state_changed_at_order_write_does_not_store_recommendations(self):
+        original = AsyncCollection.update_one
+        async def leave_pending(collection, query, update, *args, **kwargs):
+            if collection.database.name == self.database_name and collection.name == self.config.orders_collection and isinstance(update, list):
+                await original(collection, {"_id": self.source_order["_id"]}, {"$set": {"state": "production"}})
+            return await original(collection, query, update, *args, **kwargs)
+        with patch.object(AsyncCollection, "update_one", new=leave_pending):
+            self.assertEqual((await self.call("submit", pids=self.pids))[0], 409)
+        saved = await self.stored_order()
+        self.assertEqual(saved["state"], "production")
+        self.assertNotIn("recommended_products", saved)
+        self.assertNotIn(service.ORDER_MARKER, saved)
 
     async def test_fresh_stock_exact_names_and_current_catalog_cap(self):
         await self.app.state.catalog.get()
@@ -227,11 +267,12 @@ class SelectionMongoTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_historical_order_and_configuration_collection_boundary(self):
         await self.db.preprocess_orders.update_one({"_id": self.source_order["_id"]}, {"$set": {"date_created": "2026-10-13T23:59:59.999999Z"}})
-        self.assertEqual((await self.call())[0], 404)
-        self.assertEqual((await self.call("submit", pids=self.pids))[0], 404)
-        self.assertNotIn("recommended_products", await self.stored_order())
+        self.assertEqual((await self.call())[0], 200)
+        self.assertEqual((await self.call("submit", pids=self.pids))[0], 200)
         self.app.state.selection_settings = replace(self.config, orders_collection="different_orders")
-        await self.db.different_orders.insert_one(self.source_order)
+        self.assertEqual((await self.call())[0], 404)
+        # Move the actual persisted receipt, not the pre-submission fixture.
+        await self.db.different_orders.insert_one(await self.stored_order())
         self.assertEqual((await self.call())[0], 200)
 
     async def test_case_sensitive_urlsafe_token_lookup_submission_and_readonly_context(self):

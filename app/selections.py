@@ -25,7 +25,7 @@ COUNT = 10
 ORDER_MARKER = "tester_selection_submission_id"
 ORDER_WRITTEN_AT = "tester_selection_written_at"
 SELECTION_WINDOW = timedelta(minutes=30)
-ORDER_PROJECTION = {key: 1 for key in ("_id", "id", "first_name", "last_name", "phone", "recommended_products", ORDER_MARKER, ORDER_WRITTEN_AT)}
+ORDER_PROJECTION = {key: 1 for key in ("_id", "state", "id", "first_name", "last_name", "phone", "recommended_products", ORDER_MARKER, ORDER_WRITTEN_AT)}
 SIMPLE = Collation(locale="simple")
 
 
@@ -51,8 +51,13 @@ def validate_pids(pids):
 
 
 def eligible_order(settings):
-    # Share the worker's tester_gender/date rules, independently of sms_sent sync.
-    return {key: value for key, value in order_filter(settings).items() if key != "sms_sent"}
+    # Only new order writes require pending; receipts remain readable after release.
+    return order_filter(settings)
+
+
+def require_pending(order):
+    if order.get("state") != "pending":
+        fail(409, "order_not_pending", "این سفارش از مرحلهٔ انتخاب تستر خارج شده و امکان ثبت انتخاب جدید ندارد.")
 
 
 def order_display(order):
@@ -79,7 +84,7 @@ async def linked_order(db, settings, token):
             or selection.get("status") not in {"pending", "submitting", "submitted", "review_required"}):
         fail(404, "invalid_link", "لینک انتخاب تستر معتبر نیست یا سفارش در دسترس نیست.")
     order = await collections["orders"].find_one(
-        {**eligible_order(settings), "_id": selection["order_id"]}, projection=ORDER_PROJECTION, collation=SIMPLE,
+        {"_id": selection["order_id"]}, projection=ORDER_PROJECTION, collation=SIMPLE,
     )
     if order is None:
         fail(404, "invalid_link", "لینک انتخاب تستر معتبر نیست یا سفارش در دسترس نیست.")
@@ -190,7 +195,7 @@ def order_write_pipeline(selection, window):
     # Do not rely on the earlier query predicate or a separate $currentDate clock.
     # Expired commands leave the entire document unchanged, even if matched.
     return [{"$replaceWith": {"$cond": [
-        deadline_guard(window),
+        {"$and": [deadline_guard(window), {"$eq": ["$state", "pending"]}]},
         {"$mergeObjects": ["$$ROOT", {
             "recommended_products": {"$literal": selection["selected_names"]},
             ORDER_MARKER: {"$literal": selection["submission_id"]},
@@ -209,7 +214,7 @@ async def review_incomplete(collections, settings, selection, order, window, rea
         fail(404, "invalid_link", "سفارش در دسترس نیست.")
     window = await link_window(collections, latest)
     order = await collections["orders"].find_one(
-        {**eligible_order(settings), "_id": selection["order_id"]}, projection=ORDER_PROJECTION, collation=SIMPLE,
+        {"_id": selection["order_id"]}, projection=ORDER_PROJECTION, collation=SIMPLE,
     )
     if order is None:
         fail(404, "invalid_link", "سفارش در دسترس نیست.")
@@ -231,6 +236,7 @@ async def finish_intent(collections, settings, selection, order, window=None):
             return response_context(selection, order, window)
         if window["now"] >= window["expires_at"]:
             return await review_incomplete(collections, settings, selection, order, window, "deadline_before_order_write")
+        require_pending(order)
         started = utc_date(selection.get("submitting_at"))
         if started is None or not window["accepted_at"] <= started < window["expires_at"]:
             return await review_incomplete(collections, settings, selection, order, window, "unverified_intent_time")
@@ -242,7 +248,7 @@ async def finish_intent(collections, settings, selection, order, window=None):
             "recommended_products": {"$exists": False}, ORDER_MARKER: {"$exists": False},
         }, order_write_pipeline(selection, window), collation=SIMPLE)
         order = await collections["orders"].find_one(
-            {**eligible_order(settings), "_id": selection["order_id"]}, projection=ORDER_PROJECTION, collation=SIMPLE,
+            {"_id": selection["order_id"]}, projection=ORDER_PROJECTION, collation=SIMPLE,
         )
         if order is None:
             fail(404, "invalid_link", "سفارش در دسترس نیست.")
@@ -251,6 +257,8 @@ async def finish_intent(collections, settings, selection, order, window=None):
                 existing_order_error()
             latest = await timed_selection(collections, {"_id": selection["_id"]})
             window = await link_window(collections, latest)
+            if window["expires_at"] is not None and window["now"] < window["expires_at"]:
+                require_pending(order)
             # A matched pipeline can intentionally be a no-op after expiration.
             return await review_incomplete(collections, settings, latest, order, window, "deadline_before_order_write")
     if not written_in_time(selection, order, window):
@@ -279,6 +287,7 @@ async def context(db, settings, token):
         return await finish_intent(collections, settings, selection, order, window)
     if window["expires_at"] is not None and window["now"] >= window["expires_at"]:
         return response_context(selection, order, window)
+    require_pending(order)
     if "recommended_products" in order or ORDER_MARKER in order:
         existing_order_error()
     return response_context(selection, order, window)
@@ -304,6 +313,7 @@ async def submit(db, settings, token, pids):
         fail(409, "selection_review_required", "وضعیت انتخاب‌های شما نیاز به بررسی پشتیبانی دارد.")
     window = await link_window(collections, selection)
     require_active(window)
+    require_pending(order)
     if "recommended_products" in order or ORDER_MARKER in order:
         existing_order_error()
     # One fresh primary-source query, including the current sorted 498-product cap.

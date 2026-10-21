@@ -34,13 +34,13 @@ class SelectionCollection(FakeCollection):
 
 
 def settings():
-    return worker.WorkerSettings("preprocess_orders", datetime(2026, 10, 14, tzinfo=timezone.utc),
+    return worker.WorkerSettings("preprocess_orders",
                                  selection_base_url="https://tester.example.test", token_secret="test-secret-" + "x" * 40)
 
 
 def order(order_id=None, **changes):
     return {"_id": order_id or ObjectId(), "id": "OR0000087510", "first_name": "  احمد ", "last_name": " فرجی  ",
-            "phone": "09123456789", "tester_gender": "female", "date_created": "2026-10-14T00:00:00Z",
+            "phone": "09123456789", "state": "pending", "tester_gender": "female", "date_created": "2026-10-14T00:00:00Z",
             "address": "must-not-leak", "payment_method": "private", "tracking_code": "private", **changes}
 
 
@@ -138,6 +138,46 @@ class SelectionTests(unittest.IsolatedAsyncioTestCase):
         status, body, _ = await self.call()
         self.assertEqual((status, body["selection"]["status"]), (200, "submitted"))
         self.assertEqual(self.stored_order["recommended_products"], saved)
+
+    async def test_receipt_is_readonly_after_release_and_production_state_changes(self):
+        self.assertEqual((await self.call("submit", pids=self.pids))[0], 200)
+        for state in ("not_seen", "production"):
+            self.stored_order["state"] = state
+            before = copy.deepcopy(self.stored_order)
+            status, result, _ = await self.call()
+            self.assertEqual((status, result["selection"]["status"]), (200, "submitted"))
+            self.assertEqual((await self.call("submit", pids=self.pids))[0], 200)
+            self.assertEqual((await self.call("submit", pids=list(reversed(self.pids))))[0], 409)
+            self.assertEqual(self.stored_order, before)
+
+    async def test_expired_link_remains_readable_after_release_without_new_submit(self):
+        self.freeze_window()
+        self.clock += timedelta(minutes=31)
+        self.stored_order["state"] = "not_seen"
+        before = copy.deepcopy((self.stored_order, self.selection))
+        status, result, _ = await self.call()
+        self.assertEqual((status, result["selection"]["availability"]), (200, "expired"))
+        self.assertEqual((await self.call("submit", pids=self.pids))[0], 410)
+        self.assertEqual((self.stored_order, self.selection), before)
+
+    async def test_state_change_during_catalog_validation_prevents_order_write(self):
+        async def changed_state(*args, **kwargs):
+            self.stored_order["state"] = "production"
+            return self.rows
+        self.fresh_catalog.side_effect = changed_state
+        status, result, _ = await self.call("submit", pids=self.pids)
+        self.assertEqual((status, result["detail"]["code"]), (409, "order_not_pending"))
+        self.assertNotIn("recommended_products", self.stored_order)
+        self.assertNotIn(service.ORDER_MARKER, self.stored_order)
+
+    async def test_pending_guard_rechecked_in_atomic_order_write(self):
+        original = self.db["preprocess_orders"].update_one
+        async def leave_pending(*args, **kwargs):
+            self.stored_order["state"] = "not_seen"
+            return await original(*args, **kwargs)
+        with patch.object(self.db["preprocess_orders"], "update_one", side_effect=leave_pending):
+            self.assertEqual((await self.call("submit", pids=self.pids))[0], 409)
+        self.assertNotIn("recommended_products", self.stored_order)
 
     async def test_window_starts_at_acceptance_and_allows_29_minutes_59_seconds(self):
         self.freeze_window()
@@ -387,36 +427,30 @@ class SelectionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.selection["status"], "pending")
         self.assertNotIn("recommended_products", self.stored_order)
 
-    async def test_historical_empty_gender_and_missing_order_never_write(self):
-        original = copy.deepcopy(self.stored_order)
-        for changes in ({"date_created": "2026-10-13T23:59:59.999999Z"}, {"tester_gender": ""}):
-            self.stored_order.update(changes)
+    async def test_nonpending_or_missing_order_cannot_start_selection(self):
+        for state in ("not_seen", "production", None, ["pending"], "Pending", "pending "):
+            self.stored_order["state"] = state
             before = copy.deepcopy(self.stored_order)
-            self.assertEqual((await self.call())[0], 404)
-            self.assertEqual((await self.call("submit", pids=self.pids))[0], 404)
+            self.assertEqual((await self.call())[0], 409)
+            self.assertEqual((await self.call("submit", pids=self.pids))[0], 409)
             self.assertEqual(self.stored_order, before)
-            self.stored_order.update(original)
         self.db["preprocess_orders"].documents.clear()
         self.assertEqual((await self.call())[0], 404)
 
-    async def test_context_and_submit_share_gender_semantics_without_a_product_requirement(self):
+    async def test_context_and_submit_ignore_all_gender_types_and_old_date(self):
         original_order = copy.deepcopy(self.stored_order)
         original_order.pop("tester_gender")
         original_selection = copy.deepcopy(self.selection)
         for name, fields, eligible in GENDER_CASES:
             with self.subTest(name=name):
                 self.db["preprocess_orders"].documents = [{**copy.deepcopy(original_order), **fields,
-                                                         "product_id": ["unrelated"], "sms_sent": True}]
+                                                         "product_id": ["unrelated"], "sms_sent": True, "date_created": "2001"}]
                 self.db[worker.SELECTIONS].documents = [copy.deepcopy(original_selection)]
                 self.db.writes = 0
-                expected = 200 if eligible else 404
+                expected = 200
                 self.assertEqual((await self.call())[0], expected)
                 self.assertEqual((await self.call("submit", pids=self.pids))[0], expected)
-                if eligible:
-                    self.assertEqual(len(self.stored_order["recommended_products"]), 10)
-                else:
-                    self.assertEqual(self.db.writes, 0)
-                    self.assertEqual(self.selection["status"], "pending")
+                self.assertEqual(len(self.stored_order["recommended_products"]), 10)
 
     async def test_missing_or_arbitrary_purchased_product_does_not_restrict_link(self):
         for value in (None, [], "other", [123], {"unexpected": "shape"}):

@@ -83,11 +83,11 @@ class TesterReleaseTests(unittest.IsolatedAsyncioTestCase):
         summary = await self.release()
         self.assertEqual(summary["released_submitted"], 1)
         self.assertEqual(summary["released_expired"], 0)
-        self.assertEqual(source, {**original[0], "state": "not_seen"})
+        self.assertEqual(source, {**original[0], "state": "not_seen", "tester_gender": "تستر انتخابی"})
         self.assertEqual((notification, selected), original[1:])
         self.assertEqual((await self.release())["release_ready"], 0)
 
-    async def test_sms_shipping_exclusion_does_not_block_accepted_order_release(self):
+    async def test_shipping_does_not_block_accepted_order_release(self):
         original = []
         for shipping in ("تحویل حضوری", "ارسال فوری"):
             for status, age in (("submitted", 10), ("pending", 31), ("submitting", 31), ("review_required", 31), (None, 31)):
@@ -96,12 +96,79 @@ class TesterReleaseTests(unittest.IsolatedAsyncioTestCase):
         summary = await worker.run_once(self.db, self.settings)
         self.assertEqual((summary["released_submitted"], summary["released_expired"]), (2, 8))
         for before, after in zip(original, self.collections["orders"].documents):
+            expected = {**before, "state": "not_seen"}
+            if selection_api.ORDER_MARKER in before:
+                expected["tester_gender"] = "تستر انتخابی"
+            self.assertEqual(after, expected)
+
+    async def test_late_worker_prioritizes_valid_submission_without_old_eligibility(self):
+        for age in (31, 240):
+            source, notification, selected = self.add("submitted", age=age, date_created="2001", shipping_method="ارسال فوری")
+            source.pop("tester_gender")
+            before = copy.deepcopy((source, notification, selected))
+            result = await self.release()
+            self.assertEqual((result["released_submitted"], result["released_expired"]), (1, 0))
+            self.assertEqual(source, {**before[0], "state": "not_seen", "tester_gender": "تستر انتخابی"})
+            self.assertEqual((notification, selected), before[1:])
+
+    async def test_expired_invalid_or_missing_receipts_preserve_every_gender_value(self):
+        originals = []
+        for status in ("pending", "submitting", "review_required", None, "submitted"):
+            for _, fields, _ in GENDER_CASES:
+                source, _, selected = self.add(status, age=31)
+                source.pop("tester_gender")
+                source.update(fields)
+                if status == "submitted":
+                    selected["submitted_at"] = selected["expires_at"]  # Invalid receipt proof.
+                originals.append(copy.deepcopy(source))
+        self.settings = replace(self.settings, release_batch_size=100)
+        result = await self.release()
+        self.assertEqual((result["released_expired"], result["released_submitted"]), (len(originals), 0))
+        for before, after in zip(originals, self.collections["orders"].documents):
             self.assertEqual(after, {**before, "state": "not_seen"})
+
+    async def test_submitted_state_and_gender_change_together_and_failure_is_retryable(self):
+        source, _, _ = self.add("submitted", age=31, tester_gender=None)
+        original = copy.deepcopy(source)
+        orders = self.collections["orders"]
+        orders.fail_update = lambda update: update.get("$set", {}).get("state") == "not_seen"
+        self.assertEqual((await self.release())["release_errors"], 1)
+        self.assertEqual(source, original)
+        orders.fail_update = None
+        with patch.object(orders, "update_one", wraps=orders.update_one) as update:
+            self.assertEqual((await self.release())["released_submitted"], 1)
+        self.assertEqual(update.call_args.args[1], {"$set": {"state": "not_seen", "tester_gender": "تستر انتخابی"}})
+        source["state"] = "production"
+        source["tester_gender"] = "production value"
+        self.assertEqual((await self.release())["release_ready"], 0)
+        self.assertEqual(source["tester_gender"], "production value")
+
+    async def test_receipt_finalized_after_query_is_refreshed_before_release(self):
+        source, _, selected = self.add("submitting", age=31, written=True)
+        original = self.collections["selections"].find_one
+        async def finalized(*args, **kwargs):
+            selected.update(status="submitted", submitted_at=source[selection_api.ORDER_WRITTEN_AT])
+            return await original(*args, **kwargs)
+        with patch.object(self.collections["selections"], "find_one", side_effect=finalized):
+            result = await self.release()
+        self.assertEqual((result["released_submitted"], result["released_expired"]), (1, 0))
+        self.assertEqual(source["tester_gender"], "تستر انتخابی")
+
+    async def test_crossing_deadline_keeps_valid_submit_priority(self):
+        source, _, _ = self.add("submitted", age=10)
+        original = self.collections["orders"].update_one
+        async def cross_deadline(*args, **kwargs):
+            self.clock.return_value = NOW + timedelta(minutes=20)
+            return await original(*args, **kwargs)
+        with patch.object(self.collections["orders"], "update_one", side_effect=cross_deadline):
+            result = await self.release()
+        self.assertEqual((result["released_submitted"], result["released_expired"]), (1, 0))
+        self.assertEqual(source["tester_gender"], "تستر انتخابی")
 
     async def test_unfinished_or_inconsistent_receipts_do_not_release_early(self):
         for status in ("pending", "submitting", "review_required", None):
             self.add(status, age=10, written=status in {"submitting", "review_required"})
-        for corruption in ("names", "marker", "duplicate", "blank", "late_write", "missing_time", "marker_newline"):
+        for corruption in ("names", "marker", "duplicate", "blank", "late_write", "missing_time", "marker_newline", "missing_submitted_at"):
             source, _, selected = self.add("submitted", age=10)
             if corruption == "names":
                 source["recommended_products"] = ["different"] * 10
@@ -117,6 +184,8 @@ class TesterReleaseTests(unittest.IsolatedAsyncioTestCase):
             elif corruption == "marker_newline":
                 selected["submission_id"] += "\n"
                 source[selection_api.ORDER_MARKER] = selected["submission_id"]
+            elif corruption == "missing_submitted_at":
+                selected.pop("submitted_at")
             else:
                 source.pop(selection_api.ORDER_WRITTEN_AT)
         before = copy.deepcopy(self.collections["orders"].documents)
@@ -136,9 +205,12 @@ class TesterReleaseTests(unittest.IsolatedAsyncioTestCase):
             self.add(status, age=31, written=status in {"submitting", "review_required"})
         original = copy.deepcopy([collection.documents for collection in self.collections.values()])
         summary = await self.release()
-        self.assertEqual(summary["released_expired"], 6)
+        self.assertEqual((summary["released_expired"], summary["released_submitted"]), (5, 1))
         for before, after in zip(original[0], self.collections["orders"].documents):
-            self.assertEqual(after, {**before, "state": "not_seen"})
+            expected = {**before, "state": "not_seen"}
+            if before == original[0][3]:  # Only the actual submitted receipt changes gender.
+                expected["tester_gender"] = "تستر انتخابی"
+            self.assertEqual(after, expected)
         self.assertEqual([collection.documents for collection in self.collections.values()][1:], original[1:])
 
     async def test_missing_invalid_future_or_nonaccepted_timestamp_has_no_deadline(self):
@@ -154,19 +226,19 @@ class TesterReleaseTests(unittest.IsolatedAsyncioTestCase):
             notification["status"] = status
         self.assertEqual((await self.release())["release_ready"], 0)
 
-    async def test_only_exact_pending_state_changes_and_original_eligibility_is_preserved(self):
+    async def test_only_exact_pending_state_matters_and_legacy_fields_are_ignored(self):
         for state in (None, "not_seen", "production", ["pending"], 0):
             source, _, _ = self.add(age=31)
             source["state"] = state
         source, _, _ = self.add(age=31)
         source.pop("state")
         self.add(age=31, date_created="2026-10-13T23:59:59.999999999Z")
-        expected = 0
-        for _, fields, eligible in GENDER_CASES:
+        expected = 1  # The old date no longer excludes this pending order.
+        for _, fields, _ in GENDER_CASES:
             source, _, _ = self.add(age=31)
             source.pop("tester_gender")
             source.update(fields)
-            expected += eligible
+            expected += 1
         summary = await self.release()
         self.assertEqual(summary["released_expired"], expected)
         self.assertEqual(sum(row.get("state") == "not_seen" for row in self.collections["orders"].documents), expected + 1)

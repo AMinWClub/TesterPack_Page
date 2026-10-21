@@ -39,14 +39,9 @@ SELECTIONS = "tester_selections"
 TOKEN_VERSION = 3
 ENV_FILE = Path(__file__).resolve().parents[2] / ".env"
 logger = logging.getLogger(__name__)
-ORDER_DATE_FIELD = "date_created"
 ORDER_MOBILE_FIELD = "phone"
-UTC_DATE_PATTERN = r"^([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2})(?:\.([0-9]{1,9}))?Z$"
-ORDER_INDEX = "tester_gender_created"
-ORDER_INDEX_KEYS = [(ORDER_DATE_FIELD, 1), ("_id", 1)]
-ORDER_INDEX_FILTER = {"tester_gender": {"$exists": True}}
-RELEASE_INDEX = "tester_pending_release"
-RELEASE_INDEX_KEYS = [("state", 1), (ORDER_DATE_FIELD, 1), ("_id", 1)]
+ORDER_INDEX = "tester_pending_orders"
+ORDER_INDEX_KEYS = [("state", 1), ("_id", 1)]
 RELEASE_SOURCE_INDEX = "tester_notification_repair"
 RELEASE_SOURCE_INDEX_KEYS = [("status", 1), ("order_synced", 1), ("accepted_at", 1)]
 TESTER_SMS_TEXT = (
@@ -63,7 +58,6 @@ class WorkerConfigurationError(ValueError):
 @dataclass(frozen=True)
 class WorkerSettings:
     orders_collection: str
-    start_at: datetime
     batch_size: int = 50
     sms_enabled: bool = False
     selection_base_url: str = ""
@@ -79,12 +73,6 @@ class WorkerSettings:
         collection = os.getenv("TESTER_ORDERS_COLLECTION", "preprocess_orders").strip()
         if not collection or "$" in collection or "\x00" in collection or collection in {NOTIFICATIONS, SELECTIONS}:
             raise WorkerConfigurationError("TESTER_ORDERS_COLLECTION must name the orders collection.")
-        try:
-            start_at = datetime.fromisoformat(os.getenv("TESTER_SMS_START_AT", ""))
-        except ValueError:
-            raise WorkerConfigurationError("TESTER_SMS_START_AT must be an ISO 8601 date with timezone.") from None
-        if start_at.tzinfo is None or start_at.utcoffset() is None:
-            raise WorkerConfigurationError("TESTER_SMS_START_AT must include a timezone.")
         try:
             batch_size = int(os.getenv("TESTER_WORKER_BATCH_SIZE", "50"))
         except ValueError:
@@ -111,7 +99,6 @@ class WorkerSettings:
                 raise WorkerConfigurationError(f"{name} must be a positive integer.")
         settings = cls(
             orders_collection=collection,
-            start_at=start_at.astimezone(timezone.utc),
             batch_size=batch_size,
             sms_enabled=enabled == "true",
             selection_base_url=os.getenv("TESTER_SELECTION_BASE_URL", "").strip().rstrip("/"),
@@ -140,51 +127,21 @@ class WorkerSettings:
 
 
 def order_filter(settings: WorkerSettings) -> dict:
-    """Shared scope: tester_gender, UTC date and the legacy unsent flag.
-
-    Shipping exclusions belong only in sms_order_filter, not in link/release rules.
-
-    The indexed range is only a coarse seconds bound. The expression pads the
-    fractional part to nine digits before the exact comparison, so variable
-    precision (including timestamps without a fraction) remains correct.
-    Calendar validation parses seconds only, avoiding parser limits on fractions.
-    """
-    start = settings.start_at.astimezone(timezone.utc)
-    prefix = start.strftime("%Y-%m-%dT%H:%M:%S")
-    threshold = f"{prefix}.{start.microsecond:06d}000Z"
-    seconds = {"$arrayElemAt": ["$$parts.captures", 0]}
-    fraction = {"$ifNull": [{"$arrayElemAt": ["$$parts.captures", 1]}, ""]}
-    normalized = {"$concat": [seconds, ".", {"$substrBytes": [{"$concat": [fraction, "000000000"]}, 0, 9]}, "Z"]}
-    valid_date = {"$dateFromString": {
-        "dateString": {"$concat": [seconds, "Z"]}, "format": "%Y-%m-%dT%H:%M:%SZ",
-        "onError": None, "onNull": None,
-    }}
-    return {
-        "tester_gender": {"$exists": True, "$ne": ""},
-        ORDER_DATE_FIELD: {"$type": "string", "$gte": prefix},
-        "sms_sent": {"$ne": True},
-        "$expr": {"$let": {
-            "vars": {"parts": {"$regexFind": {
-                "input": {"$cond": [{"$eq": [{"$type": f"${ORDER_DATE_FIELD}"}, "string"]}, f"${ORDER_DATE_FIELD}", ""]},
-                "regex": UTC_DATE_PATTERN,
-            }}},
-            "in": {"$cond": [{"$eq": ["$$parts", None]}, False, {"$and": [
-                {"$ne": [valid_date, None]}, {"$gte": [normalized, threshold]},
-            ]}]},
-        }},
-    }
+    """Business eligibility: the exact scalar state pending, with simple collation."""
+    # MongoDB equality alone would also admit an array containing "pending".
+    return {"state": "pending", "$expr": {"$eq": [{"$type": "$state"}, "string"]}}
 
 
 def sms_order_filter(settings: WorkerSettings) -> dict:
-    """Scope for new SMS and retries; exact stored shipping values, no normalization."""
-    return {**order_filter(settings), "shipping_method": {"$nin": ["تحویل حضوری", "ارسال فوری"]}}
+    """Business eligibility plus the operational duplicate-send guard."""
+    return {**order_filter(settings), "sms_sent": {"$ne": True}}
 
 
 def eligible_pipeline(match: dict, limit: int, max_attempts: int = 3, now: datetime | None = None) -> list[dict]:
     now = now or datetime.now(timezone.utc)
     return [
         {"$match": match},
-        {"$sort": {ORDER_DATE_FIELD: 1, "_id": 1}},
+        {"$sort": {"_id": 1}},
         {"$lookup": {"from": NOTIFICATIONS, "localField": "_id", "foreignField": "order_id", "as": "notification"}},
         {"$match": {"$or": [
             {"notification": {"$size": 0}},
@@ -204,11 +161,6 @@ def eligible_pipeline(match: dict, limit: int, max_attempts: int = 3, now: datet
 async def create_indexes(collections: dict) -> None:
     await collections["orders"].create_index(
         ORDER_INDEX_KEYS, name=ORDER_INDEX,
-        partialFilterExpression=ORDER_INDEX_FILTER,
-        collation=Collation(locale="simple"),
-    )
-    await collections["orders"].create_index(
-        RELEASE_INDEX_KEYS, name=RELEASE_INDEX, partialFilterExpression=ORDER_INDEX_FILTER,
         collation=Collation(locale="simple"),
     )
     await collections["notifications"].create_index("order_id", unique=True, name="tester_notification_order_unique")
@@ -244,7 +196,7 @@ async def check_indexes(collections: dict, *, require_release: bool = True) -> N
         for unique, keys in indexes:
             if not any(
                 list(index["key"]) == keys and bool(index.get("unique", False)) == unique
-                and index.get("partialFilterExpression") == (ORDER_INDEX_FILTER if collection == "orders" else None)
+                and index.get("partialFilterExpression") is None
                 and (collection != "orders" or name == ORDER_INDEX)
                 and not index.get("sparse")
                 and index.get("collation", {}).get("locale", "simple") == "simple"
@@ -371,11 +323,10 @@ async def schedule_retry(notifications, claim: dict, settings: WorkerSettings, c
     return status if changed else "skipped"
 
 
-async def sync_accepted_order(collections: dict, notification: dict, order_filter: dict) -> bool:
-    # Keep the tester_gender/date guard during repair: never modify historical orders.
-    match = {key: value for key, value in order_filter.items() if key != "sms_sent"}
+async def sync_accepted_order(collections: dict, notification: dict) -> bool:
+    # This is repair of a confirmed acceptance, not entry into the pending queue.
     result = await collections["orders"].update_one(
-        {**match, "_id": notification["order_id"]}, {"$set": {"sms_sent": True}},
+        {"_id": notification["order_id"]}, {"$set": {"sms_sent": True}},
         collation=Collation(locale="simple"),
     )
     if not result.matched_count:
@@ -467,14 +418,14 @@ async def recover_notifications(collections: dict, order_match: dict, limit: int
             }})
             changed = bool(result.matched_count)
         counts["recovered_retry"] += int(changed)
-    # Already accepted requests still need repair even if shipping has changed.
-    accepted_match = {key: value for key, value in order_filter(settings).items() if key != "sms_sent"}
+    # An accepted send must still be synced after release or a production change.
+    accepted_match = {}
     cursor = await notifications.aggregate(notification_scope_pipeline(collections, accepted_match, {
         "status": "accepted", "order_synced": {"$ne": True}, "order_sync_blocked": {"$exists": False},
     }) + [{"$limit": limit}], collation=Collation(locale="simple"))
     async for notification in cursor:
         try:
-            if await sync_accepted_order(collections, notification, accepted_match):
+            if await sync_accepted_order(collections, notification):
                 counts["repaired"] += 1
         except PyMongoError:
             counts["repair_errors"] += 1
@@ -536,7 +487,7 @@ async def process_order(order: dict, collections: dict, settings: WorkerSettings
                     "last_error_code": "invalid_order_data", "updated_at": datetime.now(timezone.utc)}})
         return ("failed" if result.matched_count else "skipped"), None
     # Selection preparation can await MongoDB; recheck immediately before Claim
-    # so a newly excluded shipping method consumes no send attempt.
+    # so an order leaving pending consumes no send attempt.
     if await collections["orders"].find_one(
         {**order_match, "_id": order["_id"]}, projection={"_id": 1}, collation=Collation(locale="simple"),
     ) is None:
@@ -570,16 +521,13 @@ async def process_order(order: dict, collections: dict, settings: WorkerSettings
         # A newer attempt owns the notification: never overwrite it or sync the order.
         return "skipped", None
     try:
-        await sync_accepted_order(collections, claim, order_filter(settings))
+        await sync_accepted_order(collections, claim)
     except PyMongoError:
         logger.warning("SMS accepted; order flag update is pending a later repair.")
     return "accepted", None
 
 def release_order_filter(settings: WorkerSettings) -> dict:
-    match = {key: value for key, value in order_filter(settings).items() if key != "sms_sent"}
-    match["state"] = "pending"
-    match["$expr"] = {"$and": [match["$expr"], {"$eq": [{"$type": "$state"}, "string"]}]}
-    return match
+    return order_filter(settings)
 
 
 def release_pipeline(settings: WorkerSettings, *, after: dict | None = None, limit: int | None = None) -> list[dict]:
@@ -589,20 +537,17 @@ def release_pipeline(settings: WorkerSettings, *, after: dict | None = None, lim
 
     match = release_order_filter(settings)
     if after is not None:
-        match["$or"] = [
-            {ORDER_DATE_FIELD: {"$gt": after[ORDER_DATE_FIELD]}},
-            {ORDER_DATE_FIELD: after[ORDER_DATE_FIELD], "_id": {"$gt": after["_id"]}},
-        ]
+        match["_id"] = {"$gt": after["_id"]}
     # Validate before LIMIT: malformed or inconsistent old receipts cannot starve
     # later ready orders. This is a query predicate, not a collection validator.
     strings = {"bsonType": "array", "minItems": COUNT, "maxItems": COUNT,
                "items": {"bsonType": "string", "pattern": r"(*UCP)[^\s\x1c-\x1f]"}}
     receipt_schema = {
-        "required": ["submission_id", "selected_pids", "selected_names", "submitting_at"],
+        "required": ["submission_id", "selected_pids", "selected_names", "submitting_at", "submitted_at"],
         "properties": {
             "submission_id": {"bsonType": "string", "minLength": 32, "maxLength": 32, "pattern": "^[a-f0-9]{32}$"},
             "selected_pids": {**strings, "uniqueItems": True}, "selected_names": strings,
-            "submitting_at": {"bsonType": "date"},
+            "submitting_at": {"bsonType": "date"}, "submitted_at": {"bsonType": "date"},
         },
     }
     receipt_deadline = {"$cond": [
@@ -635,25 +580,23 @@ def release_pipeline(settings: WorkerSettings, *, after: dict | None = None, lim
         {"$lookup": {"from": SELECTIONS, "localField": "_id", "foreignField": "order_id",
                      "pipeline": [{"$match": {"status": "submitted", "$jsonSchema": receipt_schema}},
                                   {"$project": {key: 1 for key in (
-                                      "status", "submission_id", "selected_pids", "selected_names", "submitting_at", "expires_at",
+                                      "status", "submission_id", "selected_pids", "selected_names", "submitting_at", "submitted_at", "expires_at",
                                   )}}], "as": "_submitted"}},
         {"$set": {"_selection": {"$ifNull": [{"$arrayElemAt": ["$_submitted", 0]}, {}]}}},
         {"$set": {"_valid_receipt": {"$and": [
             {"$eq": ["$_selection.status", "submitted"]},
             {"$eq": [f"${ORDER_MARKER}", "$_selection.submission_id"]},
             {"$eq": ["$recommended_products", "$_selection.selected_names"]},
+            {"$eq": [f"${ORDER_WRITTEN_AT}", "$_selection.submitted_at"]},
             {"$eq": [{"$type": f"${ORDER_WRITTEN_AT}"}, "date"]},
             {"$gte": ["$_selection.submitting_at", "$_accepted_at"]},
             {"$lte": ["$_selection.submitting_at", f"${ORDER_WRITTEN_AT}"]},
             {"$lt": [f"${ORDER_WRITTEN_AT}", receipt_deadline]},
         ]}}},
         {"$match": {"$or": [{"_expired": True}, {"_valid_receipt": True}]}},
-        {"$sort": {ORDER_DATE_FIELD: 1, "_id": 1}},
+        {"$sort": {"_id": 1}},
         {"$limit": settings.release_batch_size if limit is None else limit},
-        {"$project": {key: 1 for key in (
-            "_id", ORDER_DATE_FIELD, "_accepted_at", "_deadline", "_selection", "_expired", "_valid_receipt",
-            "recommended_products", ORDER_MARKER, ORDER_WRITTEN_AT,
-        )}},
+        {"$project": {"_id": 1, "_accepted_at": 1, "_deadline": 1}},
     ]
 
 
@@ -682,34 +625,45 @@ async def release_resolved_tester_orders(collections: dict, settings: WorkerSett
                 after = candidate
                 summary["release_ready"] += 1
                 try:
-                    expired = candidate["_expired"]
-                    selection = candidate["_selection"]
+                    # Refresh the receipt: an API recovery may have finalized it
+                    # since the aggregation. A proved on-time submit wins even
+                    # when this worker runs after the deadline.
+                    selection = await collections["selections"].find_one(
+                        {"order_id": candidate["_id"]}, collation=Collation(locale="simple"),
+                    ) or {}
+                    current = await collections["orders"].find_one(
+                        {**release_order_filter(settings), "_id": candidate["_id"]},
+                        projection={key: 1 for key in ("recommended_products", ORDER_MARKER, ORDER_WRITTEN_AT)},
+                        collation=Collation(locale="simple"),
+                    )
+                    if current is None:
+                        summary["release_skipped"] += 1
+                        continue
                     accepted_at, deadline = utc_date(candidate["_accepted_at"]), utc_date(candidate["_deadline"])
                     frozen = utc_date(selection.get("expires_at"))
                     window = {"accepted_at": accepted_at, "expires_at": min(deadline, frozen) if frozen else deadline}
-                    valid_receipt = (candidate["_valid_receipt"] and owns_order(selection, candidate)
-                                     and written_in_time(selection, candidate, window))
-                    if not expired and not valid_receipt:
-                        summary["release_skipped"] += 1
-                        continue
+                    valid_receipt = (selection.get("status") == "submitted" and owns_order(selection, current)
+                                     and utc_date(selection.get("submitted_at")) == utc_date(current.get(ORDER_WRITTEN_AT))
+                                     and written_in_time(selection, current, window))
                     if dry_run:
                         completed += 1
                         continue
                     match = release_order_filter(settings)
-                    exact_date = match.pop("$expr")
+                    exact_state = match.pop("$expr")
                     # Recheck the actual order proof in the atomic write. The
                     # expired fallback has no dependency on a Selection receipt.
                     paths = []
-                    if not expired and valid_receipt:
-                        proof = [{"$eq": [f"${key}", {"$literal": candidate[key]}]}
+                    if valid_receipt:
+                        proof = [{"$eq": [f"${key}", {"$literal": current[key]}]}
                                  for key in ("recommended_products", ORDER_MARKER, ORDER_WRITTEN_AT)]
-                        paths.append(("submitted", {"$and": [{"$lt": ["$$NOW", deadline]}, *proof]}))
+                        paths.append(("submitted", {"$and": proof}))
                     paths.append(("expired", {"$gte": ["$$NOW", deadline]}))
                     for reason, guard in paths:
                         result = await collections["orders"].update_one({
                             **match, "_id": candidate["_id"],
-                            "$expr": {"$and": [exact_date, {"$gte": ["$$NOW", accepted_at]}, guard]},
-                        }, {"$set": {"state": "not_seen"}}, collation=Collation(locale="simple"))
+                            "$expr": {"$and": [exact_state, {"$gte": ["$$NOW", accepted_at]}, guard]},
+                        }, {"$set": {"state": "not_seen", **({"tester_gender": "تستر انتخابی"} if reason == "submitted" else {})}},
+                            collation=Collation(locale="simple"))
                         if result.modified_count:
                             summary[f"released_{reason}"] += 1
                             completed += 1

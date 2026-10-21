@@ -1,4 +1,4 @@
-"""Mock MongoDB and HTTP: test worker fencing, date filters and crash recovery."""
+"""Mock MongoDB and HTTP: test worker fencing, pending eligibility and crash recovery."""
 
 import asyncio
 import copy
@@ -40,7 +40,7 @@ def mongo_now():
 
 
 def expression(value, document, variables=None):
-    """Evaluate only the Mongo operators used by the real date expression."""
+    """Evaluate the Mongo operators used by worker and selection predicates."""
     variables = variables or {}
     if isinstance(value, str) and value == "$$NOW":
         return variables["NOW"] if "NOW" in variables else mongo_now()
@@ -355,12 +355,13 @@ class SimulatedCrash(BaseException):
 
 
 def order(order_id="order-1", **changes):
-    return {"_id": order_id, "tester_gender": "female", "date_created": "2026-10-13T20:30:00Z",
+    return {"_id": order_id, "state": "pending", "tester_gender": "female", "date_created": "2026-10-13T20:30:00Z",
             "phone": "+989120000000", **changes}
 
 
+# Legacy metadata values: every case is eligible when state is pending.
 GENDER_CASES = [
-    ("missing", {}, False), ("empty", {"tester_gender": ""}, False),
+    ("missing", {}, True), ("empty", {"tester_gender": ""}, True),
     ("text", {"tester_gender": "female"}, True), ("space", {"tester_gender": " "}, True),
     ("null", {"tester_gender": None}, True), ("false", {"tester_gender": False}, True),
     ("true", {"tester_gender": True}, True), ("zero", {"tester_gender": 0}, True),
@@ -368,19 +369,19 @@ GENDER_CASES = [
     ("empty_array", {"tester_gender": []}, True),
     ("array", {"tester_gender": [None, False, 0]}, True),
     ("text_array", {"tester_gender": ["female", "male"]}, True),
-    ("array_with_empty", {"tester_gender": ["female", ""]}, False),
+    ("array_with_empty", {"tester_gender": ["female", ""]}, True),
 ]
 
 SHIPPING_CASES = [
-    ("pickup", {"shipping_method": "تحویل حضوری"}, False),
-    ("express", {"shipping_method": "ارسال فوری"}, False),
+    ("pickup", {"shipping_method": "تحویل حضوری"}, True),
+    ("express", {"shipping_method": "ارسال فوری"}, True),
     ("post", {"shipping_method": "پست"}, True),
     ("courier", {"shipping_method": "پیک"}, True),
     ("missing", {}, True), ("null", {"shipping_method": None}, True),
     ("empty", {"shipping_method": ""}, True),
     ("trailing_space", {"shipping_method": "ارسال فوری "}, True),
     ("arabic_yeh", {"shipping_method": "تحویل حضوري"}, True),
-    ("blocked_array", {"shipping_method": ["پست", "ارسال فوری"]}, False),
+    ("blocked_array", {"shipping_method": ["پست", "ارسال فوری"]}, True),
     ("other_array", {"shipping_method": ["پست"]}, True),
 ]
 
@@ -392,7 +393,7 @@ class TesterWorkerTests(unittest.IsolatedAsyncioTestCase):
         self.start_patch("app.services.sms.faraz.load_dotenv")
         self.settings = worker.WorkerSettings(
             orders_collection="preprocess_orders",
-            start_at=datetime(2026, 10, 13, 20, 30, tzinfo=timezone.utc), sms_enabled=True,
+            sms_enabled=True,
             selection_base_url="https://tester.example.com", token_secret="random-test-secret-" + "x" * 32,
         )
         self.sms = FarazSmsClient(FarazSmsConfig(api_key="test-key", line_number="50001"))
@@ -412,24 +413,22 @@ class TesterWorkerTests(unittest.IsolatedAsyncioTestCase):
     def notification(self):
         return self.db[worker.NOTIFICATIONS].documents[0]
 
-    async def test_date_tester_gender_and_sms_flag_filter(self):
+    async def test_only_pending_business_scope_with_sms_sent_guard(self):
         self.db["preprocess_orders"].documents = [
-            order("old", date_created="2026-10-13T20:29:59.999999Z"),
-            order("boundary"),
-            order("new", date_created="2026-10-13T20:30:00.000001Z", product_id=[123]),
-            order("other", product_id=["1234"]),
-            order("sent", sms_sent=True),
-            order("scalar", product_id="123"),
-            order("empty", tester_gender=""),
+            order("old", date_created="2001-01-01", tester_gender=""),
+            order("pickup", shipping_method="تحویل حضوری"), order("express", shipping_method="ارسال فوری"),
+            order("sent", sms_sent=True), order("production", state="production"),
+            {"_id": "minimal", "state": "pending", "phone": "09120000000"},
         ]
         result = await self.run_worker()
         self.assertEqual(result["accepted"], 4)
-        self.assertEqual(self.sms.send_simple.call_count, 4)
         changed = {item["_id"] for item in self.db["preprocess_orders"].documents if item.get("sms_sent") is True}
-        self.assertEqual(changed, {"boundary", "new", "other", "scalar", "sent"})
-        self.assertNotIn("sms_sent", self.db["preprocess_orders"].documents[0])
+        self.assertEqual(changed, {"old", "pickup", "express", "minimal", "sent"})
+        self.assertEqual(self.sms.send_simple.call_count, 4)
+        await self.run_worker()
+        self.assertEqual(self.sms.send_simple.call_count, 4)
 
-    async def test_tester_gender_mongodb_type_semantics_and_ignored_product_id(self):
+    async def test_all_gender_types_and_purchased_product_are_ignored(self):
         documents = []
         for name, fields, _ in GENDER_CASES:
             document = order(name, product_id=["unrelated"])
@@ -444,40 +443,38 @@ class TesterWorkerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.sms.send_simple.call_count, len(expected))
         self.assertEqual({row["order_id"] for row in self.db[worker.SELECTIONS].documents}, expected)
 
-    async def test_shipping_exclusions_apply_only_to_exact_sms_query_values(self):
+    async def test_all_shipping_methods_remain_eligible(self):
         documents = [order(name, **fields) for name, fields, _ in SHIPPING_CASES]
         self.db["preprocess_orders"].documents = documents
-        expected = {name for name, _, eligible in SHIPPING_CASES if eligible}
-        self.assertNotIn("shipping_method", worker.order_filter(self.settings))
-        self.assertEqual(worker.sms_order_filter(self.settings)["shipping_method"],
-                         {"$nin": ["تحویل حضوری", "ارسال فوری"]})
+        expected = {name for name, _, _ in SHIPPING_CASES}
+        self.assertNotIn("shipping_method", worker.sms_order_filter(self.settings))
         result = await self.run_worker()
         self.assertEqual(result["accepted"], len(expected))
         self.assertEqual({row["_id"] for row in documents if row.get("sms_sent") is True}, expected)
-        self.assertEqual({row["order_id"] for row in self.db[worker.NOTIFICATIONS].documents}, expected)
         await self.run_worker()
         self.assertEqual(self.http.call_count, len(expected))
 
-    async def test_due_retry_pauses_for_excluded_shipping_and_resumes_same_link(self):
+    async def test_due_retry_waits_for_pending_and_keeps_same_link(self):
         self.http.side_effect = TimeoutError("synthetic timeout")
         await self.run_worker()
         self.make_retry_due()
         before = copy.deepcopy(self.notification())
         self.http.side_effect = None
-        for shipping in ("تحویل حضوری", "ارسال فوری"):
-            self.db["preprocess_orders"].documents[0]["shipping_method"] = shipping
+        source = self.db["preprocess_orders"].documents[0]
+        for state in ("not_seen", "production", None, ["pending"]):
+            source["state"] = state
             self.assertEqual((await self.run_worker())["eligible"], 0)
             self.assertEqual(self.notification(), before)
         self.http.assert_called_once()
-        self.db["preprocess_orders"].documents[0]["shipping_method"] = "پست"
+        source.update(state="pending", shipping_method="ارسال فوری", date_created="2001", tester_gender="")
         await self.run_worker()
         self.assertEqual((self.notification()["status"], self.notification()["attempt_count"]), ("accepted", 2))
         self.assertEqual(self.http.call_args_list[0].args[0].data, self.http.call_args_list[1].args[0].data)
 
-    async def test_legacy_retry_recovery_does_not_process_excluded_shipping(self):
+    async def test_legacy_retry_recovery_does_not_process_nonpending_orders(self):
         now = datetime.now(timezone.utc)
         statuses = ("failed", "submission_unknown", "sending", "exhausted")
-        self.db["preprocess_orders"].documents = [order(status, shipping_method="تحویل حضوری") for status in statuses]
+        self.db["preprocess_orders"].documents = [order(status, state="production") for status in statuses]
         self.db[worker.NOTIFICATIONS].documents = [
             {"order_id": status, "status": status, "updated_at": now - timedelta(minutes=10),
              "lease_expires_at": now - timedelta(seconds=1), "attempt_count": 3 if status == "exhausted" else 1}
@@ -486,13 +483,13 @@ class TesterWorkerTests(unittest.IsolatedAsyncioTestCase):
         before = copy.deepcopy(self.db[worker.NOTIFICATIONS].documents)
         summary = await self.run_worker()
         self.assertEqual(self.db[worker.NOTIFICATIONS].documents, before)
-        self.assertEqual(summary["exhausted_total"], 1)
+        self.assertEqual(summary["exhausted_total"], 0)
         self.http.assert_not_called()
 
-    async def test_shipping_changed_after_candidate_query_is_rechecked(self):
+    async def test_state_changed_after_candidate_query_is_rechecked(self):
         original = worker.process_order
         async def change_shipping(*args, **kwargs):
-            self.db["preprocess_orders"].documents[0]["shipping_method"] = "تحویل حضوری"
+            self.db["preprocess_orders"].documents[0]["state"] = "production"
             return await original(*args, **kwargs)
         with patch.object(worker, "process_order", side_effect=change_shipping):
             summary = await self.run_worker()
@@ -500,39 +497,39 @@ class TesterWorkerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.db[worker.NOTIFICATIONS].documents, [])
         self.http.assert_not_called()
 
-    async def test_shipping_changed_during_selection_preparation_consumes_no_attempt(self):
+    async def test_state_changed_during_selection_preparation_consumes_no_attempt(self):
         original = worker.ensure_selection
         async def change_shipping(*args, **kwargs):
             link = await original(*args, **kwargs)
-            self.db["preprocess_orders"].documents[0]["shipping_method"] = "ارسال فوری"
+            self.db["preprocess_orders"].documents[0]["state"] = "not_seen"
             return link
         with patch.object(worker, "ensure_selection", side_effect=change_shipping):
             self.assertEqual((await self.run_worker())["skipped"], 1)
         self.assertEqual((self.notification()["status"], self.notification()["attempt_count"]), ("prepared", 0))
         self.http.assert_not_called()
         saved = copy.deepcopy(self.db[worker.SELECTIONS].documents)
-        self.db["preprocess_orders"].documents[0]["shipping_method"] = "پست"
+        self.db["preprocess_orders"].documents[0]["state"] = "pending"
         await self.run_worker()
         self.assertEqual(self.db[worker.SELECTIONS].documents, saved)
         self.assertEqual(self.notification()["attempt_count"], 1)
 
-    async def test_accepted_order_repair_ignores_shipping_exclusion(self):
+    async def test_accepted_order_repair_survives_release(self):
         orders = self.db["preprocess_orders"]
         orders.fail_update = lambda update: "sms_sent" in update.get("$set", {})
         await self.run_worker()
         accepted_at = self.notification()["accepted_at"]
         orders.fail_update = None
-        for shipping in ("تحویل حضوری", "ارسال فوری"):
-            orders.documents[0]["shipping_method"] = shipping
+        for state in ("not_seen", "production"):
+            orders.documents[0]["state"] = state
             await self.run_worker()
         self.assertTrue(orders.documents[0]["sms_sent"])
         self.assertTrue(self.notification()["order_synced"])
         self.assertEqual(self.notification()["accepted_at"], accepted_at)
         self.http.assert_called_once()
 
-    async def test_successful_send_still_syncs_order_if_shipping_changes_in_provider_call(self):
+    async def test_successful_send_still_syncs_order_if_state_changes_in_provider_call(self):
         def accepted_response(*args, **kwargs):
-            self.db["preprocess_orders"].documents[0]["shipping_method"] = "ارسال فوری"
+            self.db["preprocess_orders"].documents[0]["state"] = "production"
             return FakeHttpResponse()
         self.http.side_effect = accepted_response
         await self.run_worker()
@@ -540,37 +537,28 @@ class TesterWorkerTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(self.notification()["order_synced"])
         self.assertTrue(self.db["preprocess_orders"].documents[0]["sms_sent"])
 
-    async def test_recovery_and_accepted_sync_use_gender_date_scope(self):
-        documents, notifications, expected = [], [], set()
-        for name, fields, eligible in GENDER_CASES:
-            for status in ("submission_unknown", "accepted"):
-                identifier = f"{status}-{name}"
-                document = order(identifier)
-                document.pop("tester_gender")
-                documents.append({**document, **fields})
-                notifications.append({"order_id": identifier, "status": status, "order_synced": False,
+    async def test_retry_requires_pending_but_accepted_repair_survives_any_state(self):
+        documents, notifications = [], []
+        states = ("pending", "production", None, ["pending"])
+        for status in ("submission_unknown", "accepted"):
+            for index, state in enumerate(states):
+                identity = f"{status}-{index}"
+                documents.append(order(identity, state=state, tester_gender="", date_created="2001"))
+                notifications.append({"order_id": identity, "status": status, "order_synced": False,
                                       "updated_at": datetime.now(timezone.utc) - timedelta(minutes=10)})
-                if eligible:
-                    expected.add(identifier)
-        documents.append(order("old", date_created="2026-01-01T00:00:00Z"))
-        notifications.append({"order_id": "old", "status": "submission_unknown"})
-        before = copy.deepcopy(notifications)
         self.db["preprocess_orders"].documents = documents
         self.db[worker.NOTIFICATIONS].documents = notifications
         result = await worker.recover_notifications(worker.worker_collections(self.db, self.settings),
-                                                    worker.order_filter(self.settings), 50, self.settings)
-        count = sum(eligible for _, _, eligible in GENDER_CASES)
-        self.assertEqual((result["recovered_retry"], result["repaired"]), (count, count))
-        for original, notification, document in zip(before, notifications, documents):
-            if original["order_id"] not in expected:
-                self.assertEqual(notification, original)
-                self.assertNotIn("sms_sent", document)
-            elif original["status"] == "accepted":
-                self.assertTrue(notification["order_synced"])
-                self.assertTrue(document["sms_sent"])
+                                                    worker.sms_order_filter(self.settings), 50, self.settings)
+        self.assertEqual((result["recovered_retry"], result["repaired"]), (1, len(states)))
+        for record, source in zip(notifications, documents):
+            if record["order_id"].startswith("accepted-"):
+                self.assertTrue(record["order_synced"])
+                self.assertTrue(source["sms_sent"])
+            elif source["state"] == "pending":
+                self.assertEqual(record["status"], "retry_pending")
             else:
-                self.assertEqual(notification["status"], "retry_pending")
-                self.assertNotIn("sms_sent", document)
+                self.assertEqual(record["status"], "submission_unknown")
         self.http.assert_not_called()
 
     async def test_rerun_does_not_duplicate_sms_notification_or_selection(self):
@@ -844,11 +832,11 @@ class TesterWorkerTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(orders.documents[0]["sms_sent"])
         self.sms.send_simple.assert_called_once()
 
-    async def test_repair_never_changes_an_order_before_start(self):
+    async def test_accepted_repair_is_independent_of_order_date(self):
         self.db["preprocess_orders"].documents = [order(date_created="2026-08-26T12:24:27.83444Z")]
         self.db[worker.NOTIFICATIONS].documents = [{"order_id": "order-1", "status": "accepted"}]
         await self.run_worker()
-        self.assertNotIn("sms_sent", self.db["preprocess_orders"].documents[0])
+        self.assertTrue(self.db["preprocess_orders"].documents[0]["sms_sent"])
         self.sms.send_simple.assert_not_called()
 
     async def test_invalid_mobile_records_failure_and_continues(self):
@@ -897,11 +885,14 @@ class TesterWorkerTests(unittest.IsolatedAsyncioTestCase):
         collections = worker.worker_collections(self.db, self.settings)
         old_index = {"key": [("product_id", 1), ("date_created", 1), ("_id", 1)]}
         collections["orders"].indexes["tester_product_created"] = copy.deepcopy(old_index)
+        old_partial = {"key": [("date_created", 1), ("_id", 1)], "partialFilterExpression": {"tester_gender": {"$exists": True}}}
+        collections["orders"].indexes["tester_gender_created"] = copy.deepcopy(old_partial)
         await worker.create_indexes(collections)
         self.assertEqual(collections["orders"].indexes["tester_product_created"], old_index)
+        self.assertEqual(collections["orders"].indexes["tester_gender_created"], old_partial)
         index = collections["orders"].indexes[worker.ORDER_INDEX]
-        self.assertEqual(index["key"], [("date_created", 1), ("_id", 1)])
-        self.assertEqual(index["partialFilterExpression"], {"tester_gender": {"$exists": True}})
+        self.assertEqual(index["key"], [("state", 1), ("_id", 1)])
+        self.assertNotIn("partialFilterExpression", index)
         await worker.check_indexes(collections)
         await self.run_worker(dry_run=True)
         self.assertEqual(collections["orders"].last_options["hint"], worker.ORDER_INDEX)
@@ -910,7 +901,7 @@ class TesterWorkerTests(unittest.IsolatedAsyncioTestCase):
         indexes = self.db["preprocess_orders"].indexes
         original = copy.deepcopy(indexes[worker.ORDER_INDEX])
         for change in (None, {"partialFilterExpression": {"tester_gender": "female"}},
-                       {"partialFilterExpression": None}, {"sparse": True}, {"collation": {"locale": "en"}}):
+                       {"key": [("date_created", 1), ("_id", 1)]}, {"sparse": True}, {"collation": {"locale": "en"}}):
             with self.subTest(change=change):
                 indexes.pop(worker.ORDER_INDEX, None)
                 if change is not None:
@@ -1051,7 +1042,7 @@ class TesterWorkerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.notification()["status"], "sending")
 
     async def test_legacy_provider_failure_recovers_but_permanent_data_failure_stays_failed(self):
-        self.db["preprocess_orders"].documents = [order("retry"), order("bad"), order("old", date_created="2026-01-01T00:00:00Z")]
+        self.db["preprocess_orders"].documents = [order("retry"), order("bad"), order("old", date_created="2026-01-01T00:00:00Z", state="production")]
         self.db[worker.NOTIFICATIONS].documents = [
             {"order_id": "retry", "status": "failed", "error_code": "provider_rejected", "updated_at": datetime.now(timezone.utc) - timedelta(minutes=10)},
             {"order_id": "bad", "status": "failed", "error_code": "invalid_order_data"},
@@ -1124,13 +1115,14 @@ class WorkerSettingsAndTokenTests(unittest.TestCase):
         patcher = patch.object(worker, "load_dotenv")
         patcher.start()
         self.addCleanup(patcher.stop)
-        self.environment = {"TESTER_SMS_START_AT": "2026-10-14T00:00:00+03:30"}
+        self.environment = {}
 
-    def test_start_date_is_timezone_aware_and_converted_to_utc(self):
-        with patch.dict(os.environ, self.environment, clear=True):
-            settings = worker.WorkerSettings.from_environment()
-        self.assertEqual(settings.start_at, datetime(2026, 10, 13, 20, 30, tzinfo=timezone.utc))
-        self.assertFalse(settings.sms_enabled)
+    def test_removed_cutoff_is_not_required_or_validated(self):
+        for env in ({}, {"TESTER_SMS_START_AT": "invalid"}, {"TESTER_SMS_START_AT": "2001-01-01"}):
+            with patch.dict(os.environ, env, clear=True):
+                settings = worker.WorkerSettings.from_environment()
+            self.assertFalse(hasattr(settings, "start_at"))
+            self.assertFalse(settings.sms_enabled)
 
     def test_message_template_preserves_exact_text_and_case_sensitive_example_link(self):
         link = "https://domain.com/aB7xQ2mN9pR4tY6kL8"
@@ -1175,8 +1167,7 @@ class WorkerSettingsAndTokenTests(unittest.TestCase):
             self.assertEqual(json.loads(output.getvalue()), summary)
 
     def test_missing_or_invalid_settings_fail_with_setting_name(self):
-        for key, invalid in (("TESTER_SMS_START_AT", "invalid"),
-                             ("TESTER_SMS_START_AT", "2026-10-14T00:00:00"), ("TESTER_WORKER_BATCH_SIZE", "0"),
+        for key, invalid in (("TESTER_WORKER_BATCH_SIZE", "0"),
                              ("TESTER_SMS_ENABLED", "yes")):
             with self.subTest(key=key, invalid=invalid), patch.dict(os.environ, {**self.environment, key: invalid}, clear=True):
                 with self.assertRaisesRegex(worker.WorkerConfigurationError, key):
@@ -1235,7 +1226,8 @@ class WorkerSettingsAndTokenTests(unittest.TestCase):
             self.assertFalse(hasattr(settings, "product_id"))
             match = worker.order_filter(settings)
             self.assertNotIn("product_id", match)
-            self.assertEqual(match["tester_gender"], {"$exists": True, "$ne": ""})
+            self.assertNotIn("tester_gender", match)
+            self.assertEqual(match["state"], "pending")
 
     def test_retry_settings_accept_only_positive_integers(self):
         for key in ("TESTER_SMS_RETRY_DELAY_MINUTES", "TESTER_SMS_MAX_ATTEMPTS", "TESTER_RELEASE_BATCH_SIZE"):
@@ -1258,16 +1250,16 @@ class WorkerSettingsAndTokenTests(unittest.TestCase):
             with self.assertRaisesRegex(worker.WorkerConfigurationError, "TESTER_RELEASE_ENABLED"):
                 worker.WorkerSettings.from_environment()
 
-    def test_variable_fraction_precision_and_invalid_dates(self):
-        settings = worker.WorkerSettings("preprocess_orders", datetime(2026, 10, 13, 20, 30, 0, 500000, timezone.utc))
+    def test_only_exact_scalar_pending_is_eligible_regardless_of_date(self):
+        settings = worker.WorkerSettings("preprocess_orders")
         match = worker.order_filter(settings)
-        for timestamp, expected in (("2026-10-13T20:30:00Z", False), ("2026-10-13T20:30:00.499999Z", False),
-                                    ("2026-10-13T20:30:00.5Z", True), ("2026-10-13T20:30:00.500000Z", True),
-                                    ("2026-10-13T20:30:01Z", True), ("2026-13-13T20:30:00Z", False),
-                                    ("2026-10-13T20:30:00+03:30", False), (None, False)):
-            with self.subTest(timestamp=timestamp):
-                self.assertEqual(matches(order(date_created=timestamp), match), expected)
-
+        for state in ("pending", "Pending", "pending ", "not_seen", None, 0, True, ["pending"], {}):
+            with self.subTest(state=state):
+                self.assertEqual(matches(order(state=state), match), state == "pending")
+        self.assertFalse(matches({"_id": "missing"}, match))
+        for timestamp in ("2001", "invalid", None, False, [], "2026-10-14T00:00:00+03:30"):
+            self.assertTrue(matches(order(date_created=timestamp), match))
+        self.assertTrue(matches({"state": "pending"}, match))
 
 if __name__ == "__main__":
     unittest.main()

@@ -77,16 +77,19 @@ class TesterReleaseMongoTests(unittest.IsolatedAsyncioTestCase):
                 source, notification, selected = await self.add(status, age=age, written=status == "submitting")
                 fixtures.append((source, notification, selected, age == 31 or status == "submitted"))
         summary = await worker.run_once(self.db, self.settings)
-        self.assertEqual((summary["released_expired"], summary["released_submitted"], summary["accepted"]), (5, 1, 0))
+        self.assertEqual((summary["released_expired"], summary["released_submitted"], summary["accepted"]), (4, 2, 0))
         for source, notification, selected, expected in fixtures:
-            self.assertEqual(await self.stored(source), {**source, "state": "not_seen"} if expected else source)
+            target = {**source, "state": "not_seen"} if expected else source
+            if selected and selected["status"] == "submitted":
+                target["tester_gender"] = "تستر انتخابی"
+            self.assertEqual(await self.stored(source), target)
             self.assertEqual(await self.collections["notifications"].find_one({"order_id": source["_id"]}), notification)
             if selected:
                 self.assertEqual(await self.collections["selections"].find_one({"order_id": source["_id"]}), selected)
         summary = await self.release()
         self.assertEqual((summary["released_expired"], summary["released_submitted"]), (0, 0))
 
-    async def test_real_excluded_shipping_does_not_block_submitted_or_expired_release(self):
+    async def test_real_shipping_does_not_block_submitted_or_expired_release(self):
         originals = []
         for shipping in ("تحویل حضوری", "ارسال فوری"):
             for status, age in (("submitted", 10), ("pending", 31), ("submitting", 31), ("review_required", 31), (None, 31)):
@@ -95,7 +98,10 @@ class TesterReleaseMongoTests(unittest.IsolatedAsyncioTestCase):
         summary = await worker.run_once(self.db, self.settings)
         self.assertEqual((summary["released_submitted"], summary["released_expired"]), (2, 8))
         for source in originals:
-            self.assertEqual(await self.stored(source), {**source, "state": "not_seen"})
+            target = {**source, "state": "not_seen"}
+            if selection_api.ORDER_MARKER in source:
+                target["tester_gender"] = "تستر انتخابی"
+            self.assertEqual(await self.stored(source), target)
 
     async def test_real_invalid_timestamps_states_and_scope_do_not_release(self):
         sources = []
@@ -116,20 +122,61 @@ class TesterReleaseMongoTests(unittest.IsolatedAsyncioTestCase):
             await self.collections["orders"].update_one({"_id": source["_id"]}, {"$set": {"state": state}})
             sources.append(source)
         source, _, _ = await self.add(age=31, date_created="2026-10-13T23:59:59.999999999Z")
-        sources.append(source)
-        expected = 0
-        for _, fields, eligible in GENDER_CASES:
+        legacy = [source]
+        for _, fields, _ in GENDER_CASES:
             source, _, _ = await self.add(age=31)
             source.pop("tester_gender")
             source.update(fields)
             await self.collections["orders"].replace_one({"_id": source["_id"]}, copy.deepcopy(source))
-            if eligible:
-                expected += 1
-            else:
-                sources.append(source)
-        self.assertEqual((await self.release())["released_expired"], expected)
+            legacy.append(source)
+        self.assertEqual((await self.release())["released_expired"], len(legacy))
         for source in sources:
             self.assertEqual(await self.stored(source), source)
+        for source in legacy:
+            self.assertEqual(await self.stored(source), {**source, "state": "not_seen"})
+
+    async def test_real_late_submission_changes_both_fields_and_preserves_receipt(self):
+        source, notification, selected = await self.add("submitted", age=240, tester_gender=None, date_created="2001", shipping_method="تحویل حضوری")
+        summary = await self.release()
+        self.assertEqual((summary["released_submitted"], summary["released_expired"]), (1, 0))
+        self.assertEqual(await self.stored(source), {**source, "state": "not_seen", "tester_gender": "تستر انتخابی"})
+        self.assertEqual(await self.collections["selections"].find_one({"order_id": source["_id"]}), selected)
+        self.assertEqual(await self.collections["notifications"].find_one({"order_id": source["_id"]}), notification)
+        token = worker.token_for_order(source["_id"], self.settings.token_secret)
+        self.assertEqual((await selection_api.context(self.db, self.settings, token))["selection"]["status"], "submitted")
+        self.assertEqual((await self.release())["release_ready"], 0)
+
+    async def test_real_expiry_preserves_missing_null_and_empty_gender(self):
+        originals = []
+        for state in ("pending", "submitting", "review_required", None, "submitted"):
+            for gender in ({}, {"tester_gender": None}, {"tester_gender": ""}):
+                source, _, selected = await self.add(state, age=31)
+                source.pop("tester_gender")
+                source.update(gender)
+                await self.collections["orders"].replace_one({"_id": source["_id"]}, copy.deepcopy(source))
+                if state == "submitted":
+                    await self.collections["selections"].update_one({"_id": selected["_id"]}, {"$unset": {"submitted_at": ""}})
+                originals.append(source)
+        summary = await self.release()
+        self.assertEqual((summary["released_expired"], summary["released_submitted"]), (len(originals), 0))
+        for source in originals:
+            self.assertEqual(await self.stored(source), {**source, "state": "not_seen"})
+
+    async def test_real_submitted_update_is_atomic_and_database_failure_leaves_both_fields(self):
+        source, _, _ = await self.add("submitted", age=31, tester_gender="")
+        original = AsyncCollection.update_one
+        writes = []
+        async def fail_before_write(collection, query, update, *args, **kwargs):
+            if collection.database.name == self.name and collection.name == self.settings.orders_collection:
+                writes.append(copy.deepcopy(update))
+                raise AutoReconnect("synthetic disconnect")
+            return await original(collection, query, update, *args, **kwargs)
+        with patch.object(AsyncCollection, "update_one", new=fail_before_write):
+            self.assertEqual((await self.release())["release_errors"], 1)
+        self.assertEqual(await self.stored(source), source)
+        self.assertEqual(writes, [{"$set": {"state": "not_seen", "tester_gender": "تستر انتخابی"}}])
+        self.assertEqual((await self.release())["released_submitted"], 1)
+        self.assertEqual(await self.stored(source), {**source, "state": "not_seen", "tester_gender": "تستر انتخابی"})
 
     async def test_real_small_batches_concurrency_schema_filter_and_explain(self):
         self.settings = replace(self.settings, release_batch_size=2)
@@ -198,7 +245,7 @@ class TesterReleaseMongoTests(unittest.IsolatedAsyncioTestCase):
         async def cross_deadline(collection, query, update, *args, **kwargs):
             nonlocal attempted_early
             if (collection.database.name == self.name and query.get("_id") == crossing["_id"]
-                    and update == {"$set": {"state": "not_seen"}}):
+                    and update == {"$set": {"state": "not_seen", "tester_gender": "تستر انتخابی"}}):
                 if "$and" in query["$expr"]["$and"][-1]:
                     attempted_early = True
                     deadline = notification["accepted_at"] + timedelta(minutes=30)
@@ -208,9 +255,9 @@ class TesterReleaseMongoTests(unittest.IsolatedAsyncioTestCase):
         before = await self.stored(crossing)
         with patch.object(AsyncCollection, "update_one", new=cross_deadline):
             summary = await self.release()
-        self.assertEqual((summary["released_submitted"], summary["released_expired"]), (0, 1))
+        self.assertEqual((summary["released_submitted"], summary["released_expired"]), (1, 0))
         self.assertTrue(attempted_early)
-        self.assertEqual(await self.stored(crossing), {**before, "state": "not_seen"})
+        self.assertEqual(await self.stored(crossing), {**before, "state": "not_seen", "tester_gender": "تستر انتخابی"})
 
     async def test_real_on_time_customer_write_and_expired_release_can_overlap(self):
         self.now = selection_api.utc_date((await self.db.command("hello"))["localTime"])
