@@ -20,7 +20,7 @@ from uuid import uuid4
 
 from bson.json_util import CANONICAL_JSON_OPTIONS, dumps
 from dotenv import load_dotenv
-from pymongo import ReturnDocument
+from pymongo import ReadPreference, ReturnDocument
 from pymongo import AsyncMongoClient
 from pymongo.collation import Collation
 from pymongo.errors import DuplicateKeyError, PyMongoError
@@ -44,6 +44,7 @@ ORDER_INDEX = "tester_pending_orders"
 ORDER_INDEX_KEYS = [("state", 1), ("_id", 1)]
 RELEASE_SOURCE_INDEX = "tester_notification_repair"
 RELEASE_SOURCE_INDEX_KEYS = [("status", 1), ("order_synced", 1), ("accepted_at", 1)]
+RELEASE_DECISION_ATTEMPTS = 3
 TESTER_SMS_TEXT = (
     "مشتری عزیز سراد\n\n"
     "برای تکمیل سفارش پک تستر خود، لطفاً از طریق لینک زیر اقدام فرمایید:\n\n"
@@ -530,6 +531,24 @@ def release_order_filter(settings: WorkerSettings) -> dict:
     return order_filter(settings)
 
 
+def valid_release_selection(selection: dict, order: dict, accepted_at: datetime, deadline: datetime) -> bool:
+    """Prove the order was written on time, independently of API finalization."""
+    from fastapi import HTTPException
+    from app.selections import ORDER_WRITTEN_AT, owns_order, utc_date, validate_pids, written_in_time
+
+    status = selection.get("status")
+    if status not in ("submitting", "review_required", "submitted"):
+        return False
+    try:
+        validate_pids(selection.get("selected_pids"))
+    except HTTPException:
+        return False
+    frozen = utc_date(selection.get("expires_at"))
+    window = {"accepted_at": accepted_at, "expires_at": min(deadline, frozen) if frozen else deadline}
+    return (owns_order(selection, order) and written_in_time(selection, order, window)
+            and (status != "submitted" or utc_date(selection.get("submitted_at")) == utc_date(order.get(ORDER_WRITTEN_AT))))
+
+
 def release_pipeline(settings: WorkerSettings, *, after: dict | None = None, limit: int | None = None) -> list[dict]:
     # Lazy import avoids the existing selections -> worker import cycle and reuses
     # the receipt field names/window rather than defining another selection model.
@@ -543,12 +562,18 @@ def release_pipeline(settings: WorkerSettings, *, after: dict | None = None, lim
     strings = {"bsonType": "array", "minItems": COUNT, "maxItems": COUNT,
                "items": {"bsonType": "string", "pattern": r"(*UCP)[^\s\x1c-\x1f]"}}
     receipt_schema = {
-        "required": ["submission_id", "selected_pids", "selected_names", "submitting_at", "submitted_at"],
+        "required": ["submission_id", "selected_pids", "selected_names", "submitting_at"],
         "properties": {
             "submission_id": {"bsonType": "string", "minLength": 32, "maxLength": 32, "pattern": "^[a-f0-9]{32}$"},
-            "selected_pids": {**strings, "uniqueItems": True}, "selected_names": strings,
-            "submitting_at": {"bsonType": "date"}, "submitted_at": {"bsonType": "date"},
+            "selected_pids": {**strings, "uniqueItems": True, "items": {
+                "bsonType": "string", "minLength": 1, "maxLength": 128,
+                "not": {"pattern": r"(*UCP)(?:^\s|\s$|[\x00-\x1f])"},
+            }}, "selected_names": strings,
+            "submitting_at": {"bsonType": "date"},
         },
+    }
+    submitted_schema = {
+        "required": ["submitted_at"], "properties": {"submitted_at": {"bsonType": "date"}},
     }
     receipt_deadline = {"$cond": [
         {"$eq": [{"$type": "$_selection.expires_at"}, "date"]},
@@ -570,7 +595,7 @@ def release_pipeline(settings: WorkerSettings, *, after: dict | None = None, lim
         {"$match": match},
         {"$set": {"_deadline": {"$add": ["$_accepted_at", int(SELECTION_WINDOW.total_seconds() * 1000)]}}},
         {"$set": {"_expired": {"$gte": ["$$NOW", "$_deadline"]}}},
-        # Before expiry, a submitted receipt necessarily has these order fields.
+        # Before expiry, a proved order write necessarily has these fields.
         # This is only a prefilter; the complete receipt proof below stays intact.
         {"$match": {"$or": [{"_expired": True}, {"$expr": {"$and": [
             {"$eq": [{"$type": "$recommended_products"}, "array"]},
@@ -578,16 +603,23 @@ def release_pipeline(settings: WorkerSettings, *, after: dict | None = None, lim
             {"$eq": [{"$type": f"${ORDER_WRITTEN_AT}"}, "date"]},
         ]}}]}},
         {"$lookup": {"from": SELECTIONS, "localField": "_id", "foreignField": "order_id",
-                     "pipeline": [{"$match": {"status": "submitted", "$jsonSchema": receipt_schema}},
+                     "pipeline": [{"$match": {"$jsonSchema": receipt_schema, "$or": [
+                                      {"status": {"$in": ["submitting", "review_required"]}},
+                                      {"status": "submitted", "$jsonSchema": submitted_schema},
+                                  ]}},
                                   {"$project": {key: 1 for key in (
                                       "status", "submission_id", "selected_pids", "selected_names", "submitting_at", "submitted_at", "expires_at",
                                   )}}], "as": "_submitted"}},
         {"$set": {"_selection": {"$ifNull": [{"$arrayElemAt": ["$_submitted", 0]}, {}]}}},
         {"$set": {"_valid_receipt": {"$and": [
-            {"$eq": ["$_selection.status", "submitted"]},
+            {"$or": [
+                {"$eq": ["$_selection.status", "submitting"]},
+                {"$eq": ["$_selection.status", "review_required"]},
+                {"$and": [{"$eq": ["$_selection.status", "submitted"]},
+                          {"$eq": [f"${ORDER_WRITTEN_AT}", "$_selection.submitted_at"]}]},
+            ]},
             {"$eq": [f"${ORDER_MARKER}", "$_selection.submission_id"]},
             {"$eq": ["$recommended_products", "$_selection.selected_names"]},
-            {"$eq": [f"${ORDER_WRITTEN_AT}", "$_selection.submitted_at"]},
             {"$eq": [{"$type": f"${ORDER_WRITTEN_AT}"}, "date"]},
             {"$gte": ["$_selection.submitting_at", "$_accepted_at"]},
             {"$lte": ["$_selection.submitting_at", f"${ORDER_WRITTEN_AT}"]},
@@ -601,12 +633,16 @@ def release_pipeline(settings: WorkerSettings, *, after: dict | None = None, lim
 
 
 async def release_resolved_tester_orders(collections: dict, settings: WorkerSettings, *, dry_run: bool = False) -> dict:
-    from app.selections import ORDER_MARKER, ORDER_WRITTEN_AT, owns_order, utc_date, written_in_time
+    from app.selections import ORDER_MARKER, ORDER_WRITTEN_AT, utc_date
 
     summary = {"released_submitted": 0, "released_expired": 0, "release_ready": 0,
                "release_skipped": 0, "release_errors": 0}
     if type(settings.release_batch_size) is not int or settings.release_batch_size <= 0:
         raise WorkerConfigurationError("TESTER_RELEASE_BATCH_SIZE must be a positive integer.")
+    # Proof reads must not mix lagging replicas; other worker/API reads are unchanged.
+    orders = collections["orders"].with_options(read_preference=ReadPreference.PRIMARY)
+    selections = collections["selections"].with_options(read_preference=ReadPreference.PRIMARY)
+    notifications = collections["notifications"].with_options(read_preference=ReadPreference.PRIMARY)
     after = None
     completed = 0
     try:
@@ -615,7 +651,7 @@ async def release_resolved_tester_orders(collections: dict, settings: WorkerSett
             # Keyset pages bypass failed/racing candidates within this run too.
             # Never let a permanently failing first order monopolize a small batch.
             remaining = settings.release_batch_size - completed
-            cursor = await collections["notifications"].aggregate(
+            cursor = await notifications.aggregate(
                 release_pipeline(settings, after=after, limit=remaining), batchSize=remaining,
                 collation=Collation(locale="simple"), hint=RELEASE_SOURCE_INDEX,
             )
@@ -625,51 +661,60 @@ async def release_resolved_tester_orders(collections: dict, settings: WorkerSett
                 after = candidate
                 summary["release_ready"] += 1
                 try:
-                    # Refresh the receipt: an API recovery may have finalized it
-                    # since the aggregation. A proved on-time submit wins even
-                    # when this worker runs after the deadline.
-                    selection = await collections["selections"].find_one(
-                        {"order_id": candidate["_id"]}, collation=Collation(locale="simple"),
-                    ) or {}
-                    current = await collections["orders"].find_one(
-                        {**release_order_filter(settings), "_id": candidate["_id"]},
-                        projection={key: 1 for key in ("recommended_products", ORDER_MARKER, ORDER_WRITTEN_AT)},
-                        collation=Collation(locale="simple"),
-                    )
-                    if current is None:
-                        summary["release_skipped"] += 1
-                        continue
                     accepted_at, deadline = utc_date(candidate["_accepted_at"]), utc_date(candidate["_deadline"])
-                    frozen = utc_date(selection.get("expires_at"))
-                    window = {"accepted_at": accepted_at, "expires_at": min(deadline, frozen) if frozen else deadline}
-                    valid_receipt = (selection.get("status") == "submitted" and owns_order(selection, current)
-                                     and utc_date(selection.get("submitted_at")) == utc_date(current.get(ORDER_WRITTEN_AT))
-                                     and written_in_time(selection, current, window))
-                    if dry_run:
-                        completed += 1
-                        continue
-                    match = release_order_filter(settings)
-                    exact_state = match.pop("$expr")
-                    # Recheck the actual order proof in the atomic write. The
-                    # expired fallback has no dependency on a Selection receipt.
-                    paths = []
-                    if valid_receipt:
+                    proof_fields = ("recommended_products", ORDER_MARKER, ORDER_WRITTEN_AT)
+                    for _ in range(RELEASE_DECISION_ATTEMPTS):
+                        # Read the order FIRST: its write follows the immutable
+                        # Selection intent. Reading Selection first could pair a
+                        # stale pending intent with newly committed order choices.
+                        current = await orders.find_one(
+                            {**release_order_filter(settings), "_id": candidate["_id"]},
+                            projection={**{key: 1 for key in proof_fields}, "_release_now": "$$NOW"},
+                            collation=Collation(locale="simple"),
+                        )
+                        if current is None:
+                            summary["release_skipped"] += 1
+                            break
+                        now = utc_date(current.pop("_release_now"))
+                        selection = await selections.find_one(
+                            {"order_id": candidate["_id"]}, collation=Collation(locale="simple"),
+                        ) or {}
+                        valid = valid_release_selection(selection, current, accepted_at, deadline)
+                        if now < accepted_at or (not valid and now < deadline):
+                            summary["release_skipped"] += 1
+                            break
+                        if dry_run:
+                            completed += 1
+                            break
+                        match = release_order_filter(settings)
+                        exact_state = match.pop("$expr")
+                        # BOTH paths compare the full proof snapshot, including
+                        # missing vs null. A concurrent order write cannot turn
+                        # an expired decision into an incorrect state-only release.
                         proof = [{"$eq": [f"${key}", {"$literal": current[key]}]}
-                                 for key in ("recommended_products", ORDER_MARKER, ORDER_WRITTEN_AT)]
-                        paths.append(("submitted", {"$and": proof}))
-                    paths.append(("expired", {"$gte": ["$$NOW", deadline]}))
-                    for reason, guard in paths:
-                        result = await collections["orders"].update_one({
+                                 for key in proof_fields if key in current]
+                        reason = "submitted" if valid else "expired"
+                        guard = {"$gte": ["$$NOW", accepted_at if valid else deadline]}
+                        result = await orders.update_one({
                             **match, "_id": candidate["_id"],
-                            "$expr": {"$and": [exact_state, {"$gte": ["$$NOW", accepted_at]}, guard]},
-                        }, {"$set": {"state": "not_seen", **({"tester_gender": "تستر انتخابی"} if reason == "submitted" else {})}},
+                            "$and": [{key: {"$exists": key in current}} for key in proof_fields],
+                            "$expr": {"$and": [exact_state, *proof, guard]},
+                        }, {"$set": {"state": "not_seen", **({"tester_gender": "تستر انتخابی"} if valid else {})}},
                             collation=Collation(locale="simple"))
                         if result.modified_count:
                             summary[f"released_{reason}"] += 1
                             completed += 1
                             break
                     else:
-                        summary["release_skipped"] += 1
+                        remaining_order = await orders.find_one(
+                            {**release_order_filter(settings), "_id": candidate["_id"]},
+                            projection={"_id": 1}, collation=Collation(locale="simple"),
+                        )
+                        if remaining_order is None:
+                            summary["release_skipped"] += 1
+                        else:
+                            summary["release_errors"] += 1
+                            logger.warning("Tester release evidence kept changing; deferring release to a later run.")
                 except PyMongoError:
                     summary["release_errors"] += 1
                     logger.warning("Tester order release failed; a later run can retry.")

@@ -23,6 +23,12 @@ from tests.test_sms_faraz import FakeHttpResponse
 NOW = datetime(2026, 10, 18, 10, tzinfo=timezone.utc)
 
 
+def written_fields(selection, accepted):
+    return {"recommended_products": selection["selected_names"].copy(),
+            selection_api.ORDER_MARKER: selection["submission_id"],
+            selection_api.ORDER_WRITTEN_AT: accepted + timedelta(minutes=2)}
+
+
 def fixture(status="pending", *, age=30, written=False, now=NOW, **changes):
     """One consistent synthetic order + accepted notification + optional intent."""
     source = order(state="pending", sms_sent=True, **changes)
@@ -40,9 +46,7 @@ def fixture(status="pending", *, age=30, written=False, now=NOW, **changes):
                             submitting_at=accepted + timedelta(minutes=1),
                             expires_at=accepted + timedelta(minutes=30))
             if status == "submitted" or written:
-                source.update(recommended_products=selected["selected_names"].copy(),
-                              tester_selection_submission_id=selected["submission_id"],
-                              tester_selection_written_at=accepted + timedelta(minutes=2))
+                source.update(written_fields(selected, accepted))
             if status == "submitted":
                 selected["submitted_at"] = source[selection_api.ORDER_WRITTEN_AT]
     return source, notification, selected
@@ -167,7 +171,7 @@ class TesterReleaseTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_unfinished_or_inconsistent_receipts_do_not_release_early(self):
         for status in ("pending", "submitting", "review_required", None):
-            self.add(status, age=10, written=status in {"submitting", "review_required"})
+            self.add(status, age=10)
         for corruption in ("names", "marker", "duplicate", "blank", "late_write", "missing_time", "marker_newline", "missing_submitted_at"):
             source, _, selected = self.add("submitted", age=10)
             if corruption == "names":
@@ -205,10 +209,10 @@ class TesterReleaseTests(unittest.IsolatedAsyncioTestCase):
             self.add(status, age=31, written=status in {"submitting", "review_required"})
         original = copy.deepcopy([collection.documents for collection in self.collections.values()])
         summary = await self.release()
-        self.assertEqual((summary["released_expired"], summary["released_submitted"]), (5, 1))
+        self.assertEqual((summary["released_expired"], summary["released_submitted"]), (3, 3))
         for before, after in zip(original[0], self.collections["orders"].documents):
             expected = {**before, "state": "not_seen"}
-            if before == original[0][3]:  # Only the actual submitted receipt changes gender.
+            if selection_api.ORDER_MARKER in before:
                 expected["tester_gender"] = "تستر انتخابی"
             self.assertEqual(after, expected)
         self.assertEqual([collection.documents for collection in self.collections.values()][1:], original[1:])
@@ -249,6 +253,192 @@ class TesterReleaseTests(unittest.IsolatedAsyncioTestCase):
         first, second = await asyncio.gather(self.release(), self.release())
         self.assertEqual(first["released_submitted"] + second["released_submitted"], 1)
         self.assertEqual(first["released_expired"] + second["released_expired"], 1)
+
+    async def test_written_partial_selections_release_early_late_and_remain_recoverable(self):
+        for status in ("submitting", "review_required"):
+            for age in (10, 31, 240):
+                source, notification, selected = self.add(status, age=age, written=True, tester_gender=None)
+                before = copy.deepcopy((source, notification, selected))
+                result = await self.release()
+                self.assertEqual((result["released_submitted"], result["released_expired"]), (1, 0))
+                self.assertEqual(source, {**before[0], "state": "not_seen", "tester_gender": "تستر انتخابی"})
+                self.assertEqual((notification, selected), before[1:])
+
+    async def test_partial_selection_requires_complete_consistent_on_time_order_evidence(self):
+        for status in ("submitting", "review_required"):
+            for corruption in ("missing_names", "marker", "missing_time", "late_time", "early_start", "late_start",
+                               "missing_start", "duplicates", "pid_count", "names_count", "blank_name", "short_window",
+                               "pid_space", "pid_control", "pid_length"):
+                source, notification, selected = self.add(status, age=31, written=True)
+                if corruption == "missing_names":
+                    source.pop("recommended_products")
+                elif corruption == "marker":
+                    source[selection_api.ORDER_MARKER] = "wrong"
+                elif corruption == "missing_time":
+                    source.pop(selection_api.ORDER_WRITTEN_AT)
+                elif corruption == "late_time":
+                    source[selection_api.ORDER_WRITTEN_AT] = selected["expires_at"]
+                elif corruption == "early_start":
+                    selected["submitting_at"] = notification["accepted_at"] - timedelta(milliseconds=1)
+                elif corruption == "late_start":
+                    selected["submitting_at"] = source[selection_api.ORDER_WRITTEN_AT] + timedelta(milliseconds=1)
+                elif corruption == "missing_start":
+                    selected.pop("submitting_at")
+                elif corruption == "duplicates":
+                    selected["selected_pids"] = ["same"] * 10
+                elif corruption == "pid_count":
+                    selected["selected_pids"].pop()
+                elif corruption == "names_count":
+                    selected["selected_names"].pop()
+                    source["recommended_products"] = selected["selected_names"].copy()
+                elif corruption == "blank_name":
+                    selected["selected_names"][0] = "\u1680\x1c "
+                    source["recommended_products"] = selected["selected_names"].copy()
+                elif corruption == "pid_space":
+                    selected["selected_pids"][0] = " leading-space"
+                elif corruption == "pid_control":
+                    selected["selected_pids"][0] = "embedded\x1fcontrol"
+                elif corruption == "pid_length":
+                    selected["selected_pids"][0] = "x" * 129
+                else:
+                    selected["expires_at"] = source[selection_api.ORDER_WRITTEN_AT]
+                before = copy.deepcopy((source, notification, selected))
+                result = await self.release()
+                self.assertEqual((result["released_expired"], result["released_submitted"]), (1, 0), corruption)
+                self.assertEqual(source, {**before[0], "state": "not_seen"})
+                self.assertEqual((notification, selected), before[1:])
+
+    async def test_expired_update_racing_order_write_rereads_and_marks_selected(self):
+        source, notification, selected = self.add("submitting", age=31)
+        expected = written_fields(selected, notification["accepted_at"])
+        original = self.collections["orders"].update_one
+        writes = []
+        async def order_write_between_read_and_update(query, update, **kwargs):
+            writes.append(copy.deepcopy(update))
+            if len(writes) == 1:
+                source.update(copy.deepcopy(expected))
+            return await original(query, update, **kwargs)
+        with patch.object(self.collections["orders"], "update_one", side_effect=order_write_between_read_and_update):
+            result = await self.release()
+        self.assertEqual((result["released_submitted"], result["released_expired"], result["release_errors"]), (1, 0, 0))
+        self.assertEqual(writes, [{"$set": {"state": "not_seen"}},
+                                  {"$set": {"state": "not_seen", "tester_gender": "تستر انتخابی"}}])
+        self.assertEqual(source["tester_gender"], "تستر انتخابی")
+        self.assertEqual({key: source[key] for key in expected}, expected)
+        self.assertEqual(selected["status"], "submitting")
+
+    async def test_missing_null_and_changed_proof_fields_are_all_fenced(self):
+        for field in ("recommended_products", selection_api.ORDER_MARKER, selection_api.ORDER_WRITTEN_AT):
+            for missing in (True, False):
+                source, notification, selected = self.add("review_required", age=31, written=True)
+                expected = copy.deepcopy(source[field])
+                if missing:
+                    source.pop(field)
+                else:
+                    source[field] = None
+                original = self.collections["orders"].update_one
+                calls = 0
+                async def repair_field(query, update, **kwargs):
+                    nonlocal calls
+                    calls += 1
+                    source[field] = copy.deepcopy(expected)
+                    return await original(query, update, **kwargs)
+                with patch.object(self.collections["orders"], "update_one", side_effect=repair_field):
+                    result = await self.release()
+                self.assertEqual((result["released_submitted"], result["released_expired"], calls), (1, 0, 2))
+                self.assertEqual(source["tester_gender"], "تستر انتخابی")
+
+    async def test_order_read_precedes_selection_to_avoid_a_stale_pending_intent(self):
+        source, notification, selected = self.add("pending", age=31)
+        _, _, intent = fixture("submitting", age=31)
+        original = self.collections["selections"].find_one
+        calls = 0
+        async def allocate_and_write_before_returning_stale_selection(*args, **kwargs):
+            nonlocal calls
+            result = await original(*args, **kwargs)
+            calls += 1
+            if calls == 1:
+                selected.update({key: intent[key] for key in ("status", "submission_id", "selected_pids", "selected_names", "submitting_at", "expires_at")})
+                source.update(written_fields(selected, notification["accepted_at"]))
+            return result
+        with patch.object(self.collections["selections"], "find_one", side_effect=allocate_and_write_before_returning_stale_selection):
+            result = await self.release()
+        self.assertEqual((result["released_submitted"], result["released_expired"]), (1, 0))
+        self.assertEqual(source["tester_gender"], "تستر انتخابی")
+        self.assertEqual(calls, 2)
+
+    async def test_conflicting_evidence_is_bounded_reported_and_does_not_starve_next_order(self):
+        broken, _, _ = self.add(age=31)
+        good, _, _ = self.add(age=31)
+        self.settings = replace(self.settings, release_batch_size=1)
+        original = self.collections["orders"].update_one
+        calls = 0
+        async def churn_proof(query, update, **kwargs):
+            nonlocal calls
+            if query["_id"] == broken["_id"]:
+                calls += 1
+                broken[selection_api.ORDER_MARKER] = str(calls)
+            return await original(query, update, **kwargs)
+        with patch.object(self.collections["orders"], "update_one", side_effect=churn_proof), self.assertLogs(worker.logger.name, level="WARNING") as logs:
+            result = await self.release()
+        self.assertEqual((calls, result["release_errors"], result["released_expired"]), (worker.RELEASE_DECISION_ATTEMPTS, 1, 1))
+        self.assertEqual((broken["state"], good["state"]), ("pending", "not_seen"))
+        self.assertIn("evidence kept changing", "".join(logs.output))
+        self.assertNotIn(str(broken["_id"]), "".join(logs.output))
+        self.assertEqual((await self.release())["released_expired"], 1)
+
+    async def test_production_state_entered_between_read_and_update_is_never_overwritten(self):
+        source, _, _ = self.add("submitting", age=31, written=True)
+        original = self.collections["orders"].update_one
+        async def enter_production(query, update, **kwargs):
+            source.update(state="production", tester_gender="production gender")
+            return await original(query, update, **kwargs)
+        with patch.object(self.collections["orders"], "update_one", side_effect=enter_production):
+            result = await self.release()
+        self.assertEqual((result["released_submitted"], result["released_expired"], result["release_skipped"]), (0, 0, 1))
+        self.assertEqual((source["state"], source["tester_gender"]), ("production", "production gender"))
+
+    async def test_production_transition_on_last_retry_is_skipped_without_release_error(self):
+        source, _, _ = self.add(age=31)
+        original = self.collections["orders"].update_one
+        calls = 0
+        async def churn_then_enter_production(query, update, **kwargs):
+            nonlocal calls
+            calls += 1
+            source[selection_api.ORDER_MARKER] = str(calls)
+            if calls == worker.RELEASE_DECISION_ATTEMPTS:
+                source.update(state="production", tester_gender="production gender")
+            return await original(query, update, **kwargs)
+        with patch.object(self.collections["orders"], "update_one", side_effect=churn_then_enter_production):
+            result = await self.release()
+        self.assertEqual((result["release_errors"], result["release_skipped"], calls), (0, 1, worker.RELEASE_DECISION_ATTEMPTS))
+        self.assertEqual((source["state"], source["tester_gender"]), ("production", "production gender"))
+
+    async def test_readonly_audit_finds_only_old_releases_with_proved_choices_and_wrong_gender(self):
+        bad, _, _ = self.add("review_required", age=31, written=True, tester_gender=None)
+        healthy, _, _ = self.add("submitted", age=31)
+        incomplete, _, _ = self.add("submitting", age=31)
+        self.add("submitting", age=31, written=True)  # Pending is not a past release.
+        bad["state"] = healthy["state"] = incomplete["state"] = "not_seen"
+        healthy["tester_gender"] = "تستر انتخابی"
+        before = copy.deepcopy([collection.documents for collection in self.collections.values()])
+        pipeline = worker.release_pipeline(self.settings, limit=200)
+        scope = next(stage["$match"] for stage in pipeline if stage.get("$match", {}).get("state") == "pending")
+        scope["state"] = "not_seen"
+        scope["$expr"] = {"$and": [scope["$expr"], {"$ne": [{"$ifNull": ["$tester_gender", None]}, "تستر انتخابی"]}]}
+        pipeline.insert(-3, {"$match": {"_valid_receipt": True}})
+        cursor = await self.collections["notifications"].aggregate(pipeline)
+        self.assertEqual([row["_id"] async for row in cursor], [bad["_id"]])
+        self.assertEqual([collection.documents for collection in self.collections.values()], before)
+        self.assertEqual(self.db.writes, 0)
+
+    async def test_parallel_workers_release_partial_written_orders_once(self):
+        for status in ("submitting", "review_required"):
+            self.add(status, age=31, written=True)
+        results = await asyncio.gather(self.release(), self.release())
+        self.assertEqual(sum(row["released_submitted"] for row in results), 2)
+        self.assertEqual(sum(row["released_expired"] for row in results), 0)
+        self.assertTrue(all(row["tester_gender"] == "تستر انتخابی" for row in self.collections["orders"].documents))
 
     async def test_atomic_write_rechecks_clock_and_receipt_and_handles_crossing_deadline(self):
         source, _, _ = self.add("submitted", age=10)

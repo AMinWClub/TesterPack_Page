@@ -199,6 +199,8 @@ def schema_matches(value, schema):
     types = {"string": str, "array": list, "date": datetime}
     if "bsonType" in schema and not isinstance(value, types[schema["bsonType"]]):
         return False
+    if "not" in schema and schema_matches(value, schema["not"]):
+        return False
     if "pattern" in schema and not re.search(schema["pattern"].replace("(*UCP)", ""), value):
         return False
     if isinstance(value, str) and not schema.get("minLength", 0) <= len(value) <= schema.get("maxLength", len(value)):
@@ -263,7 +265,10 @@ class FakeCollection:
             document.update({key: mongo_now() for key in update.get("$currentDate", {})})
 
     def with_options(self, **kwargs):
-        self.write_concern = kwargs["write_concern"]
+        if "write_concern" in kwargs:
+            self.write_concern = kwargs["write_concern"]
+        if "read_preference" in kwargs:
+            self.read_preference = kwargs["read_preference"]
         return self
 
     async def create_index(self, keys, **kwargs):
@@ -277,7 +282,12 @@ class FakeCollection:
 
     async def find_one(self, query, **kwargs):
         await asyncio.sleep(0)
-        return next((copy.deepcopy(document) for document in self.documents if matches(document, query)), None)
+        result = next((copy.deepcopy(document) for document in self.documents if matches(document, query)), None)
+        if result is not None:
+            for key, value in kwargs.get("projection", {}).items():
+                if isinstance(value, (str, dict)):
+                    result[key] = expression(value, result)
+        return result
 
     def find(self, query):
         return FakeCursor([document for document in self.documents if matches(document, query)])

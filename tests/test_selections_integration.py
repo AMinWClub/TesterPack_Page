@@ -428,6 +428,10 @@ class SelectionMongoTests(unittest.IsolatedAsyncioTestCase):
         await self.db[worker.NOTIFICATIONS].update_one({"order_id": saved["_id"]},
             {"$set": {"accepted_at": expired - timedelta(minutes=30)}})
         before = await self.stored_order()
+        release = await worker.release_resolved_tester_orders(worker.worker_collections(self.db, self.config), self.config)
+        self.assertEqual((release["released_submitted"], release["released_expired"]), (1, 0))
+        before = {**before, "state": "not_seen", "tester_gender": "تستر انتخابی"}
+        self.assertEqual(await self.stored_order(), before)
         result = await self.call()
         self.assertEqual(result[0], 200)
         self.assertEqual(result[1]["selection"]["status"], "submitted")

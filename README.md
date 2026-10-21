@@ -482,10 +482,11 @@ python -m app.workers.tester_sms --once --limit 50
 | وضعیت انتخاب | قبل از `accepted_at + 30 minutes` | دقیقاً در Deadline و بعد از آن | تغییر `tester_gender` |
 | --- | --- | --- | --- |
 | `submitted` معتبر، نوشته‌شده پیش از Deadline و سازگار با سفارش | آزادسازی | آزادسازی با همان اولویت Submit موفق | `"تستر انتخابی"` |
-| `pending`، `submitting`، `review_required` یا Selection ناموجود | بدون تغییر | آزادسازی مستقل از Selection | بدون تغییر، حتی null، خالی یا ناموجود |
+| `submitting` یا `review_required` با اثبات ثبت واقعی و به‌موقع سفارش | آزادسازی | آزادسازی با اولویت ثبت معتبر | `"تستر انتخابی"` |
+| Intent بدون ثبت معتبر، `pending` یا Selection ناموجود | بدون تغییر | آزادسازی مستقل از Selection | بدون تغییر، حتی null، خالی یا ناموجود |
 | رسید `submitted` ناقص، دیرهنگام یا ناسازگار | بدون تغییر | آزادسازی از مسیر انقضا | بدون تغییر |
 
-اثبات Submit موفق شامل وضعیت واقعی `submitted`، شناسهٔ معتبر Submission، ۱۰ PID یکتا، ۱۰ نام معتبر، تطابق کامل نام‌ها و Marker با سفارش، `accepted_at <= submitting_at <= tester_selection_written_at < Deadline` و برابری `submitted_at` با زمان ثبت سفارش است. Deadline منجمد Intent فقط می‌تواند مهلت را کوتاه‌تر کند. صرف `recommended_products` یا Intent ناقص کافی نیست. بررسی ساختار رسید با `$jsonSchema` در Query و سپس بررسی مجدد Receipt و سفارش پیش از Update انجام می‌شود؛ Validator یا مدل جدیدی ساخته نمی‌شود.
+اثبات ثبت معتبر شامل شناسهٔ معتبر Submission، دقیقاً ۱۰ PID معتبر و یکتا با همان قواعد API، ۱۰ نام معتبر، تطابق کامل نام‌ها و Marker با سفارش و `accepted_at <= submitting_at <= tester_selection_written_at < Deadline` است. برای `submitted`، وجود `submitted_at` معتبر و برابر با زمان ثبت سفارش همچنان الزامی است؛ برای `submitting` و `review_required`، نبود این فیلد مانع نیست چون ثبت واقعی در سفارش اثبات می‌شود. Deadline منجمد Intent فقط می‌تواند مهلت را کوتاه‌تر کند. صرف وجود `recommended_products` یا Intent ناقص کافی نیست. بررسی ساختار مدارک با `$jsonSchema` در Query و سپس بررسی مجدد سفارش و Selection پیش از Update انجام می‌شود؛ Validator یا مدل جدیدی ساخته نمی‌شود. موجودی فعلی کاتالوگ دوباره مبنای رد رسید ذخیره‌شده قرار نمی‌گیرد.
 
 مسیر موفق، حتی اگر Worker چند ساعت دیر اجرا شود، یک `$set` اتمیک روی سفارش دارد:
 
@@ -493,9 +494,15 @@ python -m app.workers.tester_sms --once --limit 50
 { $set: { state: "not_seen", tester_gender: "تستر انتخابی" } }
 ```
 
-این مسیر انقضای زمان اجرای Worker را ملاک رد رسید به‌موقع قرار نمی‌دهد. شرط Update، state دقیق pending، ساعت معتبر MongoDB و تطابق نام‌ها/Marker/زمان ثبت واقعی را دوباره بررسی می‌کند. اگر زمان بین Query و Update از Deadline بگذرد، رسید معتبر همچنان اولویت دارد. مسیر جایگزین انقضا فقط با `$$NOW >= accepted_at + 30 minutes` و تنها `$set: {state: "not_seen"}` اجرا می‌شود؛ جنسیت را حتی در صورت نبود فیلد ایجاد نمی‌کند. رقابت دو Worker یا تغییر state به تولید، Update بعدی را بی‌اثر می‌کند. شمارنده‌های `released_submitted` و `released_expired` فقط از `modified_count` واقعی افزایش می‌یابند.
+این مسیر انقضای زمان اجرای Worker را ملاک رد ثبت به‌موقع قرار نمی‌دهد. خواندن مدارک آزادسازی فقط از Primary، به‌ترتیب **سفارش، سپس Selection** است؛ ترتیب نوشتن API هم Intent ثابت و سپس اطلاعات سفارش است. بنابراین Selection قدیمی با تصویر تازه‌تر سفارش ترکیب نمی‌شود. ساعت خواندن و شرط Update از `$$NOW` MongoDB می‌آیند.
 
-پس از انقضا، `submitting` و `review_required` هم سفارش را متوقف نمی‌کنند. آزادسازی به معنی حل مشکل پشتیبانی یا تأیید انتخاب نیست: تمام Intent و Audit باقی می‌مانند، انتخاب واقعاً نوشته‌شده حفظ می‌شود و مقدار پیش‌فرضی در `recommended_products` ساخته نمی‌شود. Recovery رسیدِ نوشته‌شده پیش از Deadline و مشاهدهٔ مشتری همچنان ممکن است؛ ثبت انتخاب جدید بعد از Deadline همچنان ممنوع است.
+هر دو Update موفق و منقضی، علاوه بر state دقیق pending، Snapshot کامل سه فیلد `recommended_products`، `tester_selection_submission_id` و `tester_selection_written_at` را اتمیک مقایسه می‌کنند؛ وجود/نبود فیلد هم جدا بررسی می‌شود تا missing و null یکی محسوب نشوند. اگر API بین Read و Update مدارک سفارش را بنویسد یا تغییر دهد، Update قدیمی Match نمی‌شود. Worker تا سه بار مدارک را از نو می‌خواند و مسیر را دوباره تعیین می‌کند؛ هرگز با تصمیم قدیمی به مسیر انقضا Fall back نمی‌کند. تغییر مداوم مدارک پس از این سقف، برای سفارش هنوز pending یک `release_errors` و لاگ عمومی ایجاد می‌کند و آزادسازی به اجرای بعد واگذار می‌شود؛ سایر سفارش‌ها متوقف نمی‌شوند. سفارشِ هم‌زمان آزادشده یا وارد تولیدشده فقط Skip می‌شود و هیچ فیلدی از آن بازنویسی نمی‌شود.
+
+مسیر انقضا فقط با `$$NOW >= accepted_at + 30 minutes` و `$set: {state: "not_seen"}` اجرا می‌شود و جنسیت را حتی در صورت نبود فیلد ایجاد نمی‌کند. اگر مدارک واقعی معتبر باشند، عبور از Deadline یا تأخیر Finalization مانع تغییر اتمیک هر دو فیلد نمی‌شود. نام شمارندهٔ `released_submitted` حفظ شده و شامل هر ثبت واقعیِ معتبر، حتی Selection نیمه‌تمام، است؛ `released_expired` فقط نبود ثبت معتبر را می‌شمارد. هر دو فقط از `modified_count` واقعی افزایش می‌یابند.
+
+پس از انقضا، `submitting` و `review_required` هم سفارش را متوقف نمی‌کنند. در مسیر انقضای بدون ثبت معتبر، آزادسازی به معنی حل مشکل پشتیبانی یا تأیید انتخاب نیست: تمام Intent و Audit باقی می‌مانند، انتخاب واقعاً نوشته‌شده حفظ می‌شود و مقدار پیش‌فرضی در `recommended_products` ساخته نمی‌شود. Recovery رسیدِ نوشته‌شده پیش از Deadline و مشاهدهٔ مشتری همچنان ممکن است؛ ثبت انتخاب جدید بعد از Deadline همچنان ممنوع است.
+
+Worker وضعیت Selection را Finalize یا بازنویسی نمی‌کند؛ API همچنان رسید نوشته‌شدهٔ به‌موقع را بعد از `not_seen` بازیابی می‌کند. این هماهنگی به ثابت‌بودن Intent پس از تخصیص و نوشتن هر سه فیلد سفارش در همان عملیات اتمیک API متکی است. ویرایش مستقیم و هم‌زمان Intent یا `accepted_at` خارج از این قرارداد، Transaction چندسندی ندارد؛ هیچ ابزار ویرایش/اصلاح خودکاری برای آن اضافه نشده است.
 
 اگر پیامک هیچ‌گاه Accepted نشده یا `accepted_at` معتبر ندارد، سفارش **Deadline معتبر ندارد** و به دلیل گذشت زمان از `created_at` یا تاریخ خرید آزاد نمی‌شود. تعیین تکلیف این سفارش‌ها به تصمیم کسب‌وکاری جداگانه نیاز دارد؛ Retry و گزارش `exhausted` فعلی حفظ می‌شوند.
 
@@ -511,6 +518,46 @@ python -m app.workers.tester_sms --dry-run --limit 10
 ```
 
 پس از بررسی، همان `--once` مرحلهٔ آزادسازی مستقل را اجرا می‌کند. غیرفعال‌کردن صریح آزادسازی با `TESTER_RELEASE_ENABLED=false` ممکن است. این تنظیمات Production در اجرای تست‌ها تغییر داده نمی‌شوند.
+
+#### شناسایی فقط‌خواندنی سفارش‌های آزادشده با جنسیت اشتباه
+
+نمونهٔ زیر فقط شناسهٔ حداکثر ۲۰۰ سفارش `not_seen` را گزارش می‌دهد که مدارک واقعی و معتبر انتخاب دارند ولی جنسیتشان دقیقاً `تستر انتخابی` نیست؛ شامل فیلد ناموجود و null هم می‌شود. از همان Query اعتبارسنجی Worker استفاده می‌کند و هیچ Update، Migration، SMS یا ساخت ایندکس ندارد. برای بررسی مرحله‌های بعد تولید، ابتدا مقدار دقیق state آن سیستم را مشخص کنید؛ این نمونه فقط `not_seen` را بررسی می‌کند. این بررسی روی Production در جریان توسعه اجرا نشده است.
+
+```python
+import asyncio
+from pymongo import AsyncMongoClient, ReadPreference
+from app.config import MONGODB_URI, MONGODB_DB_NAME, MONGODB_TIMEOUT_MS
+from app.workers.tester_sms import (
+    NOTIFICATIONS, RELEASE_SOURCE_INDEX, WorkerSettings, release_pipeline,
+)
+
+async def audit():
+    settings = WorkerSettings.from_environment()
+    client = AsyncMongoClient(
+        MONGODB_URI, tz_aware=True, timeoutMS=MONGODB_TIMEOUT_MS,
+        read_preference=ReadPreference.PRIMARY,
+    )
+    try:
+        pipeline = release_pipeline(settings, limit=200)
+        scope = next(stage["$match"] for stage in pipeline
+                     if stage.get("$match", {}).get("state") == "pending")
+        scope["state"] = "not_seen"
+        scope["$expr"] = {"$and": [scope["$expr"], {
+            "$ne": [{"$ifNull": ["$tester_gender", None]}, "تستر انتخابی"],
+        }]}
+        # Require valid order evidence before Sort / Limit / Projection.
+        pipeline.insert(-3, {"$match": {"_valid_receipt": True}})
+        cursor = await client[MONGODB_DB_NAME][NOTIFICATIONS].aggregate(
+            pipeline, hint=RELEASE_SOURCE_INDEX, collation={"locale": "simple"},
+            batchSize=50, maxTimeMS=5000,
+        )
+        async for row in cursor:
+            print(str(row["_id"]))
+    finally:
+        await client.close()
+
+asyncio.run(audit())
+```
 
 ### وضعیت ارسال و خطاها
 
