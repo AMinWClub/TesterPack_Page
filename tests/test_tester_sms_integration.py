@@ -20,7 +20,7 @@ from pymongo.asynchronous.collection import AsyncCollection
 from app.services.sms import FarazSmsClient, FarazSmsConfig
 from app.workers import tester_sms as worker
 from tests.test_sms_faraz import FakeHttpResponse, simple_success_body
-from tests.test_tester_sms_worker import GENDER_CASES
+from tests.test_tester_sms_worker import GENDER_CASES, SHIPPING_CASES
 
 
 @unittest.skipUnless(os.getenv("TESTER_RUN_MONGO_INTEGRATION") == "1", "Set TESTER_RUN_MONGO_INTEGRATION=1 for isolated MongoDB tests")
@@ -99,6 +99,67 @@ class MongoWorkerIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue((await self.collections["orders"].find_one({"_id": "order-1"}))["sms_sent"])
         await self.run_worker()
         self.http.assert_called_once()
+
+    async def test_real_shipping_nin_semantics_and_existing_filters(self):
+        await self.collections["orders"].insert_many([
+            self.order("shipping-" + name, **fields) for name, fields, _ in SHIPPING_CASES
+        ])
+        expected = {"order-1"} | {"shipping-" + name for name, _, eligible in SHIPPING_CASES if eligible}
+        raw_matches = await self.collections["orders"].find(
+            {"shipping_method": {"$nin": ["تحویل حضوری", "ارسال فوری"]}}, {"_id": 1},
+        ).to_list(length=None)
+        self.assertEqual({row["_id"] for row in raw_matches}, expected)
+        self.assertEqual((await self.run_worker())["accepted"], len(expected))
+        sent = await self.collections["orders"].find({"sms_sent": True}, {"_id": 1}).to_list(length=None)
+        self.assertEqual({row["_id"] for row in sent}, expected)
+        notifications = await self.collections["notifications"].find({}).to_list(length=None)
+        self.assertEqual({row["order_id"] for row in notifications}, expected)
+        await self.run_worker()
+        self.assertEqual(self.http.call_count, len(expected))
+
+    async def test_real_due_retry_waits_for_shipping_to_become_allowed(self):
+        self.http.side_effect = TimeoutError("synthetic timeout")
+        await self.run_worker()
+        await self.make_retry_due()
+        before = await self.notification()
+        self.http.side_effect = None
+        for shipping in ("تحویل حضوری", "ارسال فوری"):
+            await self.collections["orders"].update_one({"_id": "order-1"}, {"$set": {"shipping_method": shipping}})
+            self.assertEqual((await self.run_worker())["eligible"], 0)
+            self.assertEqual(await self.notification(), before)
+        self.http.assert_called_once()
+        await self.collections["orders"].update_one({"_id": "order-1"}, {"$set": {"shipping_method": "پست"}})
+        await self.run_worker()
+        self.assertEqual(((await self.notification())["status"], (await self.notification())["attempt_count"]), ("accepted", 2))
+        self.assertEqual(self.http.call_args_list[0].args[0].data, self.http.call_args_list[1].args[0].data)
+
+    async def test_real_shipping_change_after_query_is_rechecked(self):
+        original = worker.process_order
+        async def change_shipping(*args, **kwargs):
+            await self.collections["orders"].update_one({"_id": "order-1"}, {"$set": {"shipping_method": "تحویل حضوری"}})
+            return await original(*args, **kwargs)
+        with patch.object(worker, "process_order", side_effect=change_shipping):
+            summary = await self.run_worker()
+        self.assertEqual((summary["eligible"], summary["skipped"]), (1, 1))
+        self.assertEqual(await self.collections["notifications"].count_documents({}), 0)
+        self.http.assert_not_called()
+
+    async def test_real_shipping_change_while_preparing_selection_does_not_claim(self):
+        original = worker.ensure_selection
+        async def change_shipping(*args, **kwargs):
+            link = await original(*args, **kwargs)
+            await self.collections["orders"].update_one({"_id": "order-1"}, {"$set": {"shipping_method": "ارسال فوری"}})
+            return link
+        with patch.object(worker, "ensure_selection", side_effect=change_shipping):
+            self.assertEqual((await self.run_worker())["skipped"], 1)
+        notification = await self.notification()
+        self.assertEqual((notification["status"], notification["attempt_count"]), ("prepared", 0))
+        self.http.assert_not_called()
+        saved = await self.collections["selections"].find_one({"order_id": "order-1"})
+        await self.collections["orders"].update_one({"_id": "order-1"}, {"$set": {"shipping_method": "پست"}})
+        await self.run_worker()
+        self.assertEqual(await self.collections["selections"].find_one({"order_id": "order-1"}), saved)
+        self.assertEqual((await self.notification())["attempt_count"], 1)
 
     async def test_object_acceptance_persists_only_numeric_id_and_never_resends(self):
         body = simple_success_body()
@@ -305,6 +366,8 @@ class MongoWorkerIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await self.notification())["status"], "accepted")
         accepted_at = (await self.notification())["accepted_at"]
         self.assertNotIn("sms_sent", await self.collections["orders"].find_one({"_id": "order-1"}))
+        # Shipping exclusion applies to dispatch, not to repair of an accepted send.
+        await self.collections["orders"].update_one({"_id": "order-1"}, {"$set": {"shipping_method": "ارسال فوری"}})
         result = await self.run_worker()
         self.assertEqual(result["repaired"], 1)
         self.assertEqual((await self.notification())["accepted_at"], accepted_at)
@@ -386,7 +449,7 @@ class MongoWorkerIntegrationTests(unittest.IsolatedAsyncioTestCase):
             ).items() if key != "tester_gender" or index % 100 == 0}
             for index in range(3000)
         ])
-        pipeline = worker.eligible_pipeline(worker.order_filter(self.settings), 10, self.settings.max_attempts)
+        pipeline = worker.eligible_pipeline(worker.sms_order_filter(self.settings), 10, self.settings.max_attempts)
         explained = await self.db.command({"explain": {
             "aggregate": self.settings.orders_collection, "pipeline": pipeline, "cursor": {},
             "hint": worker.ORDER_INDEX, "collation": {"locale": "simple"},

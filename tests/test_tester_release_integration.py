@@ -86,6 +86,17 @@ class TesterReleaseMongoTests(unittest.IsolatedAsyncioTestCase):
         summary = await self.release()
         self.assertEqual((summary["released_expired"], summary["released_submitted"]), (0, 0))
 
+    async def test_real_excluded_shipping_does_not_block_submitted_or_expired_release(self):
+        originals = []
+        for shipping in ("تحویل حضوری", "ارسال فوری"):
+            for status, age in (("submitted", 10), ("pending", 31), ("submitting", 31), ("review_required", 31), (None, 31)):
+                source, _, _ = await self.add(status, age=age, shipping_method=shipping)
+                originals.append(source)
+        summary = await worker.run_once(self.db, self.settings)
+        self.assertEqual((summary["released_submitted"], summary["released_expired"]), (2, 8))
+        for source in originals:
+            self.assertEqual(await self.stored(source), {**source, "state": "not_seen"})
+
     async def test_real_invalid_timestamps_states_and_scope_do_not_release(self):
         sources = []
         for value in (None, "2026-01-01T00:00:00Z", True, 123, [self.now], self.now + timedelta(days=1)):

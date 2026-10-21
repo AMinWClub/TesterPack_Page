@@ -127,6 +127,18 @@ class SelectionTests(unittest.IsolatedAsyncioTestCase):
         patcher.start()
         self.addCleanup(patcher.stop)
 
+    async def test_sms_shipping_exclusion_does_not_change_link_or_submission(self):
+        for shipping in ("تحویل حضوری", "ارسال فوری"):
+            self.stored_order["shipping_method"] = shipping
+            status, body, _ = await self.call()
+            self.assertEqual((status, body["selection"]["availability"]), (200, "active"))
+        self.assertEqual((await self.call("submit", pids=self.pids))[0], 200)
+        saved = copy.deepcopy(self.stored_order["recommended_products"])
+        self.stored_order["shipping_method"] = "تحویل حضوری"
+        status, body, _ = await self.call()
+        self.assertEqual((status, body["selection"]["status"]), (200, "submitted"))
+        self.assertEqual(self.stored_order["recommended_products"], saved)
+
     async def test_window_starts_at_acceptance_and_allows_29_minutes_59_seconds(self):
         self.freeze_window()
         self.selection["created_at"] = self.accepted - timedelta(days=20)

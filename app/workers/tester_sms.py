@@ -140,7 +140,9 @@ class WorkerSettings:
 
 
 def order_filter(settings: WorkerSettings) -> dict:
-    """Require tester_gender to exist and differ from '', with a UTC date string.
+    """Shared scope: tester_gender, UTC date and the legacy unsent flag.
+
+    Shipping exclusions belong only in sms_order_filter, not in link/release rules.
 
     The indexed range is only a coarse seconds bound. The expression pads the
     fractional part to nine digits before the exact comparison, so variable
@@ -171,6 +173,11 @@ def order_filter(settings: WorkerSettings) -> dict:
             ]}]},
         }},
     }
+
+
+def sms_order_filter(settings: WorkerSettings) -> dict:
+    """Scope for new SMS and retries; exact stored shipping values, no normalization."""
+    return {**order_filter(settings), "shipping_method": {"$nin": ["تحویل حضوری", "ارسال فوری"]}}
 
 
 def eligible_pipeline(match: dict, limit: int, max_attempts: int = 3, now: datetime | None = None) -> list[dict]:
@@ -396,7 +403,7 @@ def notification_scope_pipeline(collections: dict, match: dict, status_match: di
     ]
 
 
-async def recover_notifications(collections: dict, order_filter: dict, limit: int,
+async def recover_notifications(collections: dict, order_match: dict, limit: int,
                                 settings: WorkerSettings) -> dict:
     counts = {"recovered_retry": 0, "repaired": 0, "repair_errors": 0}
     notifications = collections["notifications"]
@@ -409,7 +416,7 @@ async def recover_notifications(collections: dict, order_filter: dict, limit: in
          "last_error_code": {"$ne": "invalid_order_data"}},
     ]}
     cursor = await notifications.aggregate(
-        notification_scope_pipeline(collections, order_filter, criteria) + [{"$limit": limit}],
+        notification_scope_pipeline(collections, order_match, criteria) + [{"$limit": limit}],
         collation=Collation(locale="simple"),
     )
     async for notification in cursor:
@@ -460,13 +467,14 @@ async def recover_notifications(collections: dict, order_filter: dict, limit: in
             }})
             changed = bool(result.matched_count)
         counts["recovered_retry"] += int(changed)
-    accepted_match = {key: value for key, value in order_filter.items() if key != "sms_sent"}
+    # Already accepted requests still need repair even if shipping has changed.
+    accepted_match = {key: value for key, value in order_filter(settings).items() if key != "sms_sent"}
     cursor = await notifications.aggregate(notification_scope_pipeline(collections, accepted_match, {
         "status": "accepted", "order_synced": {"$ne": True}, "order_sync_blocked": {"$exists": False},
     }) + [{"$limit": limit}], collation=Collation(locale="simple"))
     async for notification in cursor:
         try:
-            if await sync_accepted_order(collections, notification, order_filter):
+            if await sync_accepted_order(collections, notification, accepted_match):
                 counts["repaired"] += 1
         except PyMongoError:
             counts["repair_errors"] += 1
@@ -505,9 +513,9 @@ async def send_with_lease(sms, recipient, text, notifications, claim):
 
 
 async def process_order(order: dict, collections: dict, settings: WorkerSettings, sms: FarazSmsClient,
-                        order_filter: dict) -> tuple[str, int | None]:
+                        order_match: dict) -> tuple[str, int | None]:
     current = await collections["orders"].find_one(
-        {**order_filter, "_id": order["_id"]}, collation=Collation(locale="simple"),
+        {**order_match, "_id": order["_id"]}, collation=Collation(locale="simple"),
     )
     if not current:
         return "skipped", None
@@ -527,6 +535,12 @@ async def process_order(order: dict, collections: dict, settings: WorkerSettings
         }, {"$set": {"status": "failed", "error_code": "invalid_order_data",
                     "last_error_code": "invalid_order_data", "updated_at": datetime.now(timezone.utc)}})
         return ("failed" if result.matched_count else "skipped"), None
+    # Selection preparation can await MongoDB; recheck immediately before Claim
+    # so a newly excluded shipping method consumes no send attempt.
+    if await collections["orders"].find_one(
+        {**order_match, "_id": order["_id"]}, projection={"_id": 1}, collation=Collation(locale="simple"),
+    ) is None:
+        return "skipped", None
     claim = await claim_notification(notifications, order["_id"], sms.config.timeout_seconds, settings.max_attempts)
     if not claim:
         return "skipped", None
@@ -556,7 +570,7 @@ async def process_order(order: dict, collections: dict, settings: WorkerSettings
         # A newer attempt owns the notification: never overwrite it or sync the order.
         return "skipped", None
     try:
-        await sync_accepted_order(collections, claim, order_filter)
+        await sync_accepted_order(collections, claim, order_filter(settings))
     except PyMongoError:
         logger.warning("SMS accepted; order flag update is pending a later repair.")
     return "accepted", None
@@ -719,7 +733,7 @@ async def run_once(db, settings: WorkerSettings, *, limit: int | None = None,
     if isinstance(limit, bool) or not isinstance(limit, int) or limit <= 0:
         raise WorkerConfigurationError("--limit must be a positive integer.")
     collections = worker_collections(db, settings)
-    match = order_filter(settings)
+    match = sms_order_filter(settings)
     readonly = dry_run or not settings.sms_enabled
     release_enabled = settings.sms_enabled if settings.release_enabled is None else settings.release_enabled
     summary = {"eligible": 0, "accepted": 0, "failed": 0, "retry_pending": 0, "exhausted": 0, "skipped": 0, "database_errors": 0}
@@ -766,7 +780,7 @@ async def run_once(db, settings: WorkerSettings, *, limit: int | None = None,
             # If dispatch already began, a durable sending claim remains fenced.
             summary["database_errors"] += 1
             logger.warning("Order database operation failed; unfinished attempts will recover after lease expiry.")
-    summary["exhausted_total"] = (await exhausted_report(collections, match, 0))["exhausted_total"]
+    summary["exhausted_total"] = (await exhausted_report(collections, order_filter(settings), 0))["exhausted_total"]
     summary["read_only"] = readonly and (dry_run or not release_enabled)
     return summary
 

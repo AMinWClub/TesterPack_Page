@@ -151,6 +151,9 @@ def condition(value, expected, *, exists=None):
             return False
         if operator == "$in" and not any(equal(value, item) for item in operand):
             return False
+        if operator == "$nin" and any(equal(item, excluded)
+                                       for item in (value if isinstance(value, list) else [value]) for excluded in operand):
+            return False
         if operator == "$gte" and (value is None or type(value) is not type(operand) or value < operand):
             return False
         if operator == "$gt" and (value is None or type(value) is not type(operand) or value <= operand):
@@ -368,6 +371,19 @@ GENDER_CASES = [
     ("array_with_empty", {"tester_gender": ["female", ""]}, False),
 ]
 
+SHIPPING_CASES = [
+    ("pickup", {"shipping_method": "تحویل حضوری"}, False),
+    ("express", {"shipping_method": "ارسال فوری"}, False),
+    ("post", {"shipping_method": "پست"}, True),
+    ("courier", {"shipping_method": "پیک"}, True),
+    ("missing", {}, True), ("null", {"shipping_method": None}, True),
+    ("empty", {"shipping_method": ""}, True),
+    ("trailing_space", {"shipping_method": "ارسال فوری "}, True),
+    ("arabic_yeh", {"shipping_method": "تحویل حضوري"}, True),
+    ("blocked_array", {"shipping_method": ["پست", "ارسال فوری"]}, False),
+    ("other_array", {"shipping_method": ["پست"]}, True),
+]
+
 
 class TesterWorkerTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
@@ -427,6 +443,102 @@ class TesterWorkerTests(unittest.IsolatedAsyncioTestCase):
         await self.run_worker()
         self.assertEqual(self.sms.send_simple.call_count, len(expected))
         self.assertEqual({row["order_id"] for row in self.db[worker.SELECTIONS].documents}, expected)
+
+    async def test_shipping_exclusions_apply_only_to_exact_sms_query_values(self):
+        documents = [order(name, **fields) for name, fields, _ in SHIPPING_CASES]
+        self.db["preprocess_orders"].documents = documents
+        expected = {name for name, _, eligible in SHIPPING_CASES if eligible}
+        self.assertNotIn("shipping_method", worker.order_filter(self.settings))
+        self.assertEqual(worker.sms_order_filter(self.settings)["shipping_method"],
+                         {"$nin": ["تحویل حضوری", "ارسال فوری"]})
+        result = await self.run_worker()
+        self.assertEqual(result["accepted"], len(expected))
+        self.assertEqual({row["_id"] for row in documents if row.get("sms_sent") is True}, expected)
+        self.assertEqual({row["order_id"] for row in self.db[worker.NOTIFICATIONS].documents}, expected)
+        await self.run_worker()
+        self.assertEqual(self.http.call_count, len(expected))
+
+    async def test_due_retry_pauses_for_excluded_shipping_and_resumes_same_link(self):
+        self.http.side_effect = TimeoutError("synthetic timeout")
+        await self.run_worker()
+        self.make_retry_due()
+        before = copy.deepcopy(self.notification())
+        self.http.side_effect = None
+        for shipping in ("تحویل حضوری", "ارسال فوری"):
+            self.db["preprocess_orders"].documents[0]["shipping_method"] = shipping
+            self.assertEqual((await self.run_worker())["eligible"], 0)
+            self.assertEqual(self.notification(), before)
+        self.http.assert_called_once()
+        self.db["preprocess_orders"].documents[0]["shipping_method"] = "پست"
+        await self.run_worker()
+        self.assertEqual((self.notification()["status"], self.notification()["attempt_count"]), ("accepted", 2))
+        self.assertEqual(self.http.call_args_list[0].args[0].data, self.http.call_args_list[1].args[0].data)
+
+    async def test_legacy_retry_recovery_does_not_process_excluded_shipping(self):
+        now = datetime.now(timezone.utc)
+        statuses = ("failed", "submission_unknown", "sending", "exhausted")
+        self.db["preprocess_orders"].documents = [order(status, shipping_method="تحویل حضوری") for status in statuses]
+        self.db[worker.NOTIFICATIONS].documents = [
+            {"order_id": status, "status": status, "updated_at": now - timedelta(minutes=10),
+             "lease_expires_at": now - timedelta(seconds=1), "attempt_count": 3 if status == "exhausted" else 1}
+            for status in statuses
+        ]
+        before = copy.deepcopy(self.db[worker.NOTIFICATIONS].documents)
+        summary = await self.run_worker()
+        self.assertEqual(self.db[worker.NOTIFICATIONS].documents, before)
+        self.assertEqual(summary["exhausted_total"], 1)
+        self.http.assert_not_called()
+
+    async def test_shipping_changed_after_candidate_query_is_rechecked(self):
+        original = worker.process_order
+        async def change_shipping(*args, **kwargs):
+            self.db["preprocess_orders"].documents[0]["shipping_method"] = "تحویل حضوری"
+            return await original(*args, **kwargs)
+        with patch.object(worker, "process_order", side_effect=change_shipping):
+            summary = await self.run_worker()
+        self.assertEqual((summary["eligible"], summary["skipped"]), (1, 1))
+        self.assertEqual(self.db[worker.NOTIFICATIONS].documents, [])
+        self.http.assert_not_called()
+
+    async def test_shipping_changed_during_selection_preparation_consumes_no_attempt(self):
+        original = worker.ensure_selection
+        async def change_shipping(*args, **kwargs):
+            link = await original(*args, **kwargs)
+            self.db["preprocess_orders"].documents[0]["shipping_method"] = "ارسال فوری"
+            return link
+        with patch.object(worker, "ensure_selection", side_effect=change_shipping):
+            self.assertEqual((await self.run_worker())["skipped"], 1)
+        self.assertEqual((self.notification()["status"], self.notification()["attempt_count"]), ("prepared", 0))
+        self.http.assert_not_called()
+        saved = copy.deepcopy(self.db[worker.SELECTIONS].documents)
+        self.db["preprocess_orders"].documents[0]["shipping_method"] = "پست"
+        await self.run_worker()
+        self.assertEqual(self.db[worker.SELECTIONS].documents, saved)
+        self.assertEqual(self.notification()["attempt_count"], 1)
+
+    async def test_accepted_order_repair_ignores_shipping_exclusion(self):
+        orders = self.db["preprocess_orders"]
+        orders.fail_update = lambda update: "sms_sent" in update.get("$set", {})
+        await self.run_worker()
+        accepted_at = self.notification()["accepted_at"]
+        orders.fail_update = None
+        for shipping in ("تحویل حضوری", "ارسال فوری"):
+            orders.documents[0]["shipping_method"] = shipping
+            await self.run_worker()
+        self.assertTrue(orders.documents[0]["sms_sent"])
+        self.assertTrue(self.notification()["order_synced"])
+        self.assertEqual(self.notification()["accepted_at"], accepted_at)
+        self.http.assert_called_once()
+
+    async def test_successful_send_still_syncs_order_if_shipping_changes_in_provider_call(self):
+        def accepted_response(*args, **kwargs):
+            self.db["preprocess_orders"].documents[0]["shipping_method"] = "ارسال فوری"
+            return FakeHttpResponse()
+        self.http.side_effect = accepted_response
+        await self.run_worker()
+        self.assertEqual(self.notification()["status"], "accepted")
+        self.assertTrue(self.notification()["order_synced"])
+        self.assertTrue(self.db["preprocess_orders"].documents[0]["sms_sent"])
 
     async def test_recovery_and_accepted_sync_use_gender_date_scope(self):
         documents, notifications, expected = [], [], set()

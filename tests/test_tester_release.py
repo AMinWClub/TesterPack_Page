@@ -87,6 +87,17 @@ class TesterReleaseTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((notification, selected), original[1:])
         self.assertEqual((await self.release())["release_ready"], 0)
 
+    async def test_sms_shipping_exclusion_does_not_block_accepted_order_release(self):
+        original = []
+        for shipping in ("تحویل حضوری", "ارسال فوری"):
+            for status, age in (("submitted", 10), ("pending", 31), ("submitting", 31), ("review_required", 31), (None, 31)):
+                source, _, _ = self.add(status, age=age, shipping_method=shipping)
+                original.append(copy.deepcopy(source))
+        summary = await worker.run_once(self.db, self.settings)
+        self.assertEqual((summary["released_submitted"], summary["released_expired"]), (2, 8))
+        for before, after in zip(original, self.collections["orders"].documents):
+            self.assertEqual(after, {**before, "state": "not_seen"})
+
     async def test_unfinished_or_inconsistent_receipts_do_not_release_early(self):
         for status in ("pending", "submitting", "review_required", None):
             self.add(status, age=10, written=status in {"submitting", "review_required"})

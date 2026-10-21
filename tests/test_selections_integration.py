@@ -85,6 +85,18 @@ class SelectionMongoTests(unittest.IsolatedAsyncioTestCase):
     async def selection(self):
         return await self.db[worker.SELECTIONS].find_one({"order_id": self.source_order["_id"]})
 
+    async def test_real_sms_shipping_exclusion_does_not_invalidate_link_or_submission(self):
+        for shipping in ("تحویل حضوری", "ارسال فوری"):
+            await self.db.preprocess_orders.update_one({"_id": self.source_order["_id"]}, {"$set": {"shipping_method": shipping}})
+            status, body, _ = await self.call()
+            self.assertEqual((status, body["selection"]["availability"]), (200, "active"))
+        self.assertEqual((await self.call("submit", pids=self.pids))[0], 200)
+        saved = (await self.stored_order())["recommended_products"]
+        await self.db.preprocess_orders.update_one({"_id": self.source_order["_id"]}, {"$set": {"shipping_method": "تحویل حضوری"}})
+        status, body, _ = await self.call()
+        self.assertEqual((status, body["selection"]["status"]), (200, "submitted"))
+        self.assertEqual((await self.stored_order())["recommended_products"], saved)
+
     async def test_worker_to_submission_to_readonly_and_worker_regression(self):
         await self.db[worker.NOTIFICATIONS].delete_one({"order_id": self.source_order["_id"]})
         sms = FarazSmsClient(FarazSmsConfig(api_key="test", base_url="https://provider.example.test", line_number="50001"))
