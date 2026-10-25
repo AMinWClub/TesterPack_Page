@@ -24,7 +24,7 @@ logger = logging.getLogger(__name__)
 COUNT = 10
 ORDER_MARKER = "tester_selection_submission_id"
 ORDER_WRITTEN_AT = "tester_selection_written_at"
-SELECTION_WINDOW = timedelta(minutes=30)
+SELECTION_WINDOW = timedelta(minutes=2)
 ORDER_PROJECTION = {key: 1 for key in ("_id", "state", "id", "first_name", "last_name", "phone", "recommended_products", ORDER_MARKER, ORDER_WRITTEN_AT)}
 SIMPLE = Collation(locale="simple")
 
