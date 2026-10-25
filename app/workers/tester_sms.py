@@ -46,9 +46,11 @@ RELEASE_SOURCE_INDEX = "tester_notification_repair"
 RELEASE_SOURCE_INDEX_KEYS = [("status", 1), ("order_synced", 1), ("accepted_at", 1)]
 RELEASE_DECISION_ATTEMPTS = 3
 TESTER_SMS_TEXT = (
-    "مشتری عزیز سراد\n\n"
-    "برای تکمیل سفارش پک تستر خود، لطفاً از طریق لینک زیر اقدام فرمایید:\n\n"
-    "{link}"
+    "راستی اینو یادم رفتتتت\n\n"
+    "مشتری عزیز سراد، اون عطرهایی که می‌گفتی «باید امتحان کنم» کدوما بودن؟\n\n"
+    "تسترهای دلخواهت رو تا نیم ساعت دیگه اینجا انتخاب کن که همراه سفارشت برات بفرستیم:\n\n"
+    "{link}\n\n"
+    "عطر سراد"
 )
 
 
