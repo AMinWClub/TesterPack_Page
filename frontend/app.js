@@ -11,6 +11,10 @@ const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
 const farsiNumber = n => Number(n).toLocaleString('fa-IR');
 const selected = [];
 let activeFilter = 'all';
+let activeSeason = 'all';
+const activeAccords = new Set();
+let accordOptions = [];
+const SEASON_LABELS = { spring: 'بهار', summer: 'تابستان', autumn: 'پاییز', winter: 'زمستان' };
 let query = '';
 let toastTimer;
 let lastFocus = null;
@@ -116,7 +120,9 @@ async function loadCatalog() {
     const products = data.products.map(raw => {
       if ((typeof raw.pid !== 'string' && !Number.isSafeInteger(raw.pid)) || String(raw.pid).trim() === '') throw new Error('Invalid pid');
       const searchText = normalizeSearch([raw.name, raw.label, raw.fragranticaName, raw.englishName, raw.brand, raw.sourceBrand, raw.season, raw.scent].join(' '));
-      return { ...raw, pid: String(raw.pid), searchText, searchCompact: searchText.replaceAll(' ', '') };
+      return { ...raw, pid: String(raw.pid), searchText, searchCompact: searchText.replaceAll(' ', ''),
+        seasonKeys: Array.isArray(raw.seasonKeys) ? raw.seasonKeys.filter(key => Object.hasOwn(SEASON_LABELS, key)) : [],
+        accordKeys: Array.isArray(raw.accordKeys) ? raw.accordKeys.filter(key => typeof key === 'string' && key.trim()) : [] };
     });
     const previousSelections = selected.map(getProduct).filter(Boolean);
     productsByPid.clear();
@@ -125,6 +131,10 @@ async function loadCatalog() {
       if (!productsByPid.has(product.pid)) { productsByPid.set(product.pid, product); unavailablePids.add(product.pid); }
     });
     PERFUMES = products;
+    const keys = new Set(products.flatMap(product => product.accordKeys));
+    accordOptions = [...keys].map(key => ({ key, label: typeof data.accordLabels?.[key] === 'string' ? data.accordLabels[key] : key }))
+      .sort((a, b) => a.label.localeCompare(b.label, 'fa'));
+    renderAccordOptions();
     showCatalogState(products.length ? 'ready' : 'empty');
     renderCatalog();
     renderSelection();
@@ -172,6 +182,8 @@ function renderCatalog(reset = true) {
   const compact = normalized.replaceAll(' ', '');
   const tokens = normalized.split(' ').filter(Boolean);
   filteredProducts = PERFUMES.filter(p => (activeFilter === 'all' || p.genderGroup === activeFilter)
+    && (activeSeason === 'all' || p.seasonKeys.includes(activeSeason))
+    && (!activeAccords.size || p.accordKeys.some(key => activeAccords.has(key)))
     && (!normalized || tokens.every(token => p.searchText.includes(token)) || p.searchCompact.includes(compact)));
   $('#productGrid').innerHTML = '';
   appendProducts();
@@ -183,6 +195,34 @@ function renderCatalog(reset = true) {
     btn.classList.toggle('is-active', active);
     btn.setAttribute('aria-pressed', String(active));
   });
+  renderActiveFilters();
+}
+
+function renderAccordOptions() {
+  const search = normalizeSearch($('#accordSearch').value);
+  const options = accordOptions.filter(option => normalizeSearch(`${option.label} ${option.key}`).includes(search));
+  $('#accordOptions').innerHTML = options.map(({ key, label }) => `<label class="accord-option"><input type="checkbox" value="${escapeHtml(key)}" ${activeAccords.has(key) ? 'checked' : ''} /><span>${escapeHtml(label)}</span></label>`).join('');
+  $('#accordEmpty').hidden = options.length > 0;
+}
+
+function renderActiveFilters() {
+  const tags = [];
+  if (query) tags.push(['query', '', `جست‌وجو: ${query}`]);
+  if (activeFilter !== 'all') tags.push(['gender', '', activeFilter]);
+  if (activeSeason !== 'all') tags.push(['season', '', SEASON_LABELS[activeSeason]]);
+  activeAccords.forEach(key => tags.push(['accord', key, accordOptions.find(option => option.key === key)?.label || key]));
+  $('#activeCatalogFilters').hidden = tags.length === 0;
+  $('#activeFilterTags').innerHTML = tags.map(([group, key, label]) => `<button type="button" class="active-filter-tag" data-clear-group="${group}" data-clear-key="${escapeHtml(key)}" aria-label="حذف فیلتر ${escapeHtml(label)}">${escapeHtml(label)} <span aria-hidden="true">×</span></button>`).join('');
+  $('#seasonFilter').value = activeSeason;
+  $('#accordFilterCount').textContent = activeAccords.size ? farsiNumber(activeAccords.size) : '';
+  $$('#accordOptions input').forEach(input => { input.checked = activeAccords.has(input.value); });
+}
+
+function resetCatalogFilters() {
+  activeFilter = 'all'; activeSeason = 'all'; activeAccords.clear(); query = '';
+  $('#searchInput').value = ''; $('#accordSearch').value = '';
+  $('#accordFilter').open = false;
+  renderAccordOptions(); renderActiveFilters(); renderCatalog();
 }
 
 function selectedRowTemplate(item) {
@@ -255,7 +295,7 @@ function accordsTemplate(accords) {
   const valid = (Array.isArray(accords) ? accords : [])
     .filter(accord => accord?.name && Number.isFinite(Number(accord.strength)) && Number(accord.strength) > 0)
     .slice().sort((a, b) => Number(b.strength) - Number(a.strength));
-  if (!valid.length) return '<p class="pd-empty">اطلاعات آکوردها هنوز موجود نیست.</p>';
+  if (!valid.length) return '<p class="pd-empty">اطلاعات رایحه‌ها هنوز موجود نیست.</p>';
   return `<ul class="pd-accords">${valid.map(accord => {
     const strength = Number(accord.strength);
     const color = /^#(?:[0-9a-f]{3}|[0-9a-f]{6})$/i.test(accord.color) ? accord.color : '#c9a961';
@@ -323,7 +363,7 @@ function renderPerfumeDetails(item) {
       ${descriptiveTagsTemplate(item.descriptiveTags)}
     </section>
     <div class="pd-analysis">
-      <section><h3 class="pd-section-title">آکوردهای اصلی</h3><p class="pd-section-hint">هویت رایحه، از پررنگ‌ترین تا لطیف‌ترین</p>${accordsTemplate(item.mainAccords)}</section>
+      <section><h3 class="pd-section-title">رایحه‌های اصلی</h3><p class="pd-section-hint">هویت رایحه، از پررنگ‌ترین تا لطیف‌ترین</p>${accordsTemplate(item.mainAccords)}</section>
       ${notesTemplate(item)}
     </div>`;
 }
@@ -541,8 +581,28 @@ $('#filters').addEventListener('click', e => {
   activeFilter = button.dataset.filter;
   renderCatalog();
 });
-$('#resetFilters').addEventListener('click', () => {
-  activeFilter = 'all'; query = ''; $('#searchInput').value = ''; renderCatalog();
+$('#seasonFilter').addEventListener('change', e => { activeSeason = e.target.value; renderCatalog(); });
+$('#accordSearch').addEventListener('input', renderAccordOptions);
+$('#accordOptions').addEventListener('change', e => {
+  const input = e.target.closest('input[type="checkbox"]');
+  if (!input) return;
+  input.checked ? activeAccords.add(input.value) : activeAccords.delete(input.value);
+  renderCatalog();
+});
+$('#activeFilterTags').addEventListener('click', e => {
+  const button = e.target.closest('[data-clear-group]');
+  if (!button) return;
+  if (button.dataset.clearGroup === 'query') { query = ''; $('#searchInput').value = ''; }
+  if (button.dataset.clearGroup === 'gender') activeFilter = 'all';
+  if (button.dataset.clearGroup === 'season') activeSeason = 'all';
+  if (button.dataset.clearGroup === 'accord') activeAccords.delete(button.dataset.clearKey);
+  renderCatalog();
+});
+$('#resetFilters').addEventListener('click', resetCatalogFilters);
+$('#clearAllFilters').addEventListener('click', resetCatalogFilters);
+document.addEventListener('click', e => { if (!$('#accordFilter').contains(e.target)) $('#accordFilter').open = false; });
+$('#accordFilter').addEventListener('keydown', e => {
+  if (e.key === 'Escape') { $('#accordFilter').open = false; $('#accordFilter summary').focus(); }
 });
 $('#headerCount').addEventListener('click', () => {
   if (window.matchMedia('(max-width: 940px)').matches) openDrawer();

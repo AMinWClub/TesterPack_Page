@@ -155,15 +155,37 @@
             <span class="search-shortcut">جست‌وجوی عطر</span>
           </div>
           <div class="finder-lower">
+            <div class="catalog-filter-groups">
             <div class="filter-pills" id="filters" role="group" aria-label="فیلتر جنسیت عطر">
               <button class="pill is-active" type="button" data-filter="all" aria-pressed="true">همه عطرها</button>
               <button class="pill" type="button" data-filter="زنانه" aria-pressed="false">زنانه</button>
               <button class="pill" type="button" data-filter="مردانه" aria-pressed="false">مردانه</button>
               <button class="pill" type="button" data-filter="یونیسکس" aria-pressed="false">یونیسکس</button>
             </div>
+            <label class="season-filter" for="seasonFilter"><span>فصل استفاده</span>
+              <select id="seasonFilter">
+                <option value="all">همه فصل‌ها</option>
+                <option value="spring">بهار</option><option value="summer">تابستان</option>
+                <option value="autumn">پاییز</option><option value="winter">زمستان</option>
+              </select>
+            </label>
+            <details class="accord-filter" id="accordFilter">
+              <summary>رایحه‌های اصلی <span id="accordFilterCount"></span></summary>
+              <div class="accord-picker">
+                <label class="sr-only" for="accordSearch">جست‌وجوی رایحه</label>
+                <input id="accordSearch" type="search" autocomplete="off" placeholder="جست‌وجوی رایحه" />
+                <div class="accord-options" id="accordOptions" role="group" aria-label="انتخاب چند رایحه"></div>
+                <p class="accord-empty" id="accordEmpty" hidden>رایحه پیدا نشد.</p>
+              </div>
+            </details>
+            </div>
             <span class="result-count"><svg class="ico">
                 <use href="#i-filter" />
               </svg><span id="resultCount">در حال دریافت…</span></span>
+          </div>
+          <div class="active-catalog-filters" id="activeCatalogFilters" hidden>
+            <div id="activeFilterTags" aria-label="فیلترهای فعال"></div>
+            <button type="button" id="clearAllFilters">پاک‌کردن همه فیلترها</button>
           </div>
         </div>
 
@@ -172,8 +194,7 @@
         <button class="catalog-more" id="catalogMore" type="button" hidden>نمایش رایحه‌های بیشتر</button>
         <div class="empty-results" id="emptyResults" hidden><span>✳</span>
           <h3>این رایحه رو پیدا نکردیم</h3>
-          <p>اسم دیگه‌ای امتحان کن یا فیلترها رو تغییر بده.</p><button id="resetFilters" type="button">نمایش همه
-            عطرها</button>
+          <p>اسم دیگه‌ای امتحان کن یا فیلترها رو تغییر بده.</p><button id="resetFilters" type="button">پاک‌کردن همه فیلترها</button>
         </div>
         <div class="catalog-footnote"><svg class="ico">
             <use href="#i-info" />

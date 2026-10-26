@@ -451,6 +451,38 @@ class SelectionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(headers["referrer-policy"], "no-referrer")
         self.assertIn("noindex", headers["x-robots-tag"])
 
+    async def test_customer_name_fallback_matches_sms_without_blocking_context_or_submit(self):
+        cases = [({}, "مشتری"), ({"first_name": None, "last_name": " فرجی "}, "فرجی"),
+                 ({"first_name": " احمد ", "last_name": False}, "احمد"),
+                 ({"first_name": 12, "last_name": ["bad"]}, "مشتری"),
+                 ({"first_name": "None", "last_name": "123"}, "مشتری"),
+                 ({"first_name": "bad\nname", "last_name": {}}, "مشتری"),
+                 ({"first_name": " احمد ", "last_name": " فرجی "}, "احمد فرجی")]
+        for fields, expected in cases:
+            with self.subTest(fields=fields):
+                self.stored_order.pop("first_name", None)
+                self.stored_order.pop("last_name", None)
+                self.stored_order.update(fields)
+                status, body, _ = await self.call()
+                self.assertEqual((status, body["order"]["customer_name"]), (200, expected))
+                self.assertEqual(body["order"]["customer_name"], worker.sms_full_name(self.stored_order))
+        self.stored_order.update(first_name=None, last_name={})
+        status, body, _ = await self.call("submit", pids=self.pids)
+        self.assertEqual((status, body["selection"]["status"], body["order"]["customer_name"]), (200, "submitted", "مشتری"))
+        self.assertEqual((await self.call())[1]["selection"]["status"], "submitted")
+
+    async def test_name_fallback_does_not_bypass_phone_or_order_identifier_validation(self):
+        original = copy.deepcopy(self.stored_order)
+        for fields in ({"phone": None}, {"phone": "invalid"}, {"id": None}, {"id": " "}, {"id": 123}):
+            self.stored_order.clear()
+            self.stored_order.update({**original, "first_name": None, "last_name": False, **fields})
+            for action, extra in (("context", {}), ("submit", {"pids": self.pids})):
+                status, body, _ = await self.call(action, **extra)
+                self.assertEqual((status, body["detail"]["code"]), (409, "inconsistent_order"))
+                self.assertNotIn("order", body)
+        self.assertNotIn("recommended_products", self.stored_order)
+        self.assertEqual(self.selection["status"], "pending")
+
     async def test_invalid_format_missing_selection_and_wrong_version(self):
         for token, expected in (("wrong", 400), ("0" * 18, 404), ("A" * 24, 400), ("1" * 17, 400),
                                 ("1" * 19, 400), ("۱" * 18, 400), ("١" * 18, 400),

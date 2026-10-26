@@ -114,6 +114,31 @@ class CatalogMongoTests(unittest.IsolatedAsyncioTestCase):
         await self.cache.get()
         self.assertEqual(self.counter.finds, ["products_api", "fragrantica_products"] * 2)
 
+    async def test_filter_metadata_api_missing_data_and_capped_membership(self):
+        await self.db.fragrantica_products.update_one({"pid": "12"}, {"$set": {
+            "seasonVotes": {"votes": {"spring": 100, "summer": 65, "autumn": 64, "night": 99999}},
+            "mainAccords": [{"name": " Warm   SPICY ", "strength": 90}, {"name": "warm spicy", "strength": 10},
+                            {"name": "Mystery Accord", "strength": 1}, {"name": "ignored", "strength": True}],
+        }})
+        await self.db.fragrantica_products.update_one({"pid": 1003}, {"$set": {
+            "seasonVotes": {"day": 100, "winter": 0}, "mainAccords": None,
+        }})
+        await self.db.fragrantica_products.update_one({"pid": 1509}, {"$set": {
+            "mainAccords": [{"name": "outside catalog", "strength": 100}],
+        }})
+        status, result = await asgi_get(self.app, "/api/tester/catalog")
+        self.assertEqual(status, 200)
+        self.assertEqual(result["total"], 498)
+        self.assertEqual([row["vol_idx"] for row in result["products"]], list(range(1, 499)))
+        self.assertEqual(result["products"][0]["seasonKeys"], ["spring", "summer"])
+        self.assertEqual(result["products"][0]["accordKeys"], ["warm spicy", "mystery accord"])
+        self.assertEqual(result["accordLabels"]["warm spicy"], "ادویه‌ای گرم")
+        self.assertEqual(result["accordLabels"]["mystery accord"], "Mystery Accord")
+        self.assertNotIn("outside catalog", result["accordLabels"])
+        for row in result["products"][1:4]:
+            self.assertEqual((row["seasonKeys"], row["accordKeys"]), ([], []))
+        self.assertEqual(self.counter.finds, ["products_api", "fragrantica_products"])
+
     async def test_detail_live_stock_privacy_translation_and_missing_enrichment(self):
         status, result = await asgi_get(self.app, "/api/tester/perfumes/12")
         self.assertEqual(status, 200)

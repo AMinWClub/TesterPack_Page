@@ -17,7 +17,7 @@ from app.catalog import canonical_pid, eligible_products
 from app.services.sms import SmsValidationError
 from app.services.sms.faraz import normalize_recipient
 from app.selection_security import TOKEN_PATTERN
-from app.workers.tester_sms import TOKEN_VERSION, order_filter, selection_deadline, worker_collections
+from app.workers.tester_sms import TOKEN_VERSION, order_filter, selection_deadline, sms_full_name, worker_collections
 
 router = APIRouter(prefix="/api/tester/selection", tags=["selection"])
 logger = logging.getLogger(__name__)
@@ -60,16 +60,13 @@ def require_pending(order):
 
 
 def order_display(order):
-    parts = [order.get("first_name"), order.get("last_name")]
-    if any(value is not None and not isinstance(value, str) for value in parts):
-        fail(409, "inconsistent_order", "اطلاعات این سفارش نیاز به بررسی پشتیبانی دارد.")
-    name = " ".join(value.strip() for value in parts if value and value.strip())
+    name = sms_full_name(order)
     identifier = order.get("id")
     try:
         phone = normalize_recipient(order.get("phone"))
     except SmsValidationError:
         fail(409, "inconsistent_order", "اطلاعات این سفارش نیاز به بررسی پشتیبانی دارد.")
-    if not name or not isinstance(identifier, str) or not identifier.strip():
+    if not isinstance(identifier, str) or not identifier.strip():
         fail(409, "inconsistent_order", "اطلاعات این سفارش نیاز به بررسی پشتیبانی دارد.")
     return {"id": identifier, "customer_name": name, "phone": phone, "tester_count": COUNT}
 

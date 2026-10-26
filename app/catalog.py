@@ -11,8 +11,8 @@ from fastapi.responses import Response
 from pymongo.errors import PyMongoError
 
 from app.catalog_labels import (
-    LONGEVITY, SILLAGE, accord_display, descriptive_tags_display, gender_display, meter_display,
-    notes_display, safe_image_url, scent_display, season_display, text,
+    LONGEVITY, SILLAGE, accord_display, accord_labels, descriptive_tags_display, gender_display, meter_display,
+    notes_display, safe_image_url, scent_display, season_display, season_keys, text,
 )
 
 
@@ -70,6 +70,8 @@ def display_product(product, fragrance=None):
         "imageUrl": (safe_image_url(product.get("imageUrl")) or safe_image_url(product.get("image_url"))
                      or safe_image_url(fragrance.get("imageUrl"))),
         "gender": gender, "genderGroup": group, "season": season_display(fragrance.get("seasonVotes")),
+        "seasonKeys": season_keys(fragrance.get("seasonVotes")),
+        "accordKeys": list(accord_labels(fragrance.get("mainAccords"))),
         "scent": scent_display(fragrance.get("olfactory_preferences"), fragrance.get("mainAccords") or []),
         "year": fragrance.get("year") if isinstance(fragrance.get("year"), int) and not isinstance(fragrance.get("year"), bool) else None,
         "vol_idx": product.get("vol_idx") if isinstance(product.get("vol_idx"), (str, int, float)) and not isinstance(product.get("vol_idx"), bool) else None,
@@ -108,6 +110,7 @@ class CatalogCache:
                 if key is not None:
                     by_pid[key] = fragrance
             items = []
+            labels = {}
             matched = 0
             for product in products:
                 key = canonical_pid(product.get("pid"))
@@ -116,7 +119,10 @@ class CatalogCache:
                 fragrance = by_pid.get(key)
                 matched += fragrance is not None
                 items.append(display_product(product, fragrance))
-            self.snapshot = {"products": items, "total": len(items)}
+                if fragrance:
+                    for key, label in accord_labels(fragrance.get("mainAccords")).items():
+                        labels.setdefault(key, label)
+            self.snapshot = {"products": items, "total": len(items), "accordLabels": labels}
             self.encoded = json.dumps(self.snapshot, ensure_ascii=False, allow_nan=False, separators=(",", ":")).encode("utf-8")
             self.by_pid = {item["pid"]: item for item in items}
             self.stats = {"matched": matched, "unmatched": len(items) - matched}

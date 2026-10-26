@@ -7,4 +7,41 @@
 .catalog-status button:focus-visible, .catalog-more:focus-visible { outline: 2px solid var(--gold); outline-offset: 3px; }
 .pd-content[data-state="loading"], .pd-content[data-state="error"] { display: block; }
 .pd-content .catalog-status { background: transparent; border: 0; }
+
+/* Local filters use only the current, capped catalog; the selection box is independent. */
+.finder-lower { align-items: flex-start; flex-wrap: wrap; }
+.catalog-filter-groups { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; min-width: 0; flex: 1; }
+.catalog-filter-groups .filter-pills { gap: 6px; }
+.catalog-filter-groups .pill { min-height: 40px; padding-inline: 14px; }
+.season-filter { display: flex; align-items: center; gap: 8px; color: #788197; font-size: 11px; }
+.season-filter select, .accord-filter summary { min-height: 42px; border: 1px solid #e1e5ed; border-radius: 12px; background: #fff; color: var(--navy); font: inherit; font-size: 12px; padding: 9px 12px; cursor: pointer; }
+.season-filter select { max-width: 100%; }
+.accord-filter { position: relative; min-width: 145px; }
+.accord-filter summary { display: flex; align-items: center; justify-content: space-between; gap: 12px; list-style: none; }
+.accord-filter summary::-webkit-details-marker { display: none; }
+.accord-filter summary::after { content: '⌄'; color: var(--gold); }
+.accord-filter[open] summary { border-color: var(--gold); }
+#accordFilterCount { font-size: 11px; }
+.accord-picker { position: absolute; inset-inline-end: 0; top: calc(100% + 8px); z-index: 12; width: 290px; max-width: calc(100vw - 40px); padding: 12px; border: 1px solid #e1e5ed; border-radius: 14px; background: #fff; box-shadow: 0 12px 32px #06277e12; }
+.accord-picker input[type=search] { width: 100%; min-height: 42px; border: 1px solid #e1e5ed; border-radius: 9px; padding: 8px 10px; font: inherit; font-size: 12px; background: #fafbfe; }
+.accord-options { max-height: min(260px, 40dvh); overflow-y: auto; overscroll-behavior: contain; margin-top: 8px; }
+.accord-option { display: flex; align-items: center; gap: 9px; min-height: 44px; padding: 6px; color: var(--navy); font-size: 12px; overflow-wrap: anywhere; cursor: pointer; }
+.accord-option input { width: 17px; height: 17px; flex-shrink: 0; accent-color: var(--navy); }
+.accord-option:has(input:checked) { background: #c9a96116; border-radius: 8px; }
+.accord-empty { color: #788197; font-size: 12px; }
+.active-catalog-filters { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-top: 12px; }
+#activeFilterTags { display: flex; flex-wrap: wrap; gap: 6px; min-width: 0; }
+.active-filter-tag { display: inline-flex; gap: 8px; align-items: center; max-width: 100%; min-height: 36px; border: 1px solid #c9a96155; border-radius: 20px; padding: 5px 10px; background: #c9a96110; color: var(--navy); font: inherit; font-size: 11px; overflow-wrap: anywhere; }
+#clearAllFilters { border: 0; background: transparent; color: var(--navy); font: inherit; font-size: 11px; min-height: 40px; text-decoration: underline; text-underline-offset: 4px; }
+.finder select:focus-visible, .finder summary:focus-visible, .finder button:focus-visible, .accord-picker input:focus-visible { outline: 2px solid var(--gold); outline-offset: 3px; }
+.active-catalog-filters[hidden], .accord-option[hidden], .accord-empty[hidden] { display: none; }
+@media (max-width: 680px) {
+  .catalog-filter-groups { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 10px; }
+  .catalog-filter-groups .filter-pills { grid-column: 1 / -1; }
+  .season-filter { flex-direction: column; align-items: stretch; gap: 4px; }
+  .season-filter > span { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
+  .accord-filter { min-width: 0; }
+  .accord-picker { width: calc(100vw - 56px); }
+  .finder-lower .result-count { margin-top: 12px; }
+}
 .product-name, .product-brand { overflow-wrap: anywhere; }

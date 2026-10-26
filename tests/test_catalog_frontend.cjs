@@ -13,7 +13,7 @@ async function main() {
   const executable = process.env.CATALOG_BROWSER_PATH || 'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe';
   const base = process.env.CATALOG_TEST_BASE_URL || 'http://127.0.0.1:8787';
   const browser = spawn(executable, ['--headless=new', '--disable-gpu', '--no-first-run', '--no-default-browser-check',
-    '--remote-debugging-port=9228', `--user-data-dir=${path.join(artifacts, 'edge-profile')}`, 'about:blank'], { windowsHide: true, stdio: 'ignore' });
+    '--remote-debugging-port=9228', `--user-data-dir=${fs.mkdtempSync(path.join(artifacts, 'edge-profile-'))}`, 'about:blank'], { windowsHide: true, stdio: 'ignore' });
   let socket;
   const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
   try {
@@ -39,6 +39,8 @@ async function main() {
       englishName: i === 0 ? 'Jasmine Example' : `English Perfume ${i}`, fragranticaName: `Fragrance ${i}`,
       brand: 'Example Brand', sourceBrand: i === 0 ? 'برند فارسی ویژه' : null, imageUrl: null, gender: i % 2 ? 'متمایل به زنانه' : 'مردانه',
       genderGroup: i % 2 ? 'زنانه' : 'مردانه', season: 'پاییز و زمستان', scent: 'گرم و شیرین', vol_idx: i + 1,
+      seasonKeys: i % 3 === 0 ? ['spring', 'summer'] : i % 3 === 1 ? ['autumn', 'winter'] : [],
+      accordKeys: i % 4 === 0 ? ['woody', 'sweet'] : i % 4 === 1 ? ['sweet'] : i % 4 === 2 ? ['mystery accord'] : [],
     }));
     function fixtureDetail(pid) {
       return { ...fixtures.find(item => item.pid === pid), mainAccords: [{ name: 'چوبی', strength: 80.24, color: '#774414' }],
@@ -58,6 +60,7 @@ async function main() {
       const pid = catalog ? null : decodeURIComponent(url.pathname.split('/').at(-1));
       let status = strategy === 'error' ? 503 : strategy === 'unavailable' ? 404 : 200;
       let body = catalog ? { products: strategy === 'empty' ? [] : fixtures, total: strategy === 'empty' ? 0 : fixtures.length } : fixtureDetail(pid);
+      if (catalog) body.accordLabels = { woody: 'چوبی', sweet: 'شیرین', 'mystery accord': 'Mystery Accord', 'outside catalog': 'نباید دیده شود' };
       if (!catalog && strategy === 'missing') body = { ...fixtures.find(item => item.pid === pid), mainAccords: [], notesTop: null, notesMiddle: [], notesBase: [], longevity: null, sillage: null, descriptiveTags: [] };
       if (status !== 200) body = { detail: 'Test error' };
       return send('Fetch.fulfillRequest', { requestId: event.requestId, responseCode: status,
@@ -144,6 +147,19 @@ async function main() {
 
     // Fixture-only behavior tests: types, normalization, incremental rendering, caches and errors.
     mode.catalog = 'fixture'; mode.detail = 'fixture';
+    const filterLayouts = [];
+    for (const [width, height] of [[1440,1000], [768,1024], [390,844], [320,740]]) {
+      await load(width, height);
+      await evaluate(`document.querySelector('.finder').scrollIntoView({block:'start',behavior:'instant'});document.querySelector('#accordFilter').open=true`);
+      const layout = await evaluate(`(() => {const picker=document.querySelector('.accord-picker').getBoundingClientRect();const select=document.querySelector('#seasonFilter').getBoundingClientRect();return {overflow:document.documentElement.scrollWidth>innerWidth,pickerLeft:picker.left,pickerRight:picker.right,selectHeight:select.height,optionHeight:document.querySelector('.accord-option').getBoundingClientRect().height};})()`);
+      assert(!layout.overflow && layout.pickerLeft >= 0 && layout.pickerRight <= width + 1);
+      assert(layout.selectHeight >= 42 && layout.optionHeight >= 44);
+      filterLayouts.push({width, ...layout});
+      await screenshot('filters-' + width);
+      await evaluate(`document.querySelector('#accordSearch').focus();document.querySelector('#accordSearch').dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true}))`);
+      assert(await evaluate('!document.querySelector("#accordFilter").open && document.activeElement===document.querySelector("#accordFilter summary")'));
+    }
+    fs.writeFileSync(path.join(artifacts, 'filter-responsive.json'), JSON.stringify(filterLayouts, null, 2));
     await load();
     assert(await evaluate('document.querySelector(".product-card [data-product-image]").src.includes("perfume-placeholder")'));
     await evaluate('document.querySelector(".product-card [data-product-image]").dispatchEvent(new Event("error"))');
@@ -160,6 +176,31 @@ async function main() {
     await evaluate(`document.querySelector('#clearSearch').click();document.querySelectorAll('[data-filter]')[1].click()`);
     assert(await evaluate('filteredProducts.length===249&&selected.length===4'));
     await evaluate(`document.querySelector('[data-filter="all"]').click()`);
+    assert.deepEqual(await evaluate('accordOptions.map(option=>option.key).sort()'), ['mystery accord','sweet','woody']);
+    assert(await evaluate('accordOptions.find(option=>option.key==="woody").label==="چوبی"'));
+    // OR within accords; AND across gender, season and normalized text search.
+    await evaluate(`(() => {const season=document.querySelector('#seasonFilter');season.value='spring';season.dispatchEvent(new Event('change',{bubbles:true}));})()`);
+    assert(await evaluate('filteredProducts.length===166 && selected.length===4'));
+    await evaluate(`document.querySelector('#accordFilter').open=true;document.querySelector('#accordSearch').value='چوبی';document.querySelector('#accordSearch').dispatchEvent(new Event('input',{bubbles:true}))`);
+    assert(await evaluate('document.querySelectorAll("#accordOptions input").length===1'));
+    await evaluate(`document.querySelector('#accordOptions input[value="woody"]').click()`);
+    assert(await evaluate('filteredProducts.length===42 && activeAccords.size===1 && selected.length===4'));
+    await evaluate(`document.querySelector('#accordSearch').value='';document.querySelector('#accordSearch').dispatchEvent(new Event('input',{bubbles:true}));document.querySelector('#accordOptions input[value="mystery accord"]').click()`);
+    assert(await evaluate('filteredProducts.length===83 && activeAccords.size===2'));
+    await evaluate(`document.querySelector('[data-filter="مردانه"]').click();query='jasmine example';renderCatalog()`);
+    assert(await evaluate('filteredProducts.length===1 && filteredProducts[0].pid==="0012" && selected.length===4'));
+    await evaluate(`query='nothing matches';renderCatalog()`);
+    assert(await evaluate('!document.querySelector("#emptyResults").hidden && document.querySelector("#resultCount").textContent.includes("۰")'));
+    await evaluate(`document.querySelector('#resetFilters').click()`);
+    assert(await evaluate('filteredProducts.length===498 && !activeAccords.size && activeSeason==="all" && query==="" && selected.length===4 && document.querySelector("#activeCatalogFilters").hidden'));
+    // Individual active tags, unknown-label fallback, no-result accord search, XSS escaping.
+    await evaluate(`activeAccords.add('mystery accord');renderCatalog();document.querySelector('[data-clear-group="accord"]').click()`);
+    assert(await evaluate('activeAccords.size===0 && filteredProducts.length===498'));
+    await evaluate(`document.querySelector('#accordSearch').value='does not exist';renderAccordOptions()`);
+    assert(await evaluate('!document.querySelector("#accordEmpty").hidden && document.querySelectorAll("#accordOptions input").length===0'));
+    await evaluate(`query='<img src=x onerror=alert(1)>';renderCatalog()`);
+    assert(await evaluate('document.querySelectorAll("#activeFilterTags img").length===0'));
+    await evaluate(`document.querySelector('#clearAllFilters').click()`);
     assert.equal(mode.catalogRequests, catalogCalls, 'Search/filter called the API');
     await evaluate('document.querySelector("#catalogMore").click()');
     assert(await evaluate('document.querySelectorAll(".product-card").length===48&&filteredProducts.length===498'));

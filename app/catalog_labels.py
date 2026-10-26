@@ -3,6 +3,7 @@
 import ipaddress
 import math
 import re
+import unicodedata
 from urllib.parse import urlsplit
 
 
@@ -161,18 +162,38 @@ def gender_display(data):
     return GENDERS[key] if key else (None, None)
 
 
-def season_display(data):
+def season_keys(data):
     # Keep seasons with at least 65% of the highest seasonal vote; ignore day/night.
     if not isinstance(data, dict):
-        return None
+        return []
     votes = data.get("votes", data)
     if not isinstance(votes, dict):
-        return None
+        return []
     valid = {key: votes[key] for key in SEASONS if positive_number(votes.get(key))}
     if not valid:
+        return []
+    return [key for key in SEASONS if key in valid and valid[key] >= max(valid.values()) * .65]
+
+
+def season_display(data):
+    selected = [SEASONS[key] for key in season_keys(data)]
+    if not selected:
         return None
-    selected = [SEASONS[key] for key in SEASONS if key in valid and valid[key] >= max(valid.values()) * .65]
     return "چهار فصل" if len(selected) == 4 else " و ".join(selected)
+
+
+def accord_labels(accords):
+    """Canonical filter identities with existing translations; no inferred accords."""
+    result = {}
+    for accord in accords if isinstance(accords, list) else []:
+        if not isinstance(accord, dict) or not positive_number(accord.get("strength")):
+            continue
+        name = text(accord.get("name"))
+        if not any(char.isalpha() for char in name) or any(unicodedata.category(char).startswith("C") for char in name):
+            continue
+        key = " ".join(unicodedata.normalize("NFKC", name).casefold().split())
+        result.setdefault(key, ACCORDS.get(key, name))
+    return result
 
 
 def translated(name, mapping):
@@ -196,6 +217,7 @@ def descriptive_tags_display(tags):
 
 def scent_display(preferences, accords):
     preferences = preferences if isinstance(preferences, dict) else {}
+    accords = accords if isinstance(accords, list) else []
     ranked = sorted((a for a in accords if isinstance(a, dict) and positive_number(a.get("strength"))), key=lambda a: a["strength"], reverse=True)
     names = [text(a.get("name")).lower() for a in ranked]
     parts = []

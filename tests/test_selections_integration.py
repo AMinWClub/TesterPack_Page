@@ -97,6 +97,32 @@ class SelectionMongoTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((status, body["selection"]["status"]), (200, "submitted"))
         self.assertEqual((await self.stored_order())["recommended_products"], saved)
 
+    async def test_real_incomplete_names_allow_context_submit_and_readonly_receipt(self):
+        for values, expected in (({"first_name": None, "last_name": " فرجی "}, "فرجی"),
+                                 ({"first_name": " احمد ", "last_name": False}, "احمد"),
+                                 ({"first_name": 12, "last_name": ["invalid"]}, "مشتری"),
+                                 ({"first_name": "None", "last_name": " "}, "مشتری")):
+            await self.db.preprocess_orders.update_one({"_id": self.source_order["_id"]}, {"$set": values})
+            status, body, _ = await self.call()
+            self.assertEqual((status, body["order"]["customer_name"]), (200, expected))
+            self.assertEqual(body["order"]["customer_name"], worker.sms_full_name(await self.stored_order()))
+        await self.db.preprocess_orders.update_one({"_id": self.source_order["_id"]}, {"$unset": {"first_name": "", "last_name": ""}})
+        status, body, _ = await self.call("submit", pids=self.pids)
+        self.assertEqual((status, body["selection"]["status"], body["order"]["customer_name"]), (200, "submitted", "مشتری"))
+        await worker.release_resolved_tester_orders(worker.worker_collections(self.db, self.config), self.config)
+        self.assertEqual((await self.call())[1]["selection"]["status"], "submitted")
+
+    async def test_real_invalid_phone_and_display_id_still_reject_name_fallback_orders(self):
+        for values in ({"phone": "invalid", "id": self.source_order["id"]}, {"phone": self.source_order["phone"], "id": None}):
+            await self.db.preprocess_orders.update_one({"_id": self.source_order["_id"]}, {
+                "$set": {"first_name": None, "last_name": False, **values},
+            })
+            for action, extra in (("context", {}), ("submit", {"pids": self.pids})):
+                status, body, _ = await self.call(action, **extra)
+                self.assertEqual((status, body["detail"]["code"]), (409, "inconsistent_order"))
+                self.assertNotIn("order", body)
+        self.assertNotIn("recommended_products", await self.stored_order())
+
     async def test_worker_to_submission_to_readonly_and_worker_regression(self):
         await self.db.preprocess_orders.update_one({"_id": self.source_order["_id"]}, {
             "$set": {"date_created": "2001", "shipping_method": "تحویل حضوری"}, "$unset": {"tester_gender": ""},

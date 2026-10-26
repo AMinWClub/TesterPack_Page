@@ -307,6 +307,43 @@ class MongoWorkerIntegrationTests(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn(private, saved)
         self.assertEqual(await self.collections["selections"].count_documents({}), 1)
 
+    async def test_real_retry_refreshes_name_and_template_while_preserving_token(self):
+        from dataclasses import replace
+        initial_settings = self.settings
+        for change in ("name", "template", "both"):
+            with self.subTest(change=change):
+                self.settings = initial_settings
+                await self.collections["orders"].update_one({"_id": "order-1"}, {
+                    "$set": {"first_name": " احمد ", "last_name": " فرجی "}, "$unset": {"sms_sent": ""},
+                })
+                await self.collections["notifications"].delete_many({})
+                await self.collections["selections"].delete_many({})
+                self.http.reset_mock()
+                self.http.side_effect = TimeoutError("synthetic timeout")
+                await self.run_worker()
+                selection = await self.collections["selections"].find_one({"order_id": "order-1"})
+                await self.make_retry_due()
+                if change in {"name", "both"}:
+                    await self.collections["orders"].update_one({"_id": "order-1"}, {"$set": {"first_name": " سارا ", "last_name": " احمدی "}})
+                if change in {"template", "both"}:
+                    with patch.dict(os.environ, {"TESTER_SMS_TEMPLATE": "{full_name} عزیز\\nانتخاب‌های شما: {link}"}), \
+                            patch.object(worker, "load_dotenv"):
+                        loaded = worker.WorkerSettings.from_environment()
+                    self.settings = replace(self.settings, sms_template=loaded.sms_template)
+                self.http.side_effect = None
+                await self.run_worker()
+                link = self.settings.selection_base_url + "/" + worker.token_for_order("order-1", self.settings.token_secret)
+                texts = [json.loads(call.args[0].data)["text"] for call in self.http.call_args_list]
+                self.assertEqual(texts[0], SMS_TEMPLATE.format(full_name="احمد فرجی", link=link))
+                expected_name = "سارا احمدی" if change in {"name", "both"} else "احمد فرجی"
+                self.assertEqual(texts[1], self.settings.sms_template.format(full_name=expected_name, link=link))
+                self.assertNotEqual(*texts)
+                self.assertTrue(all(link in text for text in texts))
+                self.assertEqual(await self.collections["selections"].find_one({"order_id": "order-1"}), selection)
+                self.assertEqual(((await self.notification())["attempt_count"], (await self.notification())["status"]), (2, "accepted"))
+                await self.run_worker()
+                self.assertEqual(self.http.call_count, 2)
+
     async def test_concurrent_workers_atomic_claim(self):
         await asyncio.gather(self.run_worker(), self.run_worker())
         self.http.assert_called_once()

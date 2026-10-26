@@ -15,7 +15,7 @@ from app.catalog import (
 )
 from app.catalog_labels import (
     ACCORDS, LONGEVITY, SILLAGE, accord_display, descriptive_tags_display, gender_display, meter_display,
-    notes_display, safe_image_url, scent_display, season_display,
+    notes_display, safe_image_url, scent_display, season_display, season_keys, accord_labels,
 )
 
 
@@ -114,6 +114,32 @@ class DisplayTests(unittest.TestCase):
         self.assertNotIn("تلخ", scent_display({"sweetness": "low"}, fragrance()["mainAccords"]))
         self.assertIsNone(scent_display({}, []))
 
+    def test_season_filter_keys_share_display_threshold_and_ignore_time_of_day(self):
+        votes = {"spring": 100, "summer": 65, "autumn": 64.99, "winter": 0, "day": 9999, "night": 9999}
+        for data in (votes, {"votes": votes}):
+            self.assertEqual(season_keys(data), ["spring", "summer"])
+            self.assertEqual(season_display(data), "بهار و تابستان")
+        self.assertEqual(season_keys(dict.fromkeys(("spring", "summer", "autumn", "winter"), 1)),
+                         ["spring", "summer", "autumn", "winter"])
+        for data in (None, [], "winter", {}, {"votes": None}, {"day": 1},
+                     {"spring": True, "summer": "10", "autumn": float("nan"), "winter": float("inf")}):
+            self.assertEqual(season_keys(data), [])
+            self.assertIsNone(season_display(data))
+
+    def test_accord_filter_identity_translation_normalization_and_invalid_values(self):
+        rows = [{"name": "  Warm   SPICY  ", "strength": 80}, {"name": "warm spicy", "strength": 20},
+                {"name": "ＷＯＯＤＹ", "strength": 1}, {"name": "Mystery Accord", "strength": .5}]
+        self.assertEqual(accord_labels(rows), {"warm spicy": "ادویه‌ای گرم", "woody": "چوبی", "mystery accord": "Mystery Accord"})
+        for value in (None, "woody", 10, {}):
+            self.assertEqual(accord_labels(value), {})
+        invalid = [None, "woody", {}, {"name": 12, "strength": 1}, {"name": "123", "strength": 1},
+                   {"name": "bad\nname", "strength": 1}, {"name": " ", "strength": 1}]
+        invalid += [{"name": "woody", "strength": strength} for strength in (None, True, False, 0, -1, "50", float("nan"), float("inf"))]
+        self.assertEqual(accord_labels(invalid), {})
+        for data in (None, {}, "bad", 123, invalid):
+            result = display_product(product(), fragrance(mainAccords=data, seasonVotes=None))
+            self.assertEqual((result["seasonKeys"], result["accordKeys"]), ([], []))
+
     def test_accords_strength_colors_and_specialist_fallback(self):
         data = accord_display([{ "name": "woody", "strength": 80.24, "color": "#774414"},
                               {"name": "unknown specialist", "strength": 91, "color": "red;url(x)"}])
@@ -175,6 +201,7 @@ class DisplayTests(unittest.TestCase):
         self.assertIsNone(result["gender"])
         self.assertIsNone(result["imageUrl"])
         self.assertEqual(result["englishName"], "Test Perfume")
+        self.assertEqual((result["seasonKeys"], result["accordKeys"]), ([], []))
 
 
 class CatalogTests(unittest.IsolatedAsyncioTestCase):
@@ -208,7 +235,7 @@ class CatalogTests(unittest.IsolatedAsyncioTestCase):
         db = fake_db([], [])
         cache = CatalogCache(db)
         results = await asyncio.gather(*(cache.get() for _ in range(20)))
-        self.assertTrue(all(row == {"products": [], "total": 0} for row in results))
+        self.assertTrue(all(row == {"products": [], "total": 0, "accordLabels": {}} for row in results))
         self.assertEqual(db["products_api"].find.call_count, 1)
         await cache.get()
         self.assertEqual(db["products_api"].find.call_count, 1)
@@ -226,6 +253,9 @@ class CatalogTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(status, 200)
         self.assertEqual(body["products"][0]["pid"], "12")
         self.assertEqual(body["products"][0]["imageUrl"], image)
+        self.assertEqual(body["products"][0]["seasonKeys"], ["autumn", "winter"])
+        self.assertEqual(body["products"][0]["accordKeys"], ["woody"])
+        self.assertEqual(body["accordLabels"], {"woody": "چوبی"})
         self.assertNotIn("descriptiveTags", body["products"][0])
         self.assertNotIn("descriptiveTags", db["fragrantica_products"].find.call_args.args[1])
         self.assertEqual(db["fragrantica_products"].find.call_args.args[1]["imageUrl"], 1)

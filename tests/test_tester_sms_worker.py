@@ -987,6 +987,41 @@ class TesterWorkerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(sum("مشتری عزیز" in text for text in texts), 2)
         self.assertEqual(sum("احمد عزیز" in text for text in texts), 1)
 
+    async def test_retry_refreshes_changed_name_or_template_but_keeps_token_and_selection(self):
+        initial_settings = self.settings
+        for change in ("name", "template", "both"):
+            with self.subTest(change=change):
+                self.settings = initial_settings
+                source = order(first_name=" احمد ", last_name=" فرجی ")
+                self.db["preprocess_orders"].documents = [source]
+                self.db[worker.NOTIFICATIONS].documents.clear()
+                self.db[worker.SELECTIONS].documents.clear()
+                self.http.reset_mock()
+                self.http.side_effect = TimeoutError("synthetic timeout")
+                await self.run_worker()
+                selection_before = copy.deepcopy(self.db[worker.SELECTIONS].documents[0])
+                self.make_retry_due()
+                if change in {"name", "both"}:
+                    source.update(first_name=" سارا ", last_name=" احمدی ")
+                if change in {"template", "both"}:
+                    with patch.dict(os.environ, {"TESTER_SMS_TEMPLATE": "{full_name} عزیز\\nانتخاب‌های شما: {link}"}), \
+                            patch.object(worker, "load_dotenv"):
+                        loaded = worker.WorkerSettings.from_environment()
+                    self.settings = replace(self.settings, sms_template=loaded.sms_template)
+                self.http.side_effect = None
+                await self.run_worker()
+                link = self.settings.selection_base_url + "/" + worker.token_for_order(source["_id"], self.settings.token_secret)
+                texts = [json.loads(call.args[0].data)["text"] for call in self.http.call_args_list]
+                self.assertEqual(texts[0], SMS_TEMPLATE.format(full_name="احمد فرجی", link=link))
+                expected_name = "سارا احمدی" if change in {"name", "both"} else "احمد فرجی"
+                self.assertEqual(texts[1], self.settings.sms_template.format(full_name=expected_name, link=link))
+                self.assertNotEqual(*texts)
+                self.assertTrue(all(link in text for text in texts))
+                self.assertEqual(self.db[worker.SELECTIONS].documents, [selection_before])
+                self.assertEqual((self.notification()["attempt_count"], self.notification()["status"]), (2, "accepted"))
+                await self.run_worker()
+                self.assertEqual(self.http.call_count, 2)
+
     async def test_bad_template_stops_before_claim_without_permanent_order_failure(self):
         self.settings = replace(self.settings, sms_template="private-template {unknown}")
         with self.assertRaisesRegex(worker.WorkerConfigurationError, "TESTER_SMS_TEMPLATE") as error:
@@ -1207,7 +1242,8 @@ class WorkerSettingsAndTokenTests(unittest.TestCase):
     def test_template_rejects_unknown_traversal_conversion_and_invalid_format(self):
         for template in ("", " ", "missing-link", "{unknown}{link}", "{link", "{link}}", "{}{link}",
                          "{0}{link}", "{link.__class__}", "{link[0]}", "{link!r}", "{link:10}",
-                         "{link:{full_name}}", "{{link}}"):
+                         "{link:{full_name}}", "{{link}}", "{link}", "{full_name}",
+                         "{{full_name}} {link}", "{full_name} {{link}}"):
             with self.subTest(template=template), self.assertRaisesRegex(worker.WorkerConfigurationError, "TESTER_SMS_TEMPLATE"):
                 worker.validate_sms_template(template)
         worker.validate_sms_template("{{literal braces}} {full_name}\n{link}")

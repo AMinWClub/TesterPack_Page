@@ -46,13 +46,6 @@ ORDER_INDEX_KEYS = [("state", 1), ("_id", 1)]
 RELEASE_SOURCE_INDEX = "tester_notification_repair"
 RELEASE_SOURCE_INDEX_KEYS = [("status", 1), ("order_synced", 1), ("accepted_at", 1)]
 RELEASE_DECISION_ATTEMPTS = 3
-TESTER_SMS_TEXT = (
-    "راستی اینو یادم رفتتتت\n\n"
-    "مشتری عزیز سراد، اون عطرهایی که می‌گفتی «باید امتحان کنم» کدوما بودن؟\n\n"
-    "تسترهای دلخواهت رو تا نیم ساعت دیگه اینجا انتخاب کن که همراه سفارشت برات بفرستیم:\n\n"
-    "{link}\n\n"
-    "عطر سراد"
-)
 
 
 class WorkerConfigurationError(ValueError):
@@ -160,11 +153,12 @@ def validate_sms_template(template: str) -> None:
             if name not in {"full_name", "link"} or spec or conversion:
                 raise WorkerConfigurationError("TESTER_SMS_TEMPLATE allows only {full_name} and {link}, without conversion or format specifiers.")
             fields.add(name)
-    if "link" not in fields:
-        raise WorkerConfigurationError("TESTER_SMS_TEMPLATE must include the {link} placeholder.")
+    if fields != {"full_name", "link"}:
+        raise WorkerConfigurationError("TESTER_SMS_TEMPLATE must include both {full_name} and {link} placeholders.")
 
 
 def sms_full_name(order: dict) -> str:
+    """Shared API/SMS customer name; invalid name parts never block an order."""
     parts = []
     for key in ("first_name", "last_name"):
         value = order.get(key)
