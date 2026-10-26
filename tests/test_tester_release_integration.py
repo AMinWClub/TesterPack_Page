@@ -445,8 +445,10 @@ class TesterReleaseMongoTests(unittest.IsolatedAsyncioTestCase):
         bad, _, _ = await self.add("submitting", age=31, written=True, tester_gender=None)
         healthy, _, _ = await self.add("submitted", age=31)
         incomplete, _, _ = await self.add("review_required", age=31)
+        malformed, _, selected = await self.add("submitting", age=31, written=True)
+        await self.collections["selections"].update_one({"_id": selected["_id"]}, {"$set": {"selected_pids": ["duplicate"] * 10}})
         await self.add("review_required", age=31, written=True)
-        for source in (bad, healthy, incomplete):
+        for source in (bad, healthy, incomplete, malformed):
             values = {"state": "not_seen"}
             if source["_id"] == healthy["_id"]:
                 values["tester_gender"] = "تستر انتخابی"
@@ -456,7 +458,8 @@ class TesterReleaseMongoTests(unittest.IsolatedAsyncioTestCase):
         scope = next(stage["$match"] for stage in pipeline if stage.get("$match", {}).get("state") == "pending")
         scope["state"] = "not_seen"
         scope["$expr"] = {"$and": [scope["$expr"], {"$ne": [{"$ifNull": ["$tester_gender", None]}, "تستر انتخابی"]}]}
-        pipeline.insert(-3, {"$match": {"_valid_receipt": True}})
+        valid_proof = pipeline[-4]["$match"]["$or"][1]
+        pipeline.insert(-3, {"$match": valid_proof})
         cursor = await self.collections["notifications"].aggregate(pipeline, hint=worker.RELEASE_SOURCE_INDEX, collation={"locale": "simple"})
         self.assertEqual([row["_id"] async for row in cursor], [bad["_id"]])
         self.assertEqual({name: await collection.find({}).to_list(length=None) for name, collection in self.collections.items()}, before)

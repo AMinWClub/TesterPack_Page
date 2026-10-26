@@ -11,6 +11,8 @@ import unittest
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
+from pathlib import Path
+from uuid import uuid4
 from unittest.mock import AsyncMock, Mock, patch
 from urllib.error import HTTPError, URLError
 
@@ -21,6 +23,12 @@ from app.services.sms import FarazSmsClient, FarazSmsConfig, SmsValidationError
 from app.workers import tester_sms as worker
 from tests.test_sms_faraz import FakeHttpResponse, simple_success_body
 
+SMS_TEMPLATE = (
+    "راستی اینو یادم رفتتتت\n\n"
+    "{full_name} عزیز، اون عطرهایی که می‌گفتی «باید امتحان کنم» کدوما بودن؟\n\n"
+    "تسترهای دلخواهت رو تا نیم ساعت دیگه اینجا انتخاب کن که همراه سفارشت برات بفرستیم:\n\n"
+    "{link}\n\nعطر سراد"
+)
 
 def path_value(document, path):
     if not path:
@@ -405,6 +413,7 @@ class TesterWorkerTests(unittest.IsolatedAsyncioTestCase):
             orders_collection="preprocess_orders",
             sms_enabled=True,
             selection_base_url="https://tester.example.com", token_secret="random-test-secret-" + "x" * 32,
+            sms_template=SMS_TEMPLATE,
         )
         self.sms = FarazSmsClient(FarazSmsConfig(api_key="test-key", line_number="50001"))
         self.sms.send_simple = Mock(wraps=self.sms.send_simple)
@@ -585,7 +594,7 @@ class TesterWorkerTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(selection["token_hash"], hashlib.sha256(token.encode("ascii")).hexdigest())
             self.assertEqual(self.notification()["status"], "sending")
             self.assertEqual(self.notification()["attempt_count"], 1)
-            self.assertEqual(json.loads(request.data)["text"], worker.TESTER_SMS_TEXT.format(
+            self.assertEqual(json.loads(request.data)["text"], self.settings.sms_template.format(full_name="مشتری",
                 link=self.settings.selection_base_url + "/" + token,
             ))
             return FakeHttpResponse()
@@ -756,7 +765,7 @@ class TesterWorkerTests(unittest.IsolatedAsyncioTestCase):
                          (1, "accepted", 200, None))
         self.assertLessEqual(attempt["started_at"], attempt["finished_at"])
         persisted = repr(self.db[worker.NOTIFICATIONS].documents + self.db[worker.SELECTIONS].documents)
-        link = self.sms.send_simple.call_args.kwargs["text"].split("\n")[-1]
+        link = self.settings.selection_base_url + "/" + worker.token_for_order("order-1", self.settings.token_secret)
         for private in ("metadata", "private-sms-text", "09120000000", "aB7xQ2mN9pR4tY6kL8",
                         "2026-09-21", "test-key", link, link.rsplit("/", 1)[1]):
             self.assertNotIn(private, persisted)
@@ -864,9 +873,7 @@ class TesterWorkerTests(unittest.IsolatedAsyncioTestCase):
         token = worker.token_for_order("order-1", self.settings.token_secret)
         url = self.settings.selection_base_url + "/" + token
         self.assertEqual(arguments["recipient"], "09120000000")
-        self.assertEqual(arguments["text"],
-                         "مشتری عزیز سراد\n\n"
-                         "برای تکمیل سفارش پک تستر خود، لطفاً از طریق لینک زیر اقدام فرمایید:\n\n" + url)
+        self.assertEqual(arguments["text"], SMS_TEMPLATE.format(full_name="مشتری", link=url))
         payload = json.loads(self.http.call_args.args[0].data)
         self.assertEqual(payload["text"], arguments["text"])
         self.assertEqual(payload["recipients"], ["09120000000"])
@@ -945,11 +952,48 @@ class TesterWorkerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.notification()["status"], "accepted")
         texts = [call.kwargs["text"] for call in self.sms.send_simple.call_args_list]
         link = self.settings.selection_base_url + "/" + worker.token_for_order("order-1", self.settings.token_secret)
-        self.assertEqual(texts, [worker.TESTER_SMS_TEXT.format(link=link)] * 2)
+        self.assertEqual(texts, [self.settings.sms_template.format(full_name="مشتری", link=link)] * 2)
         self.assertEqual(self.http.call_args_list[0].args[0].data, self.http.call_args_list[1].args[0].data)
         self.assertEqual(len(self.db[worker.SELECTIONS].documents), 1)
         await self.run_worker()
         self.assertEqual(self.sms.send_simple.call_count, 2)
+
+    async def test_personalized_retry_preserves_payload_and_does_not_store_or_log_message(self):
+        source = self.db["preprocess_orders"].documents[0]
+        source.update(first_name="  احمد ", last_name=" فرجی  ")
+        self.http.side_effect = TimeoutError("private transport details")
+        with self.assertNoLogs(worker.logger.name, level="INFO"):
+            await self.run_worker()
+            self.make_retry_due()
+            self.http.side_effect = None
+            await self.run_worker()
+        first, second = [call.args[0].data for call in self.http.call_args_list]
+        self.assertEqual(first, second)
+        text = json.loads(first)["text"]
+        link = self.settings.selection_base_url + "/" + worker.token_for_order("order-1", self.settings.token_secret)
+        self.assertEqual(text, SMS_TEMPLATE.format(full_name="احمد فرجی", link=link))
+        stored = repr(self.db[worker.NOTIFICATIONS].documents + self.db[worker.SELECTIONS].documents)
+        for private in ("احمد", "فرجی", text, link, link.rsplit("/", 1)[1]):
+            self.assertNotIn(private, stored)
+        self.assertEqual(self.notification()["attempt_count"], 2)
+
+    async def test_invalid_names_do_not_remove_pending_orders_from_sms_queue(self):
+        self.db["preprocess_orders"].documents = [
+            order("missing"), order("invalid", first_name=None, last_name=["invalid"]),
+            order("partial", first_name="  احمد ", last_name=False),
+        ]
+        self.assertEqual((await self.run_worker())["accepted"], 3)
+        texts = [call.kwargs["text"] for call in self.sms.send_simple.call_args_list]
+        self.assertEqual(sum("مشتری عزیز" in text for text in texts), 2)
+        self.assertEqual(sum("احمد عزیز" in text for text in texts), 1)
+
+    async def test_bad_template_stops_before_claim_without_permanent_order_failure(self):
+        self.settings = replace(self.settings, sms_template="private-template {unknown}")
+        with self.assertRaisesRegex(worker.WorkerConfigurationError, "TESTER_SMS_TEMPLATE") as error:
+            await self.run_worker()
+        self.assertNotIn("private-template", str(error.exception))
+        self.assertEqual(self.db[worker.NOTIFICATIONS].documents, [])
+        self.http.assert_not_called()
 
     async def test_connection_failure_then_retry(self):
         self.http.side_effect = URLError("private network details")
@@ -1125,7 +1169,7 @@ class WorkerSettingsAndTokenTests(unittest.TestCase):
         patcher = patch.object(worker, "load_dotenv")
         patcher.start()
         self.addCleanup(patcher.stop)
-        self.environment = {}
+        self.environment = {"TESTER_SMS_TEMPLATE": SMS_TEMPLATE}
 
     def test_removed_cutoff_is_not_required_or_validated(self):
         for env in ({}, {"TESTER_SMS_START_AT": "invalid"}, {"TESTER_SMS_START_AT": "2001-01-01"}):
@@ -1136,15 +1180,67 @@ class WorkerSettingsAndTokenTests(unittest.TestCase):
 
     def test_message_template_preserves_exact_text_and_case_sensitive_example_link(self):
         link = "https://domain.com/aB7xQ2mN9pR4tY6kL8"
-        self.assertEqual(worker.TESTER_SMS_TEXT.format(link=link),
-                         "مشتری عزیز سراد\n\n"
-                         "برای تکمیل سفارش پک تستر خود، لطفاً از طریق لینک زیر اقدام فرمایید:\n\n"
-                         "https://domain.com/aB7xQ2mN9pR4tY6kL8")
+        settings = worker.WorkerSettings("preprocess_orders", sms_template=SMS_TEMPLATE)
+        self.assertEqual(worker.render_sms(settings, {"first_name": "  احمد ", "last_name": " فرجی  "}, link),
+                         "راستی اینو یادم رفتتتت\n\n"
+                         "احمد فرجی عزیز، اون عطرهایی که می‌گفتی «باید امتحان کنم» کدوما بودن؟\n\n"
+                         "تسترهای دلخواهت رو تا نیم ساعت دیگه اینجا انتخاب کن که همراه سفارشت برات بفرستیم:\n\n"
+                         "https://domain.com/aB7xQ2mN9pR4tY6kL8\n\nعطر سراد")
 
     def test_obsolete_pattern_environment_does_not_affect_worker_settings(self):
         with patch.dict(os.environ, {**self.environment, "TESTER_PATTERN_LINK_ATTRIBUTE": "invalid old value"}, clear=True):
             settings = worker.WorkerSettings.from_environment()
         self.assertFalse(hasattr(settings, "link_attribute"))
+
+    def test_window_setting_accepts_only_positive_integers_and_has_shared_duration(self):
+        for value in ("", "0", "-1", "+1", "1.5", "true", "۱", "1_0", "9" * 30):
+            with self.subTest(value=value), patch.dict(os.environ, {"TESTER_SELECTION_WINDOW_MINUTES": value}, clear=True):
+                with self.assertRaisesRegex(worker.WorkerConfigurationError, "TESTER_SELECTION_WINDOW_MINUTES"):
+                    worker.WorkerSettings.from_environment()
+        for value in (True, False, 0, -1, 1.5, "30"):
+            with self.subTest(value=value), self.assertRaises(worker.WorkerConfigurationError):
+                worker.WorkerSettings("orders", selection_window_minutes=value)
+        with patch.dict(os.environ, {"TESTER_SELECTION_WINDOW_MINUTES": "7"}, clear=True):
+            settings = worker.WorkerSettings.from_environment()
+        self.assertEqual(settings.selection_window, timedelta(minutes=7))
+
+    def test_template_rejects_unknown_traversal_conversion_and_invalid_format(self):
+        for template in ("", " ", "missing-link", "{unknown}{link}", "{link", "{link}}", "{}{link}",
+                         "{0}{link}", "{link.__class__}", "{link[0]}", "{link!r}", "{link:10}",
+                         "{link:{full_name}}", "{{link}}"):
+            with self.subTest(template=template), self.assertRaisesRegex(worker.WorkerConfigurationError, "TESTER_SMS_TEMPLATE"):
+                worker.validate_sms_template(template)
+        worker.validate_sms_template("{{literal braces}} {full_name}\n{link}")
+
+    def test_env_and_dotenv_templates_decode_newlines_without_damaging_persian(self):
+        from dotenv import load_dotenv
+        template = "{full_name} عزیز\\n\\n{link}\\nسراد"
+        with patch.dict(os.environ, {"TESTER_SMS_TEMPLATE": template}, clear=True):
+            settings = worker.WorkerSettings.from_environment()
+        self.assertEqual(settings.sms_template, "{full_name} عزیز\n\n{link}\nسراد")
+        folder = Path(__file__).resolve().parents[1] / "test-artifacts"
+        folder.mkdir(exist_ok=True)
+        path = folder / ("dotenv-template-" + uuid4().hex + ".env")
+        try:
+            path.write_text('TESTER_SELECTION_WINDOW_MINUTES=12\nTESTER_SMS_TEMPLATE="' + template + '"\n', encoding="utf-8")
+            with patch.dict(os.environ, {}, clear=True), patch.object(worker, "ENV_FILE", path), \
+                    patch.object(worker, "load_dotenv", wraps=load_dotenv):
+                settings = worker.WorkerSettings.from_environment()
+            self.assertEqual(settings.selection_window_minutes, 12)
+            self.assertEqual(settings.sms_template, "{full_name} عزیز\n\n{link}\nسراد")
+        finally:
+            path.unlink(missing_ok=True)
+
+    def test_name_fallback_uses_only_valid_trimmed_name_parts(self):
+        cases = [({}, "مشتری"), ({"first_name": "  احمد ", "last_name": " فرجی  "}, "احمد فرجی"),
+                 ({"first_name": None, "last_name": " فرجی "}, "فرجی"),
+                 ({"first_name": 12, "last_name": False}, "مشتری"),
+                 ({"first_name": "None", "last_name": "123"}, "مشتری"),
+                 ({"first_name": "bad\nname", "last_name": {}}, "مشتری"),
+                 ({"first_name": "   ", "last_name": "علی‌زاده"}, "علی‌زاده")]
+        for source, expected in cases:
+            with self.subTest(source=source):
+                self.assertEqual(worker.sms_full_name(source), expected)
 
     def test_configuration_error_is_reported_by_cli_without_secret_values(self):
         message = "TESTER_TOKEN_SECRET is incompatible with the existing Selection token hash/version; restore the original secret."

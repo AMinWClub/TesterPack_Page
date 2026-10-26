@@ -4,7 +4,7 @@ import hashlib
 import json
 import logging
 import re
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from uuid import uuid4
 
 from bson import ObjectId
@@ -17,14 +17,13 @@ from app.catalog import canonical_pid, eligible_products
 from app.services.sms import SmsValidationError
 from app.services.sms.faraz import normalize_recipient
 from app.selection_security import TOKEN_PATTERN
-from app.workers.tester_sms import TOKEN_VERSION, order_filter, worker_collections
+from app.workers.tester_sms import TOKEN_VERSION, order_filter, selection_deadline, worker_collections
 
 router = APIRouter(prefix="/api/tester/selection", tags=["selection"])
 logger = logging.getLogger(__name__)
 COUNT = 10
 ORDER_MARKER = "tester_selection_submission_id"
 ORDER_WRITTEN_AT = "tester_selection_written_at"
-SELECTION_WINDOW = timedelta(minutes=30)
 ORDER_PROJECTION = {key: 1 for key in ("_id", "state", "id", "first_name", "last_name", "phone", "recommended_products", ORDER_MARKER, ORDER_WRITTEN_AT)}
 SIMPLE = Collation(locale="simple")
 
@@ -109,7 +108,7 @@ def utc_date(value):
     return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value.astimezone(timezone.utc)
 
 
-async def link_window(collections, selection):
+async def link_window(collections, selection, settings):
     notification = await collections["notifications"].find_one(
         {"order_id": selection["order_id"], "status": "accepted"}, projection={"accepted_at": 1},
     )
@@ -117,11 +116,7 @@ async def link_window(collections, selection):
     accepted_at = utc_date(notification.get("accepted_at")) if notification else None
     if accepted_at is None or accepted_at > now:
         return {"now": now, "accepted_at": None, "expires_at": None}
-    expires_at = accepted_at + SELECTION_WINDOW
-    # A frozen intent deadline may shorten, but can never extend, this window.
-    frozen = utc_date(selection.get("expires_at"))
-    if frozen is not None:
-        expires_at = min(expires_at, frozen)
+    expires_at = selection_deadline(accepted_at, settings, selection)
     return {"now": now, "accepted_at": accepted_at, "expires_at": expires_at}
 
 
@@ -212,7 +207,7 @@ async def review_incomplete(collections, settings, selection, order, window, rea
     latest = await timed_selection(collections, {"_id": selection["_id"]})
     if latest is None:
         fail(404, "invalid_link", "سفارش در دسترس نیست.")
-    window = await link_window(collections, latest)
+    window = await link_window(collections, latest, settings)
     order = await collections["orders"].find_one(
         {"_id": selection["order_id"]}, projection=ORDER_PROJECTION, collation=SIMPLE,
     )
@@ -228,7 +223,7 @@ async def finish_intent(collections, settings, selection, order, window=None):
     """Resume the frozen intent, but never create order choices after its deadline."""
     if not intent_valid(selection):
         fail(409, "inconsistent_selection", "وضعیت انتخاب‌های این سفارش نیاز به بررسی پشتیبانی دارد.")
-    window = window or await link_window(collections, selection)
+    window = window or await link_window(collections, selection, settings)
     if not owns_order(selection, order):
         if "recommended_products" in order or ORDER_MARKER in order:
             existing_order_error()
@@ -256,7 +251,7 @@ async def finish_intent(collections, settings, selection, order, window=None):
             if "recommended_products" in order or ORDER_MARKER in order:
                 existing_order_error()
             latest = await timed_selection(collections, {"_id": selection["_id"]})
-            window = await link_window(collections, latest)
+            window = await link_window(collections, latest, settings)
             if window["expires_at"] is not None and window["now"] < window["expires_at"]:
                 require_pending(order)
             # A matched pipeline can intentionally be a no-op after expiration.
@@ -282,7 +277,7 @@ async def context(db, settings, token):
         if not owns_order(selection, order):
             fail(409, "inconsistent_selection", "وضعیت انتخاب‌های این سفارش نیاز به بررسی پشتیبانی دارد.")
         return response_context(selection, order)
-    window = await link_window(collections, selection)
+    window = await link_window(collections, selection, settings)
     if selection["status"] in {"submitting", "review_required"}:
         return await finish_intent(collections, settings, selection, order, window)
     if window["expires_at"] is not None and window["now"] >= window["expires_at"]:
@@ -311,7 +306,7 @@ async def submit(db, settings, token, pids):
         if result["selection"]["code"] == "sms_not_accepted":
             fail(409, "sms_not_accepted", "تأیید ارسال پیامک هنوز ثبت نشده است. لطفاً دوباره بررسی کنید.")
         fail(409, "selection_review_required", "وضعیت انتخاب‌های شما نیاز به بررسی پشتیبانی دارد.")
-    window = await link_window(collections, selection)
+    window = await link_window(collections, selection, settings)
     require_active(window)
     require_pending(order)
     if "recommended_products" in order or ORDER_MARKER in order:

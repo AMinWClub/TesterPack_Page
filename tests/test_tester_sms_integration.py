@@ -20,7 +20,7 @@ from pymongo.asynchronous.collection import AsyncCollection
 from app.services.sms import FarazSmsClient, FarazSmsConfig
 from app.workers import tester_sms as worker
 from tests.test_sms_faraz import FakeHttpResponse, simple_success_body
-from tests.test_tester_sms_worker import GENDER_CASES, SHIPPING_CASES
+from tests.test_tester_sms_worker import GENDER_CASES, SHIPPING_CASES, SMS_TEMPLATE
 
 
 @unittest.skipUnless(os.getenv("TESTER_RUN_MONGO_INTEGRATION") == "1", "Set TESTER_RUN_MONGO_INTEGRATION=1 for isolated MongoDB tests")
@@ -42,6 +42,7 @@ class MongoWorkerIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.settings = worker.WorkerSettings(
             "preprocess_orders", sms_enabled=True,
             selection_base_url="https://tester.example.test", token_secret="integration-secret-" + "x" * 40,
+            sms_template=SMS_TEMPLATE,
         )
         self.sms = FarazSmsClient(FarazSmsConfig(
             api_key="integration-test-key", base_url="https://provider.example.test", line_number="50001",
@@ -286,7 +287,24 @@ class MongoWorkerIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await self.notification())["attempt_count"], 2)
         texts = [call.kwargs["text"] for call in self.sms.send_simple.call_args_list]
         link = self.settings.selection_base_url + "/" + worker.token_for_order("order-1", self.settings.token_secret)
-        self.assertEqual(texts, [worker.TESTER_SMS_TEXT.format(link=link)] * 2)
+        self.assertEqual(texts, [self.settings.sms_template.format(full_name="مشتری", link=link)] * 2)
+
+    async def test_real_personalized_template_retries_identically_without_private_metadata(self):
+        await self.collections["orders"].update_one({"_id": "order-1"}, {
+            "$set": {"first_name": "  احمد ", "last_name": " فرجی  "},
+        })
+        self.http.side_effect = TimeoutError("synthetic timeout")
+        await self.run_worker()
+        await self.make_retry_due()
+        self.http.side_effect = None
+        await self.run_worker()
+        first, second = [call.args[0].data for call in self.http.call_args_list]
+        self.assertEqual(first, second)
+        link = self.settings.selection_base_url + "/" + worker.token_for_order("order-1", self.settings.token_secret)
+        self.assertEqual(json.loads(first)["text"], SMS_TEMPLATE.format(full_name="احمد فرجی", link=link))
+        saved = repr(await self.notification()) + repr(await self.collections["selections"].find_one({"order_id": "order-1"}))
+        for private in ("احمد", "فرجی", link, link.rsplit("/", 1)[1], json.loads(first)["text"]):
+            self.assertNotIn(private, saved)
         self.assertEqual(await self.collections["selections"].count_documents({}), 1)
 
     async def test_concurrent_workers_atomic_claim(self):

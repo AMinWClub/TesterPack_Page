@@ -6,6 +6,7 @@ import hashlib
 import json
 import logging
 import unittest
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, patch
 
@@ -16,7 +17,7 @@ from pymongo.errors import AutoReconnect
 from app import selections as service
 from app.selection_security import RedactSelectionAccessLog, SelectionSecurity
 from app.workers import tester_sms as worker
-from tests.test_tester_sms_worker import FakeCollection, FakeDatabase, GENDER_CASES, SimulatedCrash, matches
+from tests.test_tester_sms_worker import FakeCollection, FakeDatabase, GENDER_CASES, SMS_TEMPLATE, SimulatedCrash, matches
 
 
 class SelectionCollection(FakeCollection):
@@ -35,7 +36,8 @@ class SelectionCollection(FakeCollection):
 
 def settings():
     return worker.WorkerSettings("preprocess_orders",
-                                 selection_base_url="https://tester.example.test", token_secret="test-secret-" + "x" * 40)
+                                 selection_base_url="https://tester.example.test", token_secret="test-secret-" + "x" * 40,
+                                 sms_template=SMS_TEMPLATE)
 
 
 def order(order_id=None, **changes):
@@ -190,6 +192,61 @@ class SelectionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await self.call())[1]["selection"]["remaining_seconds"], 1)
         self.assertEqual((await self.call("submit", pids=self.pids))[0], 200)
         self.assertEqual(self.stored_order[service.ORDER_WRITTEN_AT], self.clock)
+
+    async def test_configured_window_drives_context_submit_and_release_without_intent(self):
+        self.freeze_window()
+        self.config = replace(self.config, selection_window_minutes=7)
+        self.app.state.selection_settings = self.config
+        initial = (await self.call())[1]["selection"]
+        self.assertEqual(initial["remaining_seconds"], 7 * 60)
+        self.assertEqual(initial["expires_at"], (self.accepted + timedelta(minutes=7)).isoformat())
+        await worker.create_indexes(worker.worker_collections(self.db, self.config))
+        self.clock = self.accepted + timedelta(minutes=7)
+        self.assertEqual((await self.call("submit", pids=self.pids))[0], 410)
+        result = await worker.release_resolved_tester_orders(worker.worker_collections(self.db, self.config), self.config)
+        self.assertEqual(result["released_expired"], 1)
+        self.assertEqual(self.stored_order["state"], "not_seen")
+
+    async def test_frozen_intent_deadline_survives_both_setting_increases_and_decreases(self):
+        self.freeze_window()
+        self.config = replace(self.config, selection_window_minutes=7)
+        self.app.state.selection_settings = self.config
+        with patch("app.selections.finish_intent", side_effect=SimulatedCrash):
+            with self.assertRaises(SimulatedCrash):
+                await service.submit(self.db, self.config, self.token, self.pids)
+        frozen = self.selection["expires_at"]
+        self.assertEqual(frozen, self.accepted + timedelta(minutes=7))
+        self.clock = self.accepted + timedelta(minutes=8)
+        for minutes in (60, 2):
+            self.config = replace(self.config, selection_window_minutes=minutes)
+            self.app.state.selection_settings = self.config
+            window = await service.link_window(worker.worker_collections(self.db, self.config),
+                                               {**self.selection, "_server_now": self.clock}, self.config)
+            self.assertEqual(window["expires_at"], frozen)
+        self.assertEqual((await self.call())[1]["selection"]["availability"], "review_required")
+        self.assertNotIn("recommended_products", self.stored_order)
+        await worker.create_indexes(worker.worker_collections(self.db, self.config))
+        result = await worker.release_resolved_tester_orders(worker.worker_collections(self.db, self.config), self.config)
+        self.assertEqual(result["released_expired"], 1)
+
+    async def test_on_time_receipt_recovers_after_configuration_shortens_window(self):
+        self.freeze_window()
+        self.clock += timedelta(minutes=20)
+        original = self.db[worker.SELECTIONS].find_one_and_update
+        async def fail_final(query, update, **kwargs):
+            if update.get("$set", {}).get("status") == "submitted":
+                raise AutoReconnect("synthetic receipt failure")
+            return await original(query, update, **kwargs)
+        with patch.object(self.db[worker.SELECTIONS], "find_one_and_update", side_effect=fail_final):
+            self.assertEqual((await self.call("submit", pids=self.pids))[0], 503)
+        self.config = replace(self.config, selection_window_minutes=5)
+        self.app.state.selection_settings = self.config
+        self.clock += timedelta(hours=1)
+        await worker.create_indexes(worker.worker_collections(self.db, self.config))
+        result = await worker.release_resolved_tester_orders(worker.worker_collections(self.db, self.config), self.config)
+        self.assertEqual(result["released_submitted"], 1)
+        self.assertEqual(self.stored_order["tester_gender"], "تستر انتخابی")
+        self.assertEqual((await self.call())[1]["selection"]["status"], "submitted")
 
     async def test_exact_deadline_and_later_reject_direct_submit_without_changes(self):
         self.freeze_window()

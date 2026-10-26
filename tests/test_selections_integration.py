@@ -117,7 +117,7 @@ class SelectionMongoTests(unittest.IsolatedAsyncioTestCase):
         initial_context = (await self.call())[1]["selection"]
         self.assertEqual(service.utc_date(datetime.fromisoformat(initial_context["expires_at"])), accepted_at + timedelta(minutes=30))
         self.assertEqual(initial_context["availability"], "active")
-        self.assertEqual(sms.send_simple.call_args.kwargs["text"], worker.TESTER_SMS_TEXT.format(link=self.config.selection_base_url + "/" + self.token))
+        self.assertEqual(sms.send_simple.call_args.kwargs["text"], self.config.sms_template.format(full_name="احمد فرجی", link=self.config.selection_base_url + "/" + self.token))
         self.assertEqual((await self.call())[1]["order"]["phone"], "09123456789")
         self.assertEqual((await request(self.app, "/api/tester/catalog", method="GET"))[1]["total"], 498)
         pids = list(reversed(self.pids))
@@ -312,6 +312,62 @@ class SelectionMongoTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(all(row[0] == 410 and row[1]["detail"]["code"] == "selection_expired" for row in results))
         self.assertEqual(await self.stored_order(), before_order)
         self.assertEqual(await self.selection(), before_selection)
+
+    async def test_configured_window_is_shared_by_context_submit_and_release(self):
+        self.config = replace(self.config, selection_window_minutes=7)
+        self.app.state.selection_settings = self.config
+        status, response, _ = await self.call()
+        self.assertEqual(status, 200)
+        self.assertLessEqual(response["selection"]["remaining_seconds"], 420)
+        self.assertGreater(response["selection"]["remaining_seconds"], 350)
+        now = service.utc_date((await self.db.command("hello"))["localTime"])
+        await self.db[worker.NOTIFICATIONS].update_one({"order_id": self.source_order["_id"]}, {"$set": {"accepted_at": now - timedelta(minutes=7)}})
+        self.assertEqual((await self.call("submit", pids=self.pids))[0], 410)
+        summary = await worker.release_resolved_tester_orders(worker.worker_collections(self.db, self.config), self.config)
+        self.assertEqual(summary["released_expired"], 1)
+        self.assertEqual((await self.stored_order())["state"], "not_seen")
+
+    async def test_frozen_intent_is_not_extended_when_api_and_worker_configuration_changes(self):
+        self.config = replace(self.config, selection_window_minutes=7)
+        self.app.state.selection_settings = self.config
+        with patch("app.selections.finish_intent", side_effect=SimulatedCrash):
+            with self.assertRaises(SimulatedCrash):
+                await service.submit(self.db, self.config, self.token, self.pids)
+        selection = await self.selection()
+        self.config = replace(self.config, selection_window_minutes=60)
+        self.app.state.selection_settings = self.config
+        collections = worker.worker_collections(self.db, self.config)
+        window = await service.link_window(collections, await service.timed_selection(collections, {"_id": selection["_id"]}), self.config)
+        self.assertEqual(window["expires_at"], selection["expires_at"])
+        # Owned fixture only: move the original seven-minute frozen window into
+        # the past, while the new sixty-minute setting would still allow a write.
+        now = service.utc_date((await self.db.command("hello"))["localTime"])
+        frozen = now - timedelta(seconds=1)
+        await self.db[worker.NOTIFICATIONS].update_one({"order_id": self.source_order["_id"]}, {"$set": {"accepted_at": frozen - timedelta(minutes=7)}})
+        await self.db[worker.SELECTIONS].update_one({"_id": selection["_id"]}, {"$set": {"expires_at": frozen}})
+        self.assertEqual((await self.call())[1]["selection"]["availability"], "review_required")
+        self.assertNotIn("recommended_products", await self.stored_order())
+        summary = await worker.release_resolved_tester_orders(collections, self.config)
+        self.assertEqual(summary["released_expired"], 1)
+
+    async def test_valid_written_receipt_survives_a_shorter_window_setting(self):
+        now = service.utc_date((await self.db.command("hello"))["localTime"])
+        await self.db[worker.NOTIFICATIONS].update_one({"order_id": self.source_order["_id"]}, {"$set": {"accepted_at": now - timedelta(minutes=20)}})
+        original = AsyncCollection.find_one_and_update
+        async def fail_final(collection, query, update, *args, **kwargs):
+            if collection.database.name == self.database_name and update.get("$set", {}).get("status") == "submitted":
+                raise AutoReconnect("synthetic receipt error")
+            return await original(collection, query, update, *args, **kwargs)
+        with patch.object(AsyncCollection, "find_one_and_update", new=fail_final):
+            self.assertEqual((await self.call("submit", pids=self.pids))[0], 503)
+        selection = await self.selection()
+        self.config = replace(self.config, selection_window_minutes=5)
+        self.app.state.selection_settings = self.config
+        summary = await worker.release_resolved_tester_orders(worker.worker_collections(self.db, self.config), self.config)
+        self.assertEqual(summary["released_submitted"], 1)
+        self.assertEqual((await self.stored_order())["tester_gender"], "تستر انتخابی")
+        self.assertEqual((await self.call())[1]["selection"]["status"], "submitted")
+        self.assertEqual((await self.selection())["expires_at"], selection["expires_at"])
 
     async def test_real_atomic_intent_guard_rejects_deadline_even_if_initial_check_is_stale(self):
         now = (await self.db.command("hello"))["localTime"]

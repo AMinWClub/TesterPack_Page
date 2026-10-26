@@ -250,9 +250,13 @@ Intent متفاوت `409` می‌گیرد. Retry همان ۱۰ PID با همان
 
 فرانت پیش از ثبت، فهرست ۱۰ نام را برای مرور نشان می‌دهد. هنگام ارسال، تغییر انتخاب‌ها و کلیک مجدد قفل می‌شوند. در خطای شبکه موفقیت حدس زده نمی‌شود؛ Context وضعیت واقعی را بررسی/بازیابی می‌کند. اگر آن هم در دسترس نبود، وضعیت نامشخص باقی می‌ماند و Retry فقط همان PIDهای ثابت را می‌فرستد. پس از موفقیت یا بازکردن دوباره لینک، رسید از نام‌های ذخیره‌شده نمایش داده می‌شود، حتی اگر محصول بعداً ناموجود باشد؛ کاتالوگ زنده برای نمایش رسید لازم نیست.
 
-### مهلت ۳۰ دقیقه‌ای لینک
+### مهلت قابل تنظیم لینک
 
-تنها مبنای مهلت، `accepted_at` از Notification همان سفارش با `status=accepted` است: `expires_at = accepted_at + 30 minutes`. ساخت Selection، تاریخ سفارش، بازکردن لینک و Retry ناموفق مهلت را شروع یا تمدید نمی‌کنند. Worker پس از پذیرش موفق دوباره ارسال نمی‌کند؛ `accepted_at` قبلی ثابت می‌ماند. تنظیم جدیدی در `.env` لازم نیست و مهلت ثابت است.
+تنها مبنای مهلت، `accepted_at` از Notification همان سفارش با `status=accepted` است: `expires_at = accepted_at + TESTER_SELECTION_WINDOW_MINUTES`. ساخت Selection، تاریخ سفارش، بازکردن لینک و Retry ناموفق مهلت را شروع یا تمدید نمی‌کنند. Worker پس از پذیرش موفق دوباره ارسال نمی‌کند؛ `accepted_at` قبلی ثابت می‌ماند. `TESTER_SELECTION_WINDOW_MINUTES` در `.env` خوانده می‌شود؛ پیش‌فرض `30` است و فقط عدد صحیح مثبتِ قابل نمایش در datetime پذیرفته می‌شود. Context، Submit، Recovery و Release از همان تنظیم و تابع مشترک `selection_deadline` استفاده می‌کنند. مقدار خالی، صفر، منفی، اعشاری، Boolean و ارقام غیر ASCII رد می‌شوند.
+
+`expires_at` تولیدشده توسط سرور پس از تخصیص Intent منجمد است. افزایش یا کاهش تنظیمات این تاریخ را تغییر نمی‌دهد: افزایش تنظیمات Intent منقضی را فعال نمی‌کند و کاهش تنظیمات، ثبت به‌موقع قبلی را برای Recovery و آزادسازی نامعتبر نمی‌کند. مقدار جدید فقط برای سفارش‌های بدون Deadline منجمد مبنا است. API را پس از تغییر `.env` Restart کنید و Workerهای بعدی را با همان Environment اجرا کنید.
+
+برای تغییر مهلت در استقرار، Cron را موقتاً متوقف کنید، درخواست‌های در حال اجرای نسخهٔ قبلی API را تمام و API را با تنظیمات تازه Restart کنید؛ سپس Worker را با همان Environment از سر بگیرید تا دو نسخه با تنظیمات متفاوت هم‌زمان تصمیم نگیرند.
 
 Context زمان فعلی را از MongoDB با `$$NOW` می‌گیرد و همهٔ زمان‌ها در Backend به UTC تبدیل می‌شوند؛ BSON Date بدون Timezone نیز UTC محسوب می‌شود. نبود Notification پذیرفته‌شده، نبود/نوع نامعتبر `accepted_at` یا زمان پذیرش در آینده، وضعیت مجزای `awaiting_sms` می‌دهد و ثبت را فعال نمی‌کند. API زمان انقضا را از Body مشتری نمی‌پذیرد. Predicate اتمیک هر دو نوشتن، ساعت MongoDB را دوباره بررسی می‌کند؛ عبور از Deadline هنگام خواندن محصولات یا بین Intent و نوشتن سفارش، اجازهٔ ثبت جدید نمی‌دهد. دقیقاً در لحظهٔ Deadline نیز شرط `<` برقرار نیست. [ساعت `NOW` در MongoDB](https://www.mongodb.com/docs/manual/reference/aggregation-variables/)
 
@@ -345,10 +349,12 @@ FARAZ_TIMEOUT_SECONDS=15
 
 ```python
 from app.services.sms import FarazSmsClient
-from app.workers.tester_sms import TESTER_SMS_TEXT
+from app.workers.tester_sms import WorkerSettings, render_sms
 
 client = FarazSmsClient()
-text = TESTER_SMS_TEXT.format(link="https://domain.com/aB7xQ2mN9pR4tY6kL8")
+settings = WorkerSettings.from_environment()
+text = render_sms(settings, {"first_name": " احمد ", "last_name": " فرجی "},
+                  "https://domain.com/aB7xQ2mN9pR4tY6kL8")
 payload = client.build_simple_payload(recipient="09120000000", text=text)
 
 # برای ارسال واقعی در کد مصرف‌کننده:
@@ -360,17 +366,20 @@ payload = client.build_simple_payload(recipient="09120000000", text=text)
 Payload شامل `text`، `line_number`، `recipients`، `number_format="english"` و `schedule=null` برای ارسال بدون زمان‌بندی است؛ `code` و `attributes` ندارد.
 متن باید String غیرخالی و موبایل معتبر باشد؛ متن بدون Trim یا بازنویسی در UTF-8 ارسال می‌شود.
 
-متن ثابت Worker در Constant به نام `TESTER_SMS_TEXT` در `app/workers/tester_sms.py` متمرکز است. فقط `{link}` جایگزین می‌شود؛ دو خط جدید بین بخش‌ها و نبود خط جدید اضافی در ابتدا/انتها حفظ می‌شود:
+متن Worker فقط از `TESTER_SMS_TEMPLATE` در `.env` خوانده می‌شود؛ متن پیامک در کد Production Hardcode نشده است:
 
-```text
-مشتری عزیز سراد
-
-برای تکمیل سفارش پک تستر خود، لطفاً از طریق لینک زیر اقدام فرمایید:
-
-{link}
+```dotenv
+TESTER_SELECTION_WINDOW_MINUTES=30
+TESTER_SMS_TEMPLATE="راستی اینو یادم رفتتتت\n\n{full_name} عزیز، اون عطرهایی که می‌گفتی «باید امتحان کنم» کدوما بودن؟\n\nتسترهای دلخواهت رو تا نیم ساعت دیگه اینجا انتخاب کن که همراه سفارشت برات بفرستیم:\n\n{link}\n\nعطر سراد"
 ```
 
-لینک پس از `ensure_selection` و با همان توکن ۱۸ کاراکتری Base64 URL-safe و Case-Sensitive ساخته می‌شود؛ مقدار `TESTER_SELECTION_BASE_URL=https://domain.com` لینک را به شکل `https://domain.com/<token>` می‌سازد. Selection پیش از ارسال ایجاد/بازیابی می‌شود و تمام Retryهای سفارش با همان لینک و متن انجام می‌شوند.
+`\n` هم در dotenv و هم در متغیر محیط به Line Break واقعی تبدیل می‌شود؛ متن فارسی UTF-8 و فاصله‌ها حفظ می‌شوند. فقط `{full_name}` و `{link}` مجازند و `{link}` الزامی است. نام ناشناخته، دسترسی به Attribute/Index، Placeholder موقعیتی، Conversion، Format Specifier یا آکولاد ناقص خطای واضح `TESTER_SMS_TEMPLATE` می‌دهد؛ متن قالب در خطا چاپ نمی‌شود. اعتبارسنجی قالب قبل از Claim مرحلهٔ SMS است و سفارش را `failed` دائمی نمی‌کند. مثل سایر تنظیمات ارسال، خرابی قالب مانع اجرای مستقل Release یا API بدون SMS نیست.
+
+نام و نام خانوادگی همان سفارش Trim و با یک فاصله متصل می‌شوند. بخش غیررشته‌ای، خالی، فاقد حرف، دارای کاراکتر کنترلی یا مقادیری مانند `None`/`null` نادیده گرفته می‌شود؛ یک بخش معتبر به‌تنهایی استفاده می‌شود و در نبود هر دو، `مشتری` جایگزین است. نبود نام شرط Eligible بودن نیست. متن نهایی قبل از ارسال از `build_simple_payload` فراز عبور می‌کند.
+
+لینک با `ensure_selection` و همان توکن ۱۸ کاراکتری Base64 URL-safe و Case-Sensitive ساخته می‌شود. `TESTER_SELECTION_BASE_URL=https://domain.com` لینک `https://domain.com/<token>` می‌دهد. با ثابت‌ماندن نام و تنظیمات، Retry دقیقاً همان متن شخصی‌سازی‌شده و لینک را می‌فرستد. طبق نیاز مرحلهٔ توسعه، Snapshot نام یا متن اضافه نشده است؛ تغییر نام/قالب بین تلاش‌ها در ارسال بعدی اعمال می‌شود. متن، نام شخصی‌سازی‌شده، موبایل، لینک و توکن خام در Notification/Selection یا Log ذخیره نمی‌شوند.
+
+اگر مهلت را تغییر دادید، عبارت ثابت «نیم ساعت» در قالب نمونه را هم متناسب ویرایش کنید؛ Placeholder زمان جدیدی تعریف نشده است.
 
 متد `send_simple` همزمان است؛ در کد `async` از `await run_in_threadpool(client.send_simple, ...)`
 با import از `starlette.concurrency` استفاده کنید. خطاهای سرویس از نوع `SmsServiceError` هستند.
@@ -378,7 +387,7 @@ Payload شامل `text`، `line_number`، `recipients`، `number_format="english
 هر فراخوانی کلاینت فقط یک درخواست ارسال می‌کند؛ Retry توسط Worker مدیریت می‌شود.
 HTTP موفق به‌تنهایی کافی نیست. طبق قرارداد پروژه، پاسخ `2xx` با `status="success"` و Object در `data` تنها وقتی پذیرفته می‌شود که `data.id` عدد صحیح مثبت (غیر Boolean)، `data.type="simple"` و `data.status="pending-approval"` باشد. این وضعیت به معنی پذیرش درخواست توسط فراز است، نه تضمین تحویل به گوشی؛ استعلام تحویل انجام نمی‌شود. سایر وضعیت‌های ناشناخته موفق فرض نمی‌شوند و رفتار Retry فعلی را حفظ می‌کنند. پاسخ قدیمی با `data` عددی متناهی نیز با همان رفتار قبلی پشتیبانی می‌شود.
 در پاسخ Object-based، `result.data` فقط شناسهٔ عددی `data.id` است؛ برای پاسخ عددی قدیمی همان مقدار قبلی برمی‌گردد. Worker فقط همین مقدار را در `provider_data` همراه وضعیت و HTTP Status ذخیره می‌کند؛ بدنهٔ کامل و `metadata` ذخیره یا لاگ نمی‌شوند. بدنه همچنان در `result.body` در حافظه در دسترس است و نباید لاگ شود؛ از `repr(result)` نیز حذف شده است. ویژگی `request_id` وجود ندارد.
-پذیرش معتبر، Notification را به `accepted` و سفارش را به `sms_sent=true` می‌رساند. `accepted_at` زمان UTC تأیید پذیرش توسط سیستم است؛ مقدار `schedule` پاسخ فراز هیچ نقشی در آن ندارد. مهلت انتخاب دقیقاً ۳۰ دقیقه از همین `accepted_at` است. اجرای بعدی Worker پیامک پذیرفته‌شده را تکرار نمی‌کند؛ اگر همگام‌سازی سفارش شکست خورده باشد، فقط Repair فعلی انجام می‌شود و زمان پذیرش تمدید نمی‌شود.
+پذیرش معتبر، Notification را به `accepted` و سفارش را به `sms_sent=true` می‌رساند. `accepted_at` زمان UTC تأیید پذیرش توسط سیستم است؛ مقدار `schedule` پاسخ فراز هیچ نقشی در آن ندارد. مهلت انتخاب با `TESTER_SELECTION_WINDOW_MINUTES`، پیش‌فرض ۳۰ دقیقه، از همین زمان محاسبه می‌شود. اجرای بعدی Worker پیامک پذیرفته‌شده را تکرار نمی‌کند؛ اگر همگام‌سازی سفارش شکست خورده باشد، فقط Repair فعلی انجام می‌شود و زمان پذیرش تمدید نمی‌شود.
 خطاهای HTTP، اتصال، `status="error"` و پاسخ نامعتبر با `SmsProviderError` گزارش می‌شوند.
 
 اجرای تست‌های Payload، تنظیمات و پاسخ Mock؛ تمام درخواست‌های HTTP در تست‌ها مسدود یا Mock می‌شوند:
@@ -414,6 +423,8 @@ API برای ثبت جدید همان شرط pending را در Update اتمیک
 | `TESTER_WORKER_BATCH_SIZE` | حداکثر سفارش‌های ارسال در هر اجرا؛ پیش‌فرض `50` |
 | `TESTER_SMS_ENABLED` | فقط `true` یا `false`؛ پیش‌فرض `false`، مرحلهٔ SMS فقط خواندنی |
 | `TESTER_RELEASE_ENABLED` | خالی/تنظیم‌نشده: تابع `TESTER_SMS_ENABLED`؛ `true`: آزادسازی مستقل از SMS؛ `false`: توقف آزادسازی |
+| `TESTER_SELECTION_WINDOW_MINUTES` | مهلت مشترک API/Worker از پذیرش؛ عدد صحیح مثبت، پیش‌فرض `30`؛ Intent منجمد تغییر نمی‌کند |
+| `TESTER_SMS_TEMPLATE` | فقط `{full_name}` و `{link}`، شامل `{link}`؛ هنگام ارسال الزامی |
 | `TESTER_RELEASE_BATCH_SIZE` | سقف مستقل آزادسازی هر اجرا؛ عدد صحیح مثبت، پیش‌فرض `50`؛ با `--limit` تغییر نمی‌کند |
 | `TESTER_SELECTION_BASE_URL` | فقط Origin مانند `https://tester.example.com`، بدون مسیر؛ هنگام ارسال الزامی |
 | `TESTER_TOKEN_SECRET` | Secret تصادفی و ثابت با حداقل ۳۲ بایت؛ هنگام ارسال الزامی |
@@ -479,14 +490,14 @@ python -m app.workers.tester_sms --once --limit 50
 
 هر دو مسیر به Notification دارای `status=accepted` و `accepted_at` از نوع BSON Date معتبر و غیرآینده نیاز دارند:
 
-| وضعیت انتخاب | قبل از `accepted_at + 30 minutes` | دقیقاً در Deadline و بعد از آن | تغییر `tester_gender` |
+| وضعیت انتخاب | قبل از `accepted_at + TESTER_SELECTION_WINDOW_MINUTES` | دقیقاً در Deadline و بعد از آن | تغییر `tester_gender` |
 | --- | --- | --- | --- |
 | `submitted` معتبر، نوشته‌شده پیش از Deadline و سازگار با سفارش | آزادسازی | آزادسازی با همان اولویت Submit موفق | `"تستر انتخابی"` |
 | `submitting` یا `review_required` با اثبات ثبت واقعی و به‌موقع سفارش | آزادسازی | آزادسازی با اولویت ثبت معتبر | `"تستر انتخابی"` |
 | Intent بدون ثبت معتبر، `pending` یا Selection ناموجود | بدون تغییر | آزادسازی مستقل از Selection | بدون تغییر، حتی null، خالی یا ناموجود |
 | رسید `submitted` ناقص، دیرهنگام یا ناسازگار | بدون تغییر | آزادسازی از مسیر انقضا | بدون تغییر |
 
-اثبات ثبت معتبر شامل شناسهٔ معتبر Submission، دقیقاً ۱۰ PID معتبر و یکتا با همان قواعد API، ۱۰ نام معتبر، تطابق کامل نام‌ها و Marker با سفارش و `accepted_at <= submitting_at <= tester_selection_written_at < Deadline` است. برای `submitted`، وجود `submitted_at` معتبر و برابر با زمان ثبت سفارش همچنان الزامی است؛ برای `submitting` و `review_required`، نبود این فیلد مانع نیست چون ثبت واقعی در سفارش اثبات می‌شود. Deadline منجمد Intent فقط می‌تواند مهلت را کوتاه‌تر کند. صرف وجود `recommended_products` یا Intent ناقص کافی نیست. بررسی ساختار مدارک با `$jsonSchema` در Query و سپس بررسی مجدد سفارش و Selection پیش از Update انجام می‌شود؛ Validator یا مدل جدیدی ساخته نمی‌شود. موجودی فعلی کاتالوگ دوباره مبنای رد رسید ذخیره‌شده قرار نمی‌گیرد.
+اثبات ثبت معتبر شامل شناسهٔ معتبر Submission، دقیقاً ۱۰ PID معتبر و یکتا با همان قواعد API، ۱۰ نام معتبر، تطابق کامل نام‌ها و Marker با سفارش و `accepted_at <= submitting_at <= tester_selection_written_at < Deadline` است. برای `submitted`، وجود `submitted_at` معتبر و برابر با زمان ثبت سفارش همچنان الزامی است؛ برای `submitting` و `review_required`، نبود این فیلد مانع نیست چون ثبت واقعی در سفارش اثبات می‌شود. Deadline منجمد Intent حفظ می‌شود و در نبود آن، تنظیم مشترک مبنا است. صرف وجود `recommended_products` یا Intent ناقص کافی نیست. بررسی ساختار مدارک با `$jsonSchema` در Query و سپس بررسی مجدد سفارش و Selection پیش از Update انجام می‌شود؛ Validator یا مدل جدیدی ساخته نمی‌شود. موجودی فعلی کاتالوگ دوباره مبنای رد رسید ذخیره‌شده قرار نمی‌گیرد.
 
 مسیر موفق، حتی اگر Worker چند ساعت دیر اجرا شود، یک `$set` اتمیک روی سفارش دارد:
 
@@ -498,7 +509,7 @@ python -m app.workers.tester_sms --once --limit 50
 
 هر دو Update موفق و منقضی، علاوه بر state دقیق pending، Snapshot کامل سه فیلد `recommended_products`، `tester_selection_submission_id` و `tester_selection_written_at` را اتمیک مقایسه می‌کنند؛ وجود/نبود فیلد هم جدا بررسی می‌شود تا missing و null یکی محسوب نشوند. اگر API بین Read و Update مدارک سفارش را بنویسد یا تغییر دهد، Update قدیمی Match نمی‌شود. Worker تا سه بار مدارک را از نو می‌خواند و مسیر را دوباره تعیین می‌کند؛ هرگز با تصمیم قدیمی به مسیر انقضا Fall back نمی‌کند. تغییر مداوم مدارک پس از این سقف، برای سفارش هنوز pending یک `release_errors` و لاگ عمومی ایجاد می‌کند و آزادسازی به اجرای بعد واگذار می‌شود؛ سایر سفارش‌ها متوقف نمی‌شوند. سفارشِ هم‌زمان آزادشده یا وارد تولیدشده فقط Skip می‌شود و هیچ فیلدی از آن بازنویسی نمی‌شود.
 
-مسیر انقضا فقط با `$$NOW >= accepted_at + 30 minutes` و `$set: {state: "not_seen"}` اجرا می‌شود و جنسیت را حتی در صورت نبود فیلد ایجاد نمی‌کند. اگر مدارک واقعی معتبر باشند، عبور از Deadline یا تأخیر Finalization مانع تغییر اتمیک هر دو فیلد نمی‌شود. نام شمارندهٔ `released_submitted` حفظ شده و شامل هر ثبت واقعیِ معتبر، حتی Selection نیمه‌تمام، است؛ `released_expired` فقط نبود ثبت معتبر را می‌شمارد. هر دو فقط از `modified_count` واقعی افزایش می‌یابند.
+مسیر انقضا فقط با `$$NOW >= Deadline` (مهلت منجمد یا تنظیم مشترک) و `$set: {state: "not_seen"}` اجرا می‌شود و جنسیت را حتی در صورت نبود فیلد ایجاد نمی‌کند. اگر مدارک واقعی معتبر باشند، عبور از Deadline یا تأخیر Finalization مانع تغییر اتمیک هر دو فیلد نمی‌شود. نام شمارندهٔ `released_submitted` حفظ شده و شامل هر ثبت واقعیِ معتبر، حتی Selection نیمه‌تمام، است؛ `released_expired` فقط نبود ثبت معتبر را می‌شمارد. هر دو فقط از `modified_count` واقعی افزایش می‌یابند.
 
 پس از انقضا، `submitting` و `review_required` هم سفارش را متوقف نمی‌کنند. در مسیر انقضای بدون ثبت معتبر، آزادسازی به معنی حل مشکل پشتیبانی یا تأیید انتخاب نیست: تمام Intent و Audit باقی می‌مانند، انتخاب واقعاً نوشته‌شده حفظ می‌شود و مقدار پیش‌فرضی در `recommended_products` ساخته نمی‌شود. Recovery رسیدِ نوشته‌شده پیش از Deadline و مشاهدهٔ مشتری همچنان ممکن است؛ ثبت انتخاب جدید بعد از Deadline همچنان ممنوع است.
 
@@ -506,7 +517,7 @@ Worker وضعیت Selection را Finalize یا بازنویسی نمی‌کند�
 
 اگر پیامک هیچ‌گاه Accepted نشده یا `accepted_at` معتبر ندارد، سفارش **Deadline معتبر ندارد** و به دلیل گذشت زمان از `created_at` یا تاریخ خرید آزاد نمی‌شود. تعیین تکلیف این سفارش‌ها به تصمیم کسب‌وکاری جداگانه نیاز دارد؛ Retry و گزارش `exhausted` فعلی حفظ می‌شوند.
 
-Batch آزادسازی مستقل است و ظرفیت ارسال SMS را کم نمی‌کند. Cursor از ایندکس Notificationهای پذیرفته‌شده شروع می‌شود؛ سفارش بدون Notification یا با ارسال ناموفق وارد Lookup سفارش نمی‌شود. پیش از Lookup رسید، سفارشِ هنوز در مهلت و فاقد فیلدهای لازمِ ثبت کنار گذاشته می‌شود؛ بررسی کامل رسید همچنان بعد از این فیلتر انجام می‌شود. Lookupهای ایندکس‌شده و شرط آماده‌بودن قبل از Sort/Limit اجرا می‌شوند. هر صفحه محدود است و حداکثر `TESTER_RELEASE_BATCH_SIZE` سفارش در یک اجرا واقعاً آزاد می‌شود. در خطا یا رقابت، صفحهٔ بعد با Keyset از `_id` ادامه پیدا می‌کند؛ بنابراین حتی Batch یک‌تایی و یک سفارش دائماً خطادار، سفارش‌های سالم بعدی را پشت Limit نگه نمی‌دارند. تعداد Notificationهای `accepted`، شامل سفارش‌های قبلاً آزادشده، هنوز بر هزینهٔ Query اثر دارد؛ برای هرکدام وضعیت فعلی سفارش با Lookup بررسی می‌شود. خطای Query مرحلهٔ آزادسازی نیز مانع تلاش مرحلهٔ SMS نیست. خطاهای فراز و حتی اعتبارنامهٔ نامعتبر SMS پس از اجرای آزادسازی بررسی می‌شوند.
+Batch آزادسازی مستقل است و ظرفیت ارسال SMS را کم نمی‌کند. Cursor از ایندکس Notificationهای پذیرفته‌شده شروع می‌شود؛ سفارش بدون Notification یا با ارسال ناموفق وارد Lookup سفارش نمی‌شود. Lookup ایندکس‌شدهٔ Selection قبل از کنارگذاشتن سفارشِ بدون انتخاب انجام می‌شود تا Deadline منجمد، حتی پس از تغییر تنظیمات، بررسی شود؛ اعتبارسنجی کامل مدارک و Limit پس از تعیین Deadline مؤثر هستند. Lookupهای ایندکس‌شده و شرط آماده‌بودن قبل از Sort/Limit اجرا می‌شوند. هر صفحه محدود است و حداکثر `TESTER_RELEASE_BATCH_SIZE` سفارش در یک اجرا واقعاً آزاد می‌شود. در خطا یا رقابت، صفحهٔ بعد با Keyset از `_id` ادامه پیدا می‌کند؛ بنابراین حتی Batch یک‌تایی و یک سفارش دائماً خطادار، سفارش‌های سالم بعدی را پشت Limit نگه نمی‌دارند. تعداد Notificationهای `accepted`، شامل سفارش‌های قبلاً آزادشده، هنوز بر هزینهٔ Query اثر دارد؛ برای هرکدام وضعیت فعلی سفارش با Lookup بررسی می‌شود. خطای Query مرحلهٔ آزادسازی نیز مانع تلاش مرحلهٔ SMS نیست. خطاهای فراز و حتی اعتبارنامهٔ نامعتبر SMS پس از اجرای آزادسازی بررسی می‌شوند.
 
 خروجی JSON شامل `released_submitted`، `released_expired`، `release_ready`، `release_skipped`، `release_errors` و `release_enabled` است. `release_ready` تعداد کاندیداهای خوانده‌شده است و هنگام خطا/رقابت ممکن است از سقف موفقیت بیشتر شود. `release_skipped` شامل رقابت با Worker دیگر یا تغییر شرط هنگام Update است؛ خطای عمومی بدون اطلاعات مشتری لاگ می‌شود. در اجرای بعدی سفارش موفق دوباره شمارش نمی‌شود.
 اگر `release_errors>0` باشد، مرحلهٔ SMS همچنان اجرا می‌شود، سپس خلاصهٔ JSON چاپ، تعداد خطاها بدون جزئیات محرمانه در لاگ `ERROR` ثبت و Exit Code برابر `1` می‌شود. اجرای سالم همچنان `0` و توقف ناشی از HTTP سراسری فراز همچنان `1` است؛ منطق Retry تغییری ندارد.
@@ -545,8 +556,9 @@ async def audit():
         scope["$expr"] = {"$and": [scope["$expr"], {
             "$ne": [{"$ifNull": ["$tester_gender", None]}, "تستر انتخابی"],
         }]}
-        # Require valid order evidence before Sort / Limit / Projection.
-        pipeline.insert(-3, {"$match": {"_valid_receipt": True}})
+        # Reuse the complete proof branch, including PID/name JSON Schema checks.
+        valid_proof = pipeline[-4]["$match"]["$or"][1]
+        pipeline.insert(-3, {"$match": valid_proof})
         cursor = await client[MONGODB_DB_NAME][NOTIFICATIONS].aggregate(
             pipeline, hint=RELEASE_SOURCE_INDEX, collation={"locale": "simple"},
             batchSize=50, maxTimeMS=5000,
@@ -653,6 +665,8 @@ Remove-Item Env:TESTER_RUN_RELEASE_PERFORMANCE
 
 گزارش JSON و Explain در `test-artifacts/tester-release-performance.json` و `test-artifacts/tester-release-performance-explain.json` ذخیره می‌شوند؛ این پوشه وارد Git نمی‌شود.
 
+پس از قابل تنظیم‌شدن مهلت، Benchmark بیست‌هزار سفارشی در ۲۶ اکتبر ۲۰۲۶ نیز Pass شد: میانهٔ Query برای خروجی ۵۰ سفارش `1967.81 ms` و در حالت بدون کار `1363.21 ms` بود؛ مجموع Docs/Keys به‌ترتیب `18000/18001` و `17900/17901` شد. برای رعایت Deadline منجمد، Selection سفارش‌های هنوز در مهلت هم با ایندکس خوانده می‌شود؛ این افزایش Lookup ضروری است و هیچ Collection Scan در Lookupها ایجاد نشده است. Timeout Production و ایندکس‌ها تغییر نکرده‌اند.
+
 پس از تغییر معیار ورود به state، همین Benchmark در ۲۱ اکتبر ۲۰۲۶ روی MongoDB `8.0.1` دوباره اجرا و Pass شد: میانهٔ Query برای خروجی ۵۰ سفارش `1116.35 ms`، مجموع Docs/Keys برابر `12100/12101` و Lookup ردیفی `6100` بود؛ در حالت بدون سفارش آماده، میانه `891.91 ms`، مجموع Docs/Keys برابر `12000/12001` و Lookup ردیفی `6000` بود. در هر دو حالت مبدأ فقط ۶٬۰۰۰ Notification پذیرفته‌شده را بررسی کرد و Lookupها Collection Scan نداشتند. Explain ارسال نیز در Fixture شامل ۳٬۰۰۱ سفارش، `IXSCAN` روی ایندکس جدید، ۳۱ Docs/Keys بررسی‌شده و خروجی ۱۰ سفارش را تأیید کرد. این اعداد زمان Query هستند؛ بررسی مجدد رسید و Updateهای آزادسازی جداگانه انجام می‌شوند.
 
 ## ساختار
@@ -702,3 +716,5 @@ tests/
 requirements.txt
 README.md
 ```
+
+تست‌های تنظیمات شامل تبدیل Line Break فارسی، قالب نامعتبر، نام کامل و fallback، Retry با Payload یکسان، مهلت قابل تنظیم و هماهنگی API/Worker، حفظ Deadline منجمد در افزایش/کاهش تنظیمات و Recovery ثبت به‌موقع پس از کاهش مهلت هستند.

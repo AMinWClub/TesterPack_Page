@@ -204,6 +204,18 @@ class TesterReleaseTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await self.release())["released_expired"], 1)
         self.assertEqual(source["state"], "not_seen")
 
+    async def test_configured_window_and_frozen_deadline_are_used_in_query_and_atomic_update(self):
+        self.settings = replace(self.settings, selection_window_minutes=5)
+        source, _, _ = self.add("pending", age=6)
+        self.assertEqual((await self.release())["released_expired"], 1)
+        self.assertEqual(source["state"], "not_seen")
+        source, _, selected = self.add("submitting", age=6)  # Frozen at 30 minutes, no order write yet.
+        self.assertEqual((await self.release())["release_ready"], 0)
+        selected["expires_at"] = NOW - timedelta(seconds=1)
+        self.settings = replace(self.settings, selection_window_minutes=60)
+        self.assertEqual((await self.release())["released_expired"], 1)
+        self.assertEqual(source["state"], "not_seen")
+
     async def test_expiration_ignores_selection_state_and_preserves_intent_and_choices(self):
         for status in ("pending", "submitting", "review_required", "submitted", None, "unknown"):
             self.add(status, age=31, written=status in {"submitting", "review_required"})
@@ -418,15 +430,18 @@ class TesterReleaseTests(unittest.IsolatedAsyncioTestCase):
         bad, _, _ = self.add("review_required", age=31, written=True, tester_gender=None)
         healthy, _, _ = self.add("submitted", age=31)
         incomplete, _, _ = self.add("submitting", age=31)
+        malformed, _, selected = self.add("review_required", age=31, written=True)
+        selected["selected_pids"] = ["duplicate"] * 10
         self.add("submitting", age=31, written=True)  # Pending is not a past release.
-        bad["state"] = healthy["state"] = incomplete["state"] = "not_seen"
+        bad["state"] = healthy["state"] = incomplete["state"] = malformed["state"] = "not_seen"
         healthy["tester_gender"] = "تستر انتخابی"
         before = copy.deepcopy([collection.documents for collection in self.collections.values()])
         pipeline = worker.release_pipeline(self.settings, limit=200)
         scope = next(stage["$match"] for stage in pipeline if stage.get("$match", {}).get("state") == "pending")
         scope["state"] = "not_seen"
         scope["$expr"] = {"$and": [scope["$expr"], {"$ne": [{"$ifNull": ["$tester_gender", None]}, "تستر انتخابی"]}]}
-        pipeline.insert(-3, {"$match": {"_valid_receipt": True}})
+        valid_proof = pipeline[-4]["$match"]["$or"][1]
+        pipeline.insert(-3, {"$match": valid_proof})
         cursor = await self.collections["notifications"].aggregate(pipeline)
         self.assertEqual([row["_id"] async for row in cursor], [bad["_id"]])
         self.assertEqual([collection.documents for collection in self.collections.values()], before)

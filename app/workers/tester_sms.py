@@ -15,6 +15,7 @@ import sys
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from string import Formatter
 from urllib.parse import urlsplit
 from uuid import uuid4
 
@@ -45,11 +46,6 @@ ORDER_INDEX_KEYS = [("state", 1), ("_id", 1)]
 RELEASE_SOURCE_INDEX = "tester_notification_repair"
 RELEASE_SOURCE_INDEX_KEYS = [("status", 1), ("order_synced", 1), ("accepted_at", 1)]
 RELEASE_DECISION_ATTEMPTS = 3
-TESTER_SMS_TEXT = (
-    "مشتری عزیز سراد\n\n"
-    "برای تکمیل سفارش پک تستر خود، لطفاً از طریق لینک زیر اقدام فرمایید:\n\n"
-    "{link}"
-)
 
 
 class WorkerConfigurationError(ValueError):
@@ -67,6 +63,20 @@ class WorkerSettings:
     max_attempts: int = 3
     release_enabled: bool | None = None  # Unset follows sms_enabled, preserving disabled read-only runs.
     release_batch_size: int = 50
+    selection_window_minutes: int = 30
+    sms_template: str = field(default="", repr=False)
+
+    def __post_init__(self):
+        if type(self.selection_window_minutes) is not int or self.selection_window_minutes <= 0:
+            raise WorkerConfigurationError("TESTER_SELECTION_WINDOW_MINUTES must be a positive integer.")
+        try:
+            datetime.now(timezone.utc) + self.selection_window
+        except OverflowError:
+            raise WorkerConfigurationError("TESTER_SELECTION_WINDOW_MINUTES exceeds the supported datetime range.") from None
+
+    @property
+    def selection_window(self) -> timedelta:
+        return timedelta(minutes=self.selection_window_minutes)
 
     @classmethod
     def from_environment(cls, *, require_delivery: bool = False) -> WorkerSettings:
@@ -88,7 +98,7 @@ class WorkerSettings:
             raise WorkerConfigurationError("TESTER_RELEASE_ENABLED must be true or false, or unset.")
         retry_settings = {}
         for name, default in (("TESTER_SMS_RETRY_DELAY_MINUTES", "5"), ("TESTER_SMS_MAX_ATTEMPTS", "3"),
-                              ("TESTER_RELEASE_BATCH_SIZE", "50")):
+                              ("TESTER_RELEASE_BATCH_SIZE", "50"), ("TESTER_SELECTION_WINDOW_MINUTES", "30")):
             raw = os.getenv(name, default).strip()
             if not re.fullmatch(r"[0-9]+", raw):
                 raise WorkerConfigurationError(f"{name} must be a positive integer.")
@@ -108,6 +118,8 @@ class WorkerSettings:
             max_attempts=retry_settings["TESTER_SMS_MAX_ATTEMPTS"],
             release_enabled=None if not release else release == "true",
             release_batch_size=retry_settings["TESTER_RELEASE_BATCH_SIZE"],
+            selection_window_minutes=retry_settings["TESTER_SELECTION_WINDOW_MINUTES"],
+            sms_template=os.getenv("TESTER_SMS_TEMPLATE", "").replace(r"\n", "\n"),
         )
         if require_delivery and settings.sms_enabled:
             settings.validate_delivery()
@@ -125,6 +137,52 @@ class WorkerSettings:
             raise WorkerConfigurationError("TESTER_SELECTION_BASE_URL must be an HTTP(S) origin without a path, credentials, query or fragment.")
         if len(self.token_secret.encode("utf-8")) < 32 or not self.token_secret.strip():
             raise WorkerConfigurationError("TESTER_TOKEN_SECRET must be a stable random secret of at least 32 bytes.")
+        validate_sms_template(self.sms_template)
+
+
+def validate_sms_template(template: str) -> None:
+    if not isinstance(template, str) or not template.strip():
+        raise WorkerConfigurationError("TESTER_SMS_TEMPLATE must be a non-empty message template.")
+    fields = set()
+    try:
+        parts = list(Formatter().parse(template))
+    except ValueError:
+        raise WorkerConfigurationError("TESTER_SMS_TEMPLATE has invalid placeholder syntax.") from None
+    for _, name, spec, conversion in parts:
+        if name is not None:
+            if name not in {"full_name", "link"} or spec or conversion:
+                raise WorkerConfigurationError("TESTER_SMS_TEMPLATE allows only {full_name} and {link}, without conversion or format specifiers.")
+            fields.add(name)
+    if "link" not in fields:
+        raise WorkerConfigurationError("TESTER_SMS_TEMPLATE must include the {link} placeholder.")
+
+
+def sms_full_name(order: dict) -> str:
+    parts = []
+    for key in ("first_name", "last_name"):
+        value = order.get(key)
+        if not isinstance(value, str):
+            continue
+        value = value.strip()
+        if (not value or value.casefold() in {"none", "null", "undefined"}
+                or not any(char.isalpha() for char in value)
+                or any(ord(char) < 32 or ord(char) == 127 for char in value)):
+            continue
+        parts.append(value)
+    return " ".join(parts) or "مشتری"
+
+
+def render_sms(settings: WorkerSettings, order: dict, link: str) -> str:
+    validate_sms_template(settings.sms_template)
+    return settings.sms_template.format(full_name=sms_full_name(order), link=link)
+
+
+def selection_deadline(accepted_at: datetime, settings: WorkerSettings, selection: dict) -> datetime:
+    # Server-created intent deadlines are immutable across configuration changes.
+    frozen = selection.get("expires_at")
+    if isinstance(frozen, datetime):
+        return frozen.replace(tzinfo=timezone.utc) if frozen.tzinfo is None else frozen.astimezone(timezone.utc)
+    return accepted_at + settings.selection_window
 
 
 def order_filter(settings: WorkerSettings) -> dict:
@@ -479,7 +537,7 @@ async def process_order(order: dict, collections: dict, settings: WorkerSettings
     try:
         recipient = normalize_recipient(order.get(ORDER_MOBILE_FIELD))
         link = await ensure_selection(collections["selections"], order["_id"], settings)
-        text = TESTER_SMS_TEXT.format(link=link)
+        text = render_sms(settings, order, link)
         sms.build_simple_payload(recipient=recipient, text=text)
     except (SmsValidationError, SmsConfigurationError):
         result = await notifications.update_one({
@@ -552,7 +610,7 @@ def valid_release_selection(selection: dict, order: dict, accepted_at: datetime,
 def release_pipeline(settings: WorkerSettings, *, after: dict | None = None, limit: int | None = None) -> list[dict]:
     # Lazy import avoids the existing selections -> worker import cycle and reuses
     # the receipt field names/window rather than defining another selection model.
-    from app.selections import COUNT, ORDER_MARKER, ORDER_WRITTEN_AT, SELECTION_WINDOW
+    from app.selections import COUNT, ORDER_MARKER, ORDER_WRITTEN_AT
 
     match = release_order_filter(settings)
     if after is not None:
@@ -575,9 +633,9 @@ def release_pipeline(settings: WorkerSettings, *, after: dict | None = None, lim
     submitted_schema = {
         "required": ["submitted_at"], "properties": {"submitted_at": {"bsonType": "date"}},
     }
-    receipt_deadline = {"$cond": [
+    effective_deadline = {"$cond": [
         {"$eq": [{"$type": "$_selection.expires_at"}, "date"]},
-        {"$min": ["$_deadline", "$_selection.expires_at"]}, "$_deadline",
+        "$_selection.expires_at", {"$add": ["$_accepted_at", int(settings.selection_window.total_seconds() * 1000)]},
     ]}
     return [
         # Start from accepted notifications using the existing status-prefix index.
@@ -593,24 +651,19 @@ def release_pipeline(settings: WorkerSettings, *, after: dict | None = None, lim
         {"$match": {"_order.0": {"$exists": True}}},
         {"$replaceWith": {"$mergeObjects": [{"$arrayElemAt": ["$_order", 0]}, {"_accepted_at": "$accepted_at"}]}},
         {"$match": match},
-        {"$set": {"_deadline": {"$add": ["$_accepted_at", int(SELECTION_WINDOW.total_seconds() * 1000)]}}},
+        {"$lookup": {"from": SELECTIONS, "localField": "_id", "foreignField": "order_id",
+                     "pipeline": [{"$project": {key: 1 for key in (
+                                      "status", "submission_id", "selected_pids", "selected_names", "submitting_at", "submitted_at", "expires_at",
+                                  )}}], "as": "_submitted"}},
+        {"$set": {"_selection": {"$ifNull": [{"$arrayElemAt": ["$_submitted", 0]}, {}]}}},
+        {"$set": {"_deadline": effective_deadline}},
         {"$set": {"_expired": {"$gte": ["$$NOW", "$_deadline"]}}},
-        # Before expiry, a proved order write necessarily has these fields.
-        # This is only a prefilter; the complete receipt proof below stays intact.
+        # Inspect the frozen deadline before excluding unexpired empty orders.
         {"$match": {"$or": [{"_expired": True}, {"$expr": {"$and": [
             {"$eq": [{"$type": "$recommended_products"}, "array"]},
             {"$eq": [{"$type": f"${ORDER_MARKER}"}, "string"]},
             {"$eq": [{"$type": f"${ORDER_WRITTEN_AT}"}, "date"]},
         ]}}]}},
-        {"$lookup": {"from": SELECTIONS, "localField": "_id", "foreignField": "order_id",
-                     "pipeline": [{"$match": {"$jsonSchema": receipt_schema, "$or": [
-                                      {"status": {"$in": ["submitting", "review_required"]}},
-                                      {"status": "submitted", "$jsonSchema": submitted_schema},
-                                  ]}},
-                                  {"$project": {key: 1 for key in (
-                                      "status", "submission_id", "selected_pids", "selected_names", "submitting_at", "submitted_at", "expires_at",
-                                  )}}], "as": "_submitted"}},
-        {"$set": {"_selection": {"$ifNull": [{"$arrayElemAt": ["$_submitted", 0]}, {}]}}},
         {"$set": {"_valid_receipt": {"$and": [
             {"$or": [
                 {"$eq": ["$_selection.status", "submitting"]},
@@ -623,9 +676,13 @@ def release_pipeline(settings: WorkerSettings, *, after: dict | None = None, lim
             {"$eq": [{"$type": f"${ORDER_WRITTEN_AT}"}, "date"]},
             {"$gte": ["$_selection.submitting_at", "$_accepted_at"]},
             {"$lte": ["$_selection.submitting_at", f"${ORDER_WRITTEN_AT}"]},
-            {"$lt": [f"${ORDER_WRITTEN_AT}", receipt_deadline]},
+            {"$lt": [f"${ORDER_WRITTEN_AT}", "$_deadline"]},
         ]}}},
-        {"$match": {"$or": [{"_expired": True}, {"_valid_receipt": True}]}},
+        {"$match": {"$or": [{"_expired": True}, {
+            "_valid_receipt": True, "$jsonSchema": {"properties": {"_selection": receipt_schema}},
+            "$or": [{"_selection.status": {"$in": ["submitting", "review_required"]}},
+                    {"_selection.status": "submitted", "$jsonSchema": {"properties": {"_selection": submitted_schema}}}],
+        }]}},
         {"$sort": {"_id": 1}},
         {"$limit": settings.release_batch_size if limit is None else limit},
         {"$project": {"_id": 1, "_accepted_at": 1, "_deadline": 1}},
@@ -679,6 +736,7 @@ async def release_resolved_tester_orders(collections: dict, settings: WorkerSett
                         selection = await selections.find_one(
                             {"order_id": candidate["_id"]}, collation=Collation(locale="simple"),
                         ) or {}
+                        deadline = selection_deadline(accepted_at, settings, selection)
                         valid = valid_release_selection(selection, current, accepted_at, deadline)
                         if now < accepted_at or (not valid and now < deadline):
                             summary["release_skipped"] += 1
@@ -757,7 +815,7 @@ async def run_once(db, settings: WorkerSettings, *, limit: int | None = None,
         if not re.fullmatch(r"[0-9]+", sms.config.line_number):
             raise WorkerConfigurationError("FARAZ_LINE_NUMBER must contain only digits.")
         # Validate the Simple SMS payload without generating a token or sending.
-        sms.build_simple_payload(recipient="09120000000", text=TESTER_SMS_TEXT.format(link="https://validation.invalid"))
+        sms.build_simple_payload(recipient="09120000000", text=render_sms(settings, {}, "https://validation.invalid"))
         await check_indexes(collections, require_release=False)
         summary.update(await recover_notifications(collections, match, limit, settings))
     cursor = await collections["orders"].aggregate(
