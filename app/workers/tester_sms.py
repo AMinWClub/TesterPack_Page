@@ -813,8 +813,6 @@ async def run_once(db, settings: WorkerSettings, *, limit: int | None = None,
             valid_url = False
         if not valid_url:
             raise WorkerConfigurationError("FARAZ_API_URL must be a valid HTTP(S) base URL.")
-        if not re.fullmatch(r"[0-9]+", sms.config.line_number):
-            raise WorkerConfigurationError("FARAZ_LINE_NUMBER must contain only digits.")
         # Validate the Simple SMS payload without generating a token or sending.
         sms.build_simple_payload(recipient="09120000000", text=render_sms(settings, {}, "https://validation.invalid"))
         await check_indexes(collections, require_release=False)
