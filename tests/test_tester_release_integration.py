@@ -70,6 +70,28 @@ class TesterReleaseMongoTests(unittest.IsolatedAsyncioTestCase):
     async def stored(self, source):
         return await self.collections["orders"].find_one({"_id": source["_id"]})
 
+    async def test_paid_timeout_fallback_real_dates_strings_and_dry_run(self):
+        old = self.now - timedelta(minutes=41)
+        sources = [
+            order(date_paid=old),
+            order(date_paid=old.replace(microsecond=511869).isoformat().replace("+00:00", "Z")),
+            order(date_paid=self.now - timedelta(minutes=39)),
+            order(date_paid="invalid"), order(date_paid=None),
+            order(date_paid=[old]), order(date_paid=0),
+            order(date_paid=old, state=["pending"]), order(date_paid=old, state="processing"),
+        ]
+        await self.collections["orders"].insert_many(copy.deepcopy(sources))
+        dry = await worker.release_paid_timeout_orders(self.collections, self.settings, dry_run=True)
+        self.assertEqual(dry["paid_timeout_ready"], 2)
+        self.assertEqual(dry["released_paid_timeout"], 0)
+        for source in sources:
+            self.assertEqual(await self.stored(source), source)
+        result = await worker.run_once(self.db, self.settings)
+        self.assertEqual(result["released_paid_timeout"], 2)
+        for index, source in enumerate(sources):
+            self.assertEqual(await self.stored(source), {**source, "state": "not_seen"} if index < 2 else source)
+        self.assertEqual((await worker.run_once(self.db, self.settings))["released_paid_timeout"], 0)
+
     async def test_real_state_matrix_early_submission_and_idempotence(self):
         fixtures = []
         for status in ("pending", "submitting", "review_required", "submitted", None):

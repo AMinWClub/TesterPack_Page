@@ -70,6 +70,8 @@ def expression(value, document, variables=None):
         return operands
     if operator == "$add":
         items = [evaluate(item) for item in operands]
+        if None in items:
+            return None
         if isinstance(items[0], datetime):
             return items[0] + timedelta(milliseconds=sum(items[1:]))
         return sum(items)
@@ -108,6 +110,15 @@ def expression(value, document, variables=None):
         return None if None in items else "".join(items)
     if operator == "$substrBytes":
         return evaluate(operands[0])[operands[1]:operands[1] + operands[2]]
+    if operator == "$convert":
+        item = evaluate(operands["input"])
+        if item is None:
+            return operands.get("onNull")
+        try:
+            parsed = item if isinstance(item, datetime) else datetime.fromisoformat(item.replace("Z", "+00:00"))
+            return parsed.replace(tzinfo=timezone.utc) if parsed.tzinfo is None else parsed.astimezone(timezone.utc)
+        except (TypeError, ValueError, AttributeError):
+            return operands.get("onError")
     if operator == "$dateFromString":
         try:
             return datetime.strptime(evaluate(operands["dateString"]), operands["format"]).replace(tzinfo=timezone.utc)
@@ -315,6 +326,23 @@ class FakeCollection:
         if upsert:
             self.documents.append(copy.deepcopy(update.get("$setOnInsert", {})))
         return SimpleNamespace(matched_count=0, modified_count=0)
+
+    async def count_documents(self, query, **kwargs):
+        return sum(matches(document, query) for document in self.documents)
+
+    async def update_many(self, query, update, **kwargs):
+        await asyncio.sleep(0)
+        if self.fail_update and self.fail_update(update):
+            raise AutoReconnect("simulated database failure")
+        self.db.writes += 1
+        matched = modified = 0
+        for document in self.documents:
+            if matches(document, query):
+                matched += 1
+                before = copy.deepcopy(document)
+                self.apply_update(document, update)
+                modified += int(before != document)
+        return SimpleNamespace(matched_count=matched, modified_count=modified)
 
     async def find_one_and_update(self, query, update, **kwargs):
         await asyncio.sleep(0)

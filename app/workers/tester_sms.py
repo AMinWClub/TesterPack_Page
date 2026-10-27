@@ -785,6 +785,47 @@ async def release_resolved_tester_orders(collections: dict, settings: WorkerSett
     return summary
 
 
+def paid_timeout_filter(settings: WorkerSettings) -> dict:
+    """Use MongoDB's clock; malformed/missing payment dates never expire."""
+    match = order_filter(settings)
+    exact_state = match.pop("$expr")
+    paid_at = {"$convert": {
+        "input": {"$cond": [
+            {"$or": [{"$eq": [{"$type": "$date_paid"}, kind]} for kind in ("date", "string")]},
+            "$date_paid", None,
+        ]},
+        "to": "date", "onError": None, "onNull": None,
+    }}
+    return {**match, "$expr": {"$and": [exact_state, {"$let": {
+        "vars": {"paid_at": paid_at},
+        "in": {"$and": [
+            {"$ne": ["$$paid_at", None]},
+            {"$gte": ["$$NOW", {"$add": ["$$paid_at", 40 * 60 * 1000]}]},
+        ]},
+    }}]}}
+
+
+async def release_paid_timeout_orders(collections: dict, settings: WorkerSettings, *, dry_run: bool = False) -> dict:
+    """Final fallback, independent of SMS acceptance and selection status."""
+    summary = {"released_paid_timeout": 0, "paid_timeout_ready": 0, "paid_timeout_errors": 0}
+    match = paid_timeout_filter(settings)
+    try:
+        if dry_run:
+            summary["paid_timeout_ready"] = await collections["orders"].count_documents(
+                match, collation=Collation(locale="simple"),
+            )
+        else:
+            result = await collections["orders"].update_many(
+                match, {"$set": {"state": "not_seen"}}, collation=Collation(locale="simple"),
+            )
+            summary["released_paid_timeout"] = result.modified_count
+            summary["paid_timeout_ready"] = result.matched_count
+    except PyMongoError:
+        summary["paid_timeout_errors"] = 1
+        logger.warning("Payment timeout release failed; a later run can retry.")
+    return summary
+
+
 async def run_once(db, settings: WorkerSettings, *, limit: int | None = None,
                    dry_run: bool = False, sms: FarazSmsClient | None = None) -> dict:
     limit = settings.batch_size if limit is None else limit
@@ -836,6 +877,10 @@ async def run_once(db, settings: WorkerSettings, *, limit: int | None = None,
             # If dispatch already began, a durable sending claim remains fenced.
             summary["database_errors"] += 1
             logger.warning("Order database operation failed; unfinished attempts will recover after lease expiry.")
+    summary.update({"released_paid_timeout": 0, "paid_timeout_ready": 0, "paid_timeout_errors": 0})
+    if release_enabled:
+        summary.update(await release_paid_timeout_orders(collections, settings, dry_run=dry_run))
+        summary["release_errors"] += summary["paid_timeout_errors"]
     summary["exhausted_total"] = (await exhausted_report(collections, order_filter(settings), 0))["exhausted_total"]
     summary["read_only"] = readonly and (dry_run or not release_enabled)
     return summary
