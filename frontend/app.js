@@ -265,7 +265,9 @@ function showToast(message) {
   window.clearTimeout(toastTimer);
   toastTimer = window.setTimeout(() => toast.classList.remove('show'), 2100);
 }
-
+function cleanText(text) {
+  return text.replace(/[^آ-یءؤئ۰-۹0-9 ]/g, '');
+}
 function toggleProduct(id) {
   if (!canEditSelection()) return;
   id = String(id);
@@ -274,10 +276,10 @@ function toggleProduct(id) {
   const i = selected.indexOf(id);
   if (i >= 0) {
     selected.splice(i, 1);
-    showToast(`«${item.name}» از جعبه انتخاب حذف شد`);
+    showToast(`«${cleanText(item.name).trimEnd()}» از جعبه انتخاب حذف شد`);
   } else if (selected.length < MAX_TESTERS && !unavailablePids.has(id)) {
     selected.push(id);
-    showToast(`«${item.name}» به جعبه انتخاب اضافه شد`);
+    showToast(`«${cleanText(item.name).trimEnd()}» به جعبه انتخاب اضافه شد`);
   } else {
     showToast('هر سفارش فقط شامل ۱۰ تستر است');
   }
