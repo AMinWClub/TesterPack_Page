@@ -86,11 +86,15 @@ class TesterReleaseMongoTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(dry["released_paid_timeout"], 0)
         for source in sources:
             self.assertEqual(await self.stored(source), source)
-        result = await worker.run_once(self.db, self.settings)
+        result = await worker.release_paid_timeout_orders(self.collections, self.settings)
         self.assertEqual(result["released_paid_timeout"], 2)
         for index, source in enumerate(sources):
-            self.assertEqual(await self.stored(source), {**source, "state": "not_seen"} if index < 2 else source)
-        self.assertEqual((await worker.run_once(self.db, self.settings))["released_paid_timeout"], 0)
+            stored = await self.stored(source)
+            if source["state"] == "pending":
+                self.assertIn("tester_paid_release_at", stored)
+                stored.pop("tester_paid_release_at")
+            self.assertEqual(stored, {**source, "state": "not_seen"} if index < 2 else source)
+        self.assertEqual((await worker.release_paid_timeout_orders(self.collections, self.settings))["released_paid_timeout"], 0)
 
     async def test_real_state_matrix_early_submission_and_idempotence(self):
         fixtures = []
@@ -302,7 +306,7 @@ class TesterReleaseMongoTests(unittest.IsolatedAsyncioTestCase):
                 self.assertLess(before[selection_api.ORDER_WRITTEN_AT], deadline)
                 now = selection_api.utc_date((await self.db.command("hello"))["localTime"])
                 await asyncio.sleep(max(0, (deadline - now).total_seconds()) + .1)
-                self.assertEqual((await self.release())["released_submitted"], 1)
+                self.assertEqual((await self.release())["released_submitted"], 0)  # Submit already released the order atomically.
                 self.assertEqual(await self.stored(source), {**before, "state": "not_seen", "tester_gender": "تستر انتخابی"})
             finally:
                 resume.set()

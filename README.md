@@ -220,9 +220,11 @@ PIDهای بالا نمونه‌اند؛ Body فقط `token` و ۱۰ PID رشت�
 
 بعد از اعتبارسنجی تازه، عملیات شرطی اتمیک `pending → submitting` با شرط `$$NOW < expires_at` فقط به یک درخواست اجازهٔ ثبت Intent می‌دهد. Intent شامل `submission_id`، ۱۰ `selected_pids`، ۱۰ `selected_names`، زمان‌ها و snapshot معتبر `sms_accepted_at` و `expires_at` است؛ درخواست دیگر نمی‌تواند آن را جایگزین یا تمدید کند. ساخت Intent به‌تنهایی ثبت نهایی نیست؛ موجودی رزرو یا کم نمی‌شود.
 
-سپس سفارش فقط با `_id` واقعی، شرط دقیق `state=pending`، شرط `recommended_products: {$exists: false}`، نبود Marker و بررسی `$$NOW < expires_at` نوشته می‌شود. علاوه بر Predicate اولیهٔ Query، یک Update Pipeline شرط مهلت و state را در خود `$cond` دوباره بررسی می‌کند؛ فقط در شاخهٔ مجاز، `$mergeObjects` هر سه فیلد را یکجا اضافه می‌کند و Timestamp از همان `$$NOW` ثابت Pipeline گرفته می‌شود. در لحظهٔ مساوی Deadline یا بعد از آن، خروجی `$$ROOT` است و کل سند بدون تغییر می‌ماند. نام‌ها و شناسهٔ ثبت با `$literal` درج می‌شوند. سه فیلد لازم:
+سپس سفارش فقط با `_id` واقعی، شرط دقیق `state=pending`، شرط `recommended_products: {$exists: false}`، نبود Marker و بررسی `$$NOW < expires_at` نوشته می‌شود. همان Update Pipeline، تاریخ واقعی پرداخت و شرط سخت `$$NOW < date_paid + 40 minutes` را نیز دوباره بررسی می‌کند. در شاخهٔ مجاز، وضعیت، جنسیت، نام‌ها و مدارک ثبت همگی یکجا نوشته می‌شوند؛ Timestamp از همان `$$NOW` ثابت Pipeline است. مساوی Deadline یا پس از آن، خروجی `$$ROOT` و سند بدون تغییر است. نام‌ها و شناسه با `$literal` درج می‌شوند:
 
 ```text
+state: not_seen
+tester_gender: تستر انتخابی
 recommended_products: [10 exact source names]
 tester_selection_submission_id: <same submission_id>
 tester_selection_written_at: UTC BSON Date (same pipeline $$NOW)
@@ -257,7 +259,7 @@ Intent متفاوت `409` می‌گیرد. Retry همان ۱۰ PID با همان
 
 ### مهلت قابل تنظیم لینک
 
-تنها مبنای مهلت، `accepted_at` از Notification همان سفارش با `status=accepted` است: `expires_at = accepted_at + TESTER_SELECTION_WINDOW_MINUTES`. ساخت Selection، تاریخ سفارش، بازکردن لینک و Retry ناموفق مهلت را شروع یا تمدید نمی‌کنند. Worker پس از پذیرش موفق دوباره ارسال نمی‌کند؛ `accepted_at` قبلی ثابت می‌ماند. `TESTER_SELECTION_WINDOW_MINUTES` در `.env` خوانده می‌شود؛ پیش‌فرض `30` است و فقط عدد صحیح مثبتِ قابل نمایش در datetime پذیرفته می‌شود. Context، Submit، Recovery و Release از همان تنظیم و تابع مشترک `selection_deadline` استفاده می‌کنند. مقدار خالی، صفر، منفی، اعشاری، Boolean و ارقام غیر ASCII رد می‌شوند.
+مهلت SMS از `accepted_at` معتبر Notification شروع می‌شود؛ مهلت مؤثر ثبت جدید حداقل `accepted_at + TESTER_SELECTION_WINDOW_MINUTES` و `date_paid + 40 minutes` است. ساخت Selection، بازکردن لینک و Retry ناموفق مهلت را شروع یا تمدید نمی‌کنند. مقدار پیش‌فرض پنجرهٔ SMS برابر `30` و فقط عدد صحیح مثبت معتبر است. Intent جدید همین Deadline مؤثر را منجمد می‌کند؛ تغییر تنظیمات آن را تمدید نمی‌کند. تاریخ پرداخت فعلی در خود Update اتمیک نیز بررسی می‌شود. رسیدی که قبلاً تحت Deadline معتبر خودش در سفارش نوشته شده، همچنان قابل Recovery است؛ این مسیر انتخاب تازه‌ای ایجاد نمی‌کند. تاریخ پرداخت ناموجود یا نامعتبر، ثبت جدید را با خطای کنترل‌شدهٔ `409 invalid_payment_date` متوقف می‌کند و برای SMS واجد شرایط نیست.
 
 `expires_at` تولیدشده توسط سرور پس از تخصیص Intent منجمد است. افزایش یا کاهش تنظیمات این تاریخ را تغییر نمی‌دهد: افزایش تنظیمات Intent منقضی را فعال نمی‌کند و کاهش تنظیمات، ثبت به‌موقع قبلی را برای Recovery و آزادسازی نامعتبر نمی‌کند. مقدار جدید فقط برای سفارش‌های بدون Deadline منجمد مبنا است. API را پس از تغییر `.env` Restart کنید و Workerهای بعدی را با همان Environment اجرا کنید.
 
@@ -431,6 +433,7 @@ API برای ثبت جدید همان شرط pending را در Update اتمیک
 | `TESTER_SELECTION_WINDOW_MINUTES` | مهلت مشترک API/Worker از پذیرش؛ عدد صحیح مثبت، پیش‌فرض `30`؛ Intent منجمد تغییر نمی‌کند |
 | `TESTER_SMS_TEMPLATE` | وجود هر دو `{full_name}` و `{link}` الزامی؛ Placeholder دیگری مجاز نیست؛ هنگام ارسال ضروری |
 | `TESTER_RELEASE_BATCH_SIZE` | سقف مستقل آزادسازی هر اجرا؛ عدد صحیح مثبت، پیش‌فرض `50`؛ با `--limit` تغییر نمی‌کند |
+| `TESTER_PAID_RELEASE_BATCH_SIZE` | سقف Batch فرآیند مستقل پرداخت، پیش‌فرض `50`؛ مستقل از تنظیمات SMS، با `--limit` قابل تغییر |
 | `TESTER_SELECTION_BASE_URL` | فقط Origin مانند `https://tester.example.com`، بدون مسیر؛ هنگام ارسال الزامی |
 | `TESTER_TOKEN_SECRET` | Secret تصادفی و ثابت با حداقل ۳۲ بایت؛ هنگام ارسال الزامی |
 | `TESTER_SMS_RETRY_DELAY_MINUTES` | فاصلهٔ Retry به دقیقه؛ فقط عدد صحیح مثبت، پیش‌فرض `5` |
@@ -728,8 +731,44 @@ README.md
 
 ### آزادسازی نهایی بر اساس زمان پرداخت
 
-در پایان اجرای عادی Worker، بعد از آزادسازی قبلی و پردازش SMS، تمام سفارش‌های باقی‌مانده با `state` دقیقاً برابر رشتهٔ `pending` و گذشت حداقل ۴۰ دقیقه از `date_paid` با Update شرطی به `not_seen` تغییر می‌کنند. فقط `state` تغییر می‌کند و این شرط به Notification، پذیرش پیامک یا وضعیت Selection وابسته نیست. این مرحله از `TESTER_RELEASE_ENABLED` پیروی می‌کند و محدودیت Batch پیامک روی آن اعمال نمی‌شود.
+آزادسازی پرداخت اکنون یک دستور مستقل است و در انتهای `--once` اجرا نمی‌شود. آن را با Cron جدا اجرا کنید تا خطای تنظیمات یا اجرای SMS مانع آن نشود. فقط تنظیمات دیتابیس، `TESTER_ORDERS_COLLECTION` و `TESTER_PAID_RELEASE_BATCH_SIZE` خوانده می‌شوند؛ `TESTER_SMS_ENABLED`، `TESTER_RELEASE_ENABLED`، قالب، Secret، فراز و پنجرهٔ SMS روی آن اثری ندارند. هیچ Notification یا Selection برای تصمیم آن خوانده نمی‌شود. سفارش دقیقاً `state=pending` پس از حداقل ۴۰ دقیقه پرداخت، با Update شرطی فقط به `state=not_seen` می‌رود. مدارک و `recommended_products` بازنویسی نمی‌شوند. Submit موفق پیش از این مرز، خودش وضعیت و `tester_gender="تستر انتخابی"` را همراه مدارک ثبت اتمیک می‌نویسد؛ رقابت دو مسیر اجازهٔ ثبت ناقص یا بازنویسی نمی‌دهد.
 
-مقایسه با ساعت MongoDB (`$$NOW`) انجام می‌شود. `date_paid` از نوع BSON Date یا رشتهٔ تاریخ میلادی قابل تبدیل به Date پشتیبانی می‌شود؛ Offset موجود در رشته رعایت می‌شود و رشتهٔ بدون منطقهٔ زمانی UTC محسوب می‌شود. فیلد خالی، نامعتبر، آرایه یا مقدار عددی باعث آزادسازی نمی‌شود. حالت `--dry-run` فقط تعداد را گزارش می‌دهد. Worker یک‌بار اجرا می‌شود؛ تغییر وضعیت در اولین اجرای آن پس از رسیدن به مرز ۴۰ دقیقه انجام خواهد شد.
+در نمونه‌خوانی فقط‌خواندنی ۲۸ اکتبر ۲۰۲۶، `date_paid` هفت سفارش Pending موجود رشته بود. تولیدکنندهٔ سفارش در این مخزن نیست. BSON Date و رشتهٔ قابل تبدیل توسط MongoDB پذیرفته می‌شوند؛ Offset رعایت و نبود Timezone به‌صورت UTC تفسیر می‌شود. تبدیل تاریخ در Batch محدود انجام می‌شود و نتیجه به‌صورت BSON Date در `tester_paid_release_at` ذخیره می‌شود. تاریخ ناموجود/نامعتبر، Boolean، عدد، شیء و آرایه با مقدار `false` علامت می‌خورند تا ابتدای صف را برای همیشه مسدود نکنند؛ خود سفارش آزاد نمی‌شود و شمارنده و لاگ غیرحساس دارند.
 
-خلاصهٔ JSON شمارنده‌های `released_paid_timeout`، `paid_timeout_ready` و `paid_timeout_errors` را نیز دارد. خطای دیتابیس این مرحله در `release_errors` جمع می‌شود و Exit Code اجرای Worker را ناموفق می‌کند تا اجرای بعدی دوباره تلاش کند.
+ایندکس غیر Sparse و غیر Partial زیر، هم صف Backfill فاقد فیلد/Null و هم صف موعدرسیده را پوشش می‌دهد:
+
+```text
+tester_pending_paid_release: {state: 1, tester_paid_release_at: 1, _id: 1}
+```
+
+Migration پیشنهادی، با Environment مقصد بررسی‌شده و ابتدا روی Staging:
+
+```shell
+python -m app.workers.tester_sms --create-paid-index
+python -m app.workers.tester_sms --backfill-paid-dates --dry-run --limit 500
+python -m app.workers.tester_sms --backfill-paid-dates --limit 500
+python -m app.workers.tester_sms --release-paid-timeout --dry-run --limit 100
+python -m app.workers.tester_sms --release-paid-timeout --limit 100
+```
+
+Backfill فقط فیلد مشتق را می‌نویسد و state را تغییر نمی‌دهد. آن را تا `backfill_pending=false` تکرار کنید؛ قطع اجرا یا اجرای هم‌زمان امن است و شروع مجدد از وضعیت خود اسناد ادامه پیدا می‌کند. دستور Release نیز هر بار یک Batch فاقد فیلد را نرمال می‌کند، بنابراین سفارش قدیمی یا تازهٔ بدون این فیلد از صف حذف نمی‌شود. `backfill_pending` و `release_pending` به‌معنی ادامهٔ کار در Batch بعدی‌اند؛ تا تخلیهٔ backlog، تأخیر ممکن است بیش از یک نوبت Cron باشد. هیچ `update_many` نامحدود، حذف ایندکس یا Migration خودکار روی Production انجام نمی‌شود.
+
+**قرارداد تولیدکننده:** تاریخ پرداخت باید ثابت بماند. اگر سامانهٔ خارجی آن را اصلاح می‌کند، باید در همان Update، فیلد `tester_paid_release_at` را `$unset` کند تا دوباره محاسبه شود؛ این قرارداد خارج از مخزن باید هنگام استقرار اعمال شود. اصلاح تاریخ نامعتبر نیز همین قاعده را دارد. تغییر خارج از این قرارداد ممکن است تشخیص موعد جدید را عقب بیندازد؛ مسیر ارسال و Submit همیشه تاریخ واقعی را جداگانه بررسی می‌کنند. داده‌های دارای `tester_paid_release_at=false` برای بررسی پشتیبانی با ایندکس قابل مشاهده‌اند:
+
+```javascript
+db.preprocess_orders.find(
+  {state: "pending", tester_paid_release_at: false},
+  {_id: 1, date_paid: 1}
+).hint("tester_pending_paid_release")
+```
+
+دو Cron مستقل، بدون اتصال با `&&`، تنظیم کنید؛ هر دستور One-Shot است. مسیرها را جایگزین کنید:
+
+```cron
+* * * * * cd /srv/TesterPack_Page && .venv/bin/python -m app.workers.tester_sms --release-paid-timeout >> /var/log/tester-paid-release.log 2>&1
+* * * * * cd /srv/TesterPack_Page && .venv/bin/python -m app.workers.tester_sms --once >> /var/log/tester-sms.log 2>&1
+```
+
+مرز نهایی با ساعت MongoDB (`$$NOW`) و در همان Update بررسی می‌شود. آزادسازی در اولین Batch بعد از موعد انجام می‌شود، نه یک تایمر دائمی دقیقاً در ثانیهٔ ۴۰ دقیقه. ارسال اولیه و Retry پیش از Claim و دوباره پیش از dispatch این مرز را بررسی می‌کنند. JSON شامل `normalized`، `invalid_paid_dates`، `released_paid_timeout`، `paid_timeout_ready`، `paid_timeout_errors` و دو پرچم backlog است. خطای دیتابیس Exit Code غیرصفر دارد؛ `--dry-run` هیچ داده‌ای نمی‌نویسد و فقط همان Batch محدود را گزارش می‌کند.
+
+Benchmark واقعی ۲۰٬۰۰۰ سفارش ایزوله: Queryهای Backfill و موعدرسیده هرکدام ۵۱ Docs و ۵۱ Keys، بدون COLLSCAN؛ زمان یک اجرای آن‌ها به‌ترتیب `12.92 ms` و `15.32 ms` و اجرای Batch شامل ۱۰ نرمال‌سازی و ۱۰ آزادسازی `339.81 ms` بود. این اعداد فقط همین محیط‌اند. اجرای تست: `TESTER_RUN_PAID_PERFORMANCE=1 python -m unittest tests.test_paid_release_performance -v`؛ روی PowerShell متغیر را با `$env:TESTER_RUN_PAID_PERFORMANCE='1'` تنظیم کنید. تست دیتابیس UUID مستقل می‌سازد و در پایان پاک می‌کند.

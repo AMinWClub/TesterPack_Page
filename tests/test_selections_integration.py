@@ -9,6 +9,7 @@ from datetime import datetime, timedelta, timezone
 from dataclasses import replace
 from unittest.mock import Mock, patch
 from uuid import uuid4
+from types import SimpleNamespace
 
 from fastapi import HTTPException
 from bson import ObjectId
@@ -81,6 +82,55 @@ class SelectionMongoTests(unittest.IsolatedAsyncioTestCase):
 
     async def stored_order(self):
         return await self.db.preprocess_orders.find_one({"_id": self.source_order["_id"]})
+
+    async def test_real_failsafe_races_submit_without_partial_selection(self):
+        from app.workers.paid_release import release_paid_orders
+        entered = asyncio.Event()
+        continue_write = asyncio.Event()
+        original = AsyncCollection.update_one
+
+        async def guarded(collection, query, update, *args, **kwargs):
+            if collection.database.name == self.database_name and collection.name == self.config.orders_collection and isinstance(update, list):
+                entered.set()
+                await continue_write.wait()
+            return await original(collection, query, update, *args, **kwargs)
+
+        with patch.object(AsyncCollection, "update_one", new=guarded):
+            task = asyncio.create_task(self.call("submit", pids=self.pids))
+            await asyncio.wait_for(entered.wait(), 10)
+            await self.db.preprocess_orders.update_one({"_id": self.source_order["_id"]},
+                {"$set": {"date_paid": datetime.now(timezone.utc) - timedelta(minutes=41)}})
+            result = await release_paid_orders(self.db.preprocess_orders)
+            self.assertEqual(result["released_paid_timeout"], 1)
+            continue_write.set()
+            status, _, _ = await task
+        self.assertNotEqual(status, 200)
+        saved = await self.stored_order()
+        self.assertEqual(saved["state"], "not_seen")
+        self.assertNotIn("recommended_products", saved)
+        self.assertNotIn(service.ORDER_MARKER, saved)
+
+    async def test_real_submit_atomically_releases_and_retry_is_readonly(self):
+        status, body, _ = await self.call("submit", pids=self.pids)
+        self.assertEqual((status, body["selection"]["status"]), (200, "submitted"))
+        saved = await self.stored_order()
+        self.assertEqual((saved["state"], saved["tester_gender"]), ("not_seen", "تستر انتخابی"))
+        self.assertEqual(len(saved["recommended_products"]), 10)
+        self.assertIsInstance(saved[service.ORDER_WRITTEN_AT], datetime)
+        self.assertEqual((await self.call("submit", pids=self.pids))[0], 200)
+        self.assertEqual(await self.stored_order(), saved)
+
+    async def test_standalone_paid_release_ignores_broken_sms_and_release_settings(self):
+        await self.db.preprocess_orders.update_one({"_id": self.source_order["_id"]},
+            {"$set": {"date_paid": datetime.now(timezone.utc) - timedelta(minutes=41)}})
+        args = SimpleNamespace(release_paid_timeout=True, create_paid_index=False, dry_run=False, limit=5)
+        with patch.dict(os.environ, {"MONGODB_DB_NAME": self.database_name, "TESTER_ORDERS_COLLECTION": self.config.orders_collection,
+                "TESTER_SMS_ENABLED": "broken", "TESTER_RELEASE_ENABLED": "broken",
+                "TESTER_SMS_TEMPLATE": "{bad}", "TESTER_SELECTION_WINDOW_MINUTES": "broken", "FARAZ_TIMEOUT_SECONDS": "broken"}), \
+                patch.object(worker.WorkerSettings, "from_environment", side_effect=AssertionError("No SMS config")), \
+                patch.object(worker, "FarazSmsClient", side_effect=AssertionError("No SMS client")):
+            self.assertEqual((await worker.run_command(args))["released_paid_timeout"], 1)
+        self.assertEqual((await self.stored_order())["state"], "not_seen")
 
     async def selection(self):
         return await self.db[worker.SELECTIONS].find_one({"order_id": self.source_order["_id"]})
@@ -184,7 +234,7 @@ class SelectionMongoTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await self.call())[0], 200)
         self.assertEqual((await self.call("submit", pids=self.pids))[0], 200)
         summary = await worker.release_resolved_tester_orders(worker.worker_collections(self.db, self.config), self.config)
-        self.assertEqual(summary["released_submitted"], 1)
+        self.assertEqual(summary["released_submitted"], 0)  # The successful submit already released the order.
         saved = await self.stored_order()
         self.assertEqual((saved["state"], saved["tester_gender"]), ("not_seen", "تستر انتخابی"))
         self.assertEqual((await self.call())[1]["selection"]["status"], "submitted")
@@ -390,7 +440,7 @@ class SelectionMongoTests(unittest.IsolatedAsyncioTestCase):
         self.config = replace(self.config, selection_window_minutes=5)
         self.app.state.selection_settings = self.config
         summary = await worker.release_resolved_tester_orders(worker.worker_collections(self.db, self.config), self.config)
-        self.assertEqual(summary["released_submitted"], 1)
+        self.assertEqual(summary["released_submitted"], 0)  # Order release does not depend on receipt finalization.
         self.assertEqual((await self.stored_order())["tester_gender"], "تستر انتخابی")
         self.assertEqual((await self.call())[1]["selection"]["status"], "submitted")
         self.assertEqual((await self.selection())["expires_at"], selection["expires_at"])
@@ -415,7 +465,7 @@ class SelectionMongoTests(unittest.IsolatedAsyncioTestCase):
             nonlocal reached_order_write
             if collection.database.name == self.database_name and isinstance(update, list):
                 reached_order_write = True
-                deadline = query["$expr"]["$and"][-1]["$lt"][1]
+                deadline = next(guard["$lt"][1] for guard in query["$expr"]["$and"] if "$lt" in guard)
                 server_now = service.utc_date((await self.db.command("hello"))["localTime"])
                 await asyncio.sleep(max(0, (deadline - server_now).total_seconds()) + .1)
                 # Even a successful outer match cannot bypass the pipeline's own clock guard.
@@ -447,7 +497,8 @@ class SelectionMongoTests(unittest.IsolatedAsyncioTestCase):
         self.assertLess(saved[service.ORDER_WRITTEN_AT], deadline)
         self.assertGreaterEqual(saved[service.ORDER_WRITTEN_AT], now)
         self.assertEqual({key: value for key, value in saved.items() if key not in
-                          {"recommended_products", service.ORDER_MARKER, service.ORDER_WRITTEN_AT}}, original)
+                          {"recommended_products", service.ORDER_MARKER, service.ORDER_WRITTEN_AT}},
+                         {**original, "state": "not_seen", "tester_gender": "تستر انتخابی"})
         # Equality and one millisecond late are evaluated using the actual server's NOW,
         # without a flaky client sleep or an application-clock approximation.
         for expiry in ("$$NOW", {"$subtract": ["$$NOW", 1]}):
@@ -456,6 +507,18 @@ class SelectionMongoTests(unittest.IsolatedAsyncioTestCase):
             result = await orders.update_one({"_id": fixture["_id"]}, service.order_write_pipeline(intent, {"expires_at": expiry}))
             self.assertEqual((result.matched_count, result.modified_count), (1, 0))
             self.assertEqual(await orders.find_one({"_id": fixture["_id"]}), fixture)
+        # The payment boundary is also strict, with BOTH sides evaluated at the
+        # same server NOW in one pipeline, even if the SMS window is still open.
+        fixture = order()
+        await orders.insert_one(fixture)
+        await orders.update_one({"_id": fixture["_id"]}, [
+            {"$set": {"date_paid": {"$subtract": ["$$NOW", 40 * 60 * 1000]}}},
+            *service.order_write_pipeline(intent, {"expires_at": {"$add": ["$$NOW", 30 * 60 * 1000]}}),
+        ])
+        saved = await orders.find_one({"_id": fixture["_id"]})
+        self.assertEqual(saved["state"], "pending")
+        self.assertNotIn("recommended_products", saved)
+        self.assertNotIn(service.ORDER_MARKER, saved)
 
     async def test_review_required_remains_support_state_after_expiry_or_missing_acceptance(self):
         with patch("app.selections.finish_intent", side_effect=SimulatedCrash):
@@ -511,7 +574,7 @@ class SelectionMongoTests(unittest.IsolatedAsyncioTestCase):
             {"$set": {"accepted_at": expired - timedelta(minutes=30)}})
         before = await self.stored_order()
         release = await worker.release_resolved_tester_orders(worker.worker_collections(self.db, self.config), self.config)
-        self.assertEqual((release["released_submitted"], release["released_expired"]), (1, 0))
+        self.assertEqual((release["released_submitted"], release["released_expired"]), (0, 0))
         before = {**before, "state": "not_seen", "tester_gender": "تستر انتخابی"}
         self.assertEqual(await self.stored_order(), before)
         result = await self.call()

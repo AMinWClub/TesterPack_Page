@@ -17,7 +17,8 @@ from app.catalog import canonical_pid, eligible_products
 from app.services.sms import SmsValidationError
 from app.services.sms.faraz import normalize_recipient
 from app.selection_security import TOKEN_PATTERN
-from app.workers.tester_sms import TOKEN_VERSION, order_filter, selection_deadline, sms_full_name, worker_collections
+from app.workers.tester_sms import TOKEN_VERSION, order_filter, paid_window_guard, selection_deadline, sms_full_name, worker_collections
+from app.workers.paid_release import deadline_expression
 
 router = APIRouter(prefix="/api/tester/selection", tags=["selection"])
 logger = logging.getLogger(__name__)
@@ -113,7 +114,18 @@ async def link_window(collections, selection, settings):
     accepted_at = utc_date(notification.get("accepted_at")) if notification else None
     if accepted_at is None or accepted_at > now:
         return {"now": now, "accepted_at": None, "expires_at": None}
+    order = await collections["orders"].find_one({"_id": selection["order_id"]}, projection={
+        "recommended_products": 1, ORDER_MARKER: 1, ORDER_WRITTEN_AT: 1,
+        "_paid_deadline": deadline_expression(),
+    })
+    # A receipt already written under its original deadline remains recoverable.
+    # Every NEW order write still checks the current payment date atomically.
     expires_at = selection_deadline(accepted_at, settings, selection)
+    if not order or not owns_order(selection, order):
+        paid_deadline = utc_date(order.get("_paid_deadline")) if order else None
+        if paid_deadline is None:
+            fail(409, "invalid_payment_date", "زمان پرداخت سفارش نیاز به بررسی پشتیبانی دارد.")
+        expires_at = min(expires_at, paid_deadline)
     return {"now": now, "accepted_at": accepted_at, "expires_at": expires_at}
 
 
@@ -187,8 +199,10 @@ def order_write_pipeline(selection, window):
     # Do not rely on the earlier query predicate or a separate $currentDate clock.
     # Expired commands leave the entire document unchanged, even if matched.
     return [{"$replaceWith": {"$cond": [
-        {"$and": [deadline_guard(window), {"$eq": ["$state", "pending"]}]},
+        {"$and": [deadline_guard(window), paid_window_guard(), {"$eq": ["$state", "pending"]}]},
         {"$mergeObjects": ["$$ROOT", {
+            "state": "not_seen",
+            "tester_gender": "تستر انتخابی",
             "recommended_products": {"$literal": selection["selected_names"]},
             ORDER_MARKER: {"$literal": selection["submission_id"]},
             ORDER_WRITTEN_AT: "$$NOW",
@@ -233,7 +247,7 @@ async def finish_intent(collections, settings, selection, order, window=None):
         if started is None or not window["accepted_at"] <= started < window["expires_at"]:
             return await review_incomplete(collections, settings, selection, order, window, "unverified_intent_time")
         match = eligible_order(settings)
-        match["$expr"] = {"$and": [match["$expr"], deadline_guard(window)]}
+        match["$expr"] = {"$and": [match["$expr"], deadline_guard(window), paid_window_guard()]}
         # Deadline and absence guard are evaluated by MongoDB in the SAME write.
         await collections["orders"].update_one({
             **match, "_id": selection["order_id"],

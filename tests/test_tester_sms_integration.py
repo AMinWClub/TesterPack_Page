@@ -77,6 +77,7 @@ class MongoWorkerIntegrationTests(unittest.IsolatedAsyncioTestCase):
 
     def order(self, order_id="order-1", **changes):
         return {"_id": order_id, "state": "pending", "tester_gender": "female", "date_created": "2026-10-13T20:30:00Z",
+                "date_paid": datetime.now(timezone.utc).isoformat(),
                 "phone": "09120000000", **changes}
 
     async def run_worker(self, **kwargs):
@@ -194,7 +195,7 @@ class MongoWorkerIntegrationTests(unittest.IsolatedAsyncioTestCase):
         fixtures = [
             self.order("old", date_created="2001", tester_gender=""),
             self.order("pickup", shipping_method="تحویل حضوری"), self.order("express", shipping_method="ارسال فوری"),
-            {"_id": "minimal", "state": "pending", "phone": "09120000000"},
+            {"_id": "minimal", "state": "pending", "phone": "09120000000", "date_paid": datetime.now(timezone.utc).isoformat()},
             self.order("sent", sms_sent=True),
         ]
         for index, state in enumerate((None, "production", "not_seen", ["pending"], "Pending", "pending ")):

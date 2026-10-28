@@ -177,7 +177,7 @@ def condition(value, expected, *, exists=None):
             return False
         if operator == "$gt" and (value is None or type(value) is not type(operand) or value <= operand):
             return False
-        if operator == "$lte" and (value is None or value > operand):
+        if operator == "$lte" and (value is None or type(value) is not type(operand) or value > operand):
             return False
         if operator == "$lt" and (value is None or value >= operand):
             return False
@@ -375,9 +375,13 @@ class FakeCollection:
             elif "$limit" in stage:
                 documents = documents[:stage["$limit"]]
             elif "$project" in stage:
-                included = {key for key, value in stage["$project"].items() if value}
-                documents = ([{key: document[key] for key in included if key in document} for document in documents] if included else
-                             [{key: value for key, value in document.items() if key not in stage["$project"]} for document in documents])
+                projection = stage["$project"]
+                included = {key for key, value in projection.items() if value == 1}
+                computed = {key: value for key, value in projection.items() if isinstance(value, (dict, str))}
+                documents = ([{**{key: document[key] for key in included if key in document},
+                               **{key: expression(value, document) for key, value in computed.items()}}
+                              for document in documents] if included or computed else
+                             [{key: value for key, value in document.items() if key not in projection} for document in documents])
             elif "$count" in stage:
                 documents = [{stage["$count"]: len(documents)}] if documents else []
         return FakeCursor(documents)
@@ -401,7 +405,7 @@ class SimulatedCrash(BaseException):
 
 
 def order(order_id="order-1", **changes):
-    return {"_id": order_id, "state": "pending", "tester_gender": "female", "date_created": "2026-10-13T20:30:00Z",
+    return {"_id": order_id, "state": "pending", "tester_gender": "female", "date_created": "2026-10-13T20:30:00Z", "date_paid": mongo_now(),
             "phone": "+989120000000", **changes}
 
 
@@ -465,7 +469,7 @@ class TesterWorkerTests(unittest.IsolatedAsyncioTestCase):
             order("old", date_created="2001-01-01", tester_gender=""),
             order("pickup", shipping_method="تحویل حضوری"), order("express", shipping_method="ارسال فوری"),
             order("sent", sms_sent=True), order("production", state="production"),
-            {"_id": "minimal", "state": "pending", "phone": "09120000000"},
+            {"_id": "minimal", "state": "pending", "phone": "09120000000", "date_paid": mongo_now()},
         ]
         result = await self.run_worker()
         self.assertEqual(result["accepted"], 4)
@@ -474,6 +478,36 @@ class TesterWorkerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.sms.send_simple.call_count, 4)
         await self.run_worker()
         self.assertEqual(self.sms.send_simple.call_count, 4)
+
+    async def test_payment_hard_boundary_blocks_initial_send_and_due_retry(self):
+        now = datetime.now(timezone.utc)
+        with patch("tests.test_tester_sms_worker.mongo_now", return_value=now):
+            source = self.db["preprocess_orders"].documents[0]
+            for paid in (now - timedelta(minutes=40), now - timedelta(hours=1), None, "invalid", True):
+                source["date_paid"] = paid
+                self.assertEqual((await self.run_worker())["eligible"], 0)
+            self.http.assert_not_called()
+            source["date_paid"] = now - timedelta(minutes=39)
+            self.http.side_effect = TimeoutError("synthetic timeout")
+            await self.run_worker()
+            self.make_retry_due()
+            before = copy.deepcopy(self.notification())
+            source["date_paid"] = now - timedelta(minutes=40)
+            await self.run_worker()
+            self.assertEqual(self.notification(), before)
+            self.assertEqual(self.http.call_count, 1)
+
+    async def test_payment_boundary_crossing_during_claim_prevents_dispatch(self):
+        original = worker.claim_notification
+        async def expire_after_claim(*args, **kwargs):
+            claimed = await original(*args, **kwargs)
+            self.db["preprocess_orders"].documents[0]["date_paid"] = mongo_now() - timedelta(minutes=41)
+            return claimed
+        with patch.object(worker, "claim_notification", side_effect=expire_after_claim):
+            self.assertEqual((await self.run_worker())["skipped"], 1)
+        self.http.assert_not_called()
+        self.assertEqual(self.notification()["status"], "retry_pending")
+        self.assertIsInstance(self.notification()["next_retry_at"], datetime)
 
     async def test_all_gender_types_and_purchased_product_are_ignored(self):
         documents = []
@@ -1324,6 +1358,13 @@ class WorkerSettingsAndTokenTests(unittest.TestCase):
             self.assertEqual(worker.main(), 1)
         self.assertEqual(json.loads(output.getvalue()), summary)
         self.assertIn("2 error(s)", "".join(logs.output))
+
+    def test_standalone_paid_error_returns_nonzero_without_sms_summary(self):
+        summary = {"paid_timeout_errors": 1, "released_paid_timeout": 0}
+        with patch("sys.argv", ["tester_sms", "--release-paid-timeout"]), patch("sys.stdout", io.StringIO()), \
+                patch.object(worker, "run_command", new=AsyncMock(return_value=summary)), \
+                self.assertLogs(worker.logger.name, level="ERROR"):
+            self.assertEqual(worker.main(), 1)
 
     def test_cli_success_and_existing_http_failure_keep_exit_codes(self):
         cases = [({"release_errors": 0, "accepted": 1}, 0), ({"indexes": "ready"}, 0),

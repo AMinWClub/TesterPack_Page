@@ -34,6 +34,7 @@ from app.services.sms import (
     SmsValidationError,
 )
 from app.services.sms.faraz import normalize_recipient
+from app.workers.paid_release import create_index as create_paid_index, paid_at_expression, release_paid_orders
 
 NOTIFICATIONS = "tester_sms_notifications"
 SELECTIONS = "tester_selections"
@@ -192,9 +193,18 @@ def order_filter(settings: WorkerSettings) -> dict:
     return {"state": "pending", "$expr": {"$eq": [{"$type": "$state"}, "string"]}}
 
 
+def paid_window_guard() -> dict:
+    return {"$let": {"vars": {"paid_at": paid_at_expression()}, "in": {"$and": [
+        {"$ne": ["$$paid_at", None]},
+        {"$lt": ["$$NOW", {"$add": ["$$paid_at", 40 * 60 * 1000]}]},
+    ]}}}
+
+
 def sms_order_filter(settings: WorkerSettings) -> dict:
     """Business eligibility plus the operational duplicate-send guard."""
-    return {**order_filter(settings), "sms_sent": {"$ne": True}}
+    match = order_filter(settings)
+    match["$expr"] = {"$and": [match["$expr"], paid_window_guard()]}
+    return {**match, "sms_sent": {"$ne": True}}
 
 
 def eligible_pipeline(match: dict, limit: int, max_attempts: int = 3, now: datetime | None = None) -> list[dict]:
@@ -223,6 +233,7 @@ async def create_indexes(collections: dict) -> None:
         ORDER_INDEX_KEYS, name=ORDER_INDEX,
         collation=Collation(locale="simple"),
     )
+    await create_paid_index(collections["orders"])
     await collections["notifications"].create_index("order_id", unique=True, name="tester_notification_order_unique")
     await collections["notifications"].create_index([("status", 1), ("lease_expires_at", 1)], name="tester_notification_recovery")
     await collections["notifications"].create_index([("status", 1), ("next_retry_at", 1)], name="tester_notification_retry")
@@ -555,6 +566,13 @@ async def process_order(order: dict, collections: dict, settings: WorkerSettings
     claim = await claim_notification(notifications, order["_id"], sms.config.timeout_seconds, settings.max_attempts)
     if not claim:
         return "skipped", None
+    # Claiming uses a separate document and can take time. Recheck the order,
+    # including MongoDB's clock and payment deadline, immediately before dispatch.
+    if await collections["orders"].find_one(
+        {**order_match, "_id": order["_id"]}, projection={"_id": 1}, collation=Collation(locale="simple"),
+    ) is None:
+        await schedule_retry(notifications, claim, settings, "order_no_longer_eligible")
+        return "skipped", None
     try:
         response = await send_with_lease(sms, recipient, text, notifications, claim)
     except SmsProviderError as error:
@@ -785,45 +803,8 @@ async def release_resolved_tester_orders(collections: dict, settings: WorkerSett
     return summary
 
 
-def paid_timeout_filter(settings: WorkerSettings) -> dict:
-    """Use MongoDB's clock; malformed/missing payment dates never expire."""
-    match = order_filter(settings)
-    exact_state = match.pop("$expr")
-    paid_at = {"$convert": {
-        "input": {"$cond": [
-            {"$or": [{"$eq": [{"$type": "$date_paid"}, kind]} for kind in ("date", "string")]},
-            "$date_paid", None,
-        ]},
-        "to": "date", "onError": None, "onNull": None,
-    }}
-    return {**match, "$expr": {"$and": [exact_state, {"$let": {
-        "vars": {"paid_at": paid_at},
-        "in": {"$and": [
-            {"$ne": ["$$paid_at", None]},
-            {"$gte": ["$$NOW", {"$add": ["$$paid_at", 40 * 60 * 1000]}]},
-        ]},
-    }}]}}
-
-
 async def release_paid_timeout_orders(collections: dict, settings: WorkerSettings, *, dry_run: bool = False) -> dict:
-    """Final fallback, independent of SMS acceptance and selection status."""
-    summary = {"released_paid_timeout": 0, "paid_timeout_ready": 0, "paid_timeout_errors": 0}
-    match = paid_timeout_filter(settings)
-    try:
-        if dry_run:
-            summary["paid_timeout_ready"] = await collections["orders"].count_documents(
-                match, collation=Collation(locale="simple"),
-            )
-        else:
-            result = await collections["orders"].update_many(
-                match, {"$set": {"state": "not_seen"}}, collation=Collation(locale="simple"),
-            )
-            summary["released_paid_timeout"] = result.modified_count
-            summary["paid_timeout_ready"] = result.matched_count
-    except PyMongoError:
-        summary["paid_timeout_errors"] = 1
-        logger.warning("Payment timeout release failed; a later run can retry.")
-    return summary
+    return await release_paid_orders(collections["orders"], limit=settings.release_batch_size, dry_run=dry_run)
 
 
 async def run_once(db, settings: WorkerSettings, *, limit: int | None = None,
@@ -877,16 +858,15 @@ async def run_once(db, settings: WorkerSettings, *, limit: int | None = None,
             # If dispatch already began, a durable sending claim remains fenced.
             summary["database_errors"] += 1
             logger.warning("Order database operation failed; unfinished attempts will recover after lease expiry.")
-    summary.update({"released_paid_timeout": 0, "paid_timeout_ready": 0, "paid_timeout_errors": 0})
-    if release_enabled:
-        summary.update(await release_paid_timeout_orders(collections, settings, dry_run=dry_run))
-        summary["release_errors"] += summary["paid_timeout_errors"]
     summary["exhausted_total"] = (await exhausted_report(collections, order_filter(settings), 0))["exhausted_total"]
     summary["read_only"] = readonly and (dry_run or not release_enabled)
     return summary
 
 
 async def run_command(args) -> dict:
+    if (getattr(args, "release_paid_timeout", False) or getattr(args, "create_paid_index", False)
+            or getattr(args, "backfill_paid_dates", False)):
+        return await run_paid_command(args)
     # Delivery validation belongs after release, so broken SMS credentials cannot
     # prevent already-resolved orders from leaving the selection waiting state.
     settings = WorkerSettings.from_environment()
@@ -912,35 +892,71 @@ async def run_command(args) -> dict:
         await client.close()
 
 
+async def run_paid_command(args) -> dict:
+    """Only database settings are parsed; unrelated delivery settings are ignored."""
+    load_dotenv(ENV_FILE, encoding="utf-8")
+    uri = os.getenv("MONGODB_URI", "")
+    database = os.getenv("MONGODB_DB_NAME", "")
+    collection = os.getenv("TESTER_ORDERS_COLLECTION", "preprocess_orders").strip()
+    try:
+        timeout = int(os.getenv("MONGODB_TIMEOUT_MS", "5000"))
+    except ValueError:
+        raise WorkerConfigurationError("MONGODB_TIMEOUT_MS must be a positive integer.") from None
+    if (not uri or not database or not collection or "$" in collection or "\x00" in collection or timeout <= 0
+            or collection in {NOTIFICATIONS, SELECTIONS}):
+        raise WorkerConfigurationError("Valid MongoDB settings and an orders collection are required.")
+    raw_limit = os.getenv("TESTER_PAID_RELEASE_BATCH_SIZE", "50").strip()
+    if not re.fullmatch(r"[0-9]+", raw_limit) or len(raw_limit) > 9 or int(raw_limit) <= 0:
+        raise WorkerConfigurationError("TESTER_PAID_RELEASE_BATCH_SIZE must be a positive integer.")
+    client = AsyncMongoClient(uri, serverSelectionTimeoutMS=timeout, timeoutMS=timeout, tz_aware=True)
+    try:
+        await client.admin.command("ping")
+        orders = client[database][collection].with_options(write_concern=WriteConcern(w="majority"))
+        if args.create_paid_index:
+            await create_paid_index(orders)
+            return {"paid_index": "ready"}
+        try:
+            return await release_paid_orders(orders, limit=args.limit or int(raw_limit), dry_run=args.dry_run,
+                                             normalize_only=getattr(args, "backfill_paid_dates", False))
+        except ValueError as error:
+            raise WorkerConfigurationError(str(error)) from None
+    finally:
+        await client.close()
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Process a bounded batch of tester orders; one run then exit.")
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--once", action="store_true")
     mode.add_argument("--create-indexes", action="store_true")
     mode.add_argument("--report-exhausted", action="store_true")
+    mode.add_argument("--release-paid-timeout", action="store_true")
+    mode.add_argument("--create-paid-index", action="store_true")
+    mode.add_argument("--backfill-paid-dates", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--limit", type=int)
     args = parser.parse_args()
-    if not (args.once or args.dry_run or args.create_indexes or args.report_exhausted):
-        parser.error("Choose --once, --dry-run, --create-indexes or --report-exhausted.")
-    if args.create_indexes and (args.dry_run or args.limit is not None):
+    if not (args.once or args.dry_run or args.create_indexes or args.report_exhausted or args.release_paid_timeout
+            or args.create_paid_index or args.backfill_paid_dates):
+        parser.error("Choose --once, --dry-run, --create-indexes, --report-exhausted, --release-paid-timeout, --create-paid-index or --backfill-paid-dates.")
+    if (args.create_indexes or args.create_paid_index) and (args.dry_run or args.limit is not None):
         parser.error("--create-indexes cannot be combined with --dry-run or --limit.")
     if args.limit is not None and args.limit <= 0:
         parser.error("--limit must be positive.")
     try:
         summary = asyncio.run(run_command(args))
         print(json.dumps(summary, sort_keys=True, default=str))
-        release_failed = summary.get("release_errors", 0) > 0
+        release_failed = summary.get("release_errors", 0) > 0 or summary.get("paid_timeout_errors", 0) > 0
         if release_failed:
-            logger.error("Tester order release finished with %s error(s); exiting unsuccessfully after SMS processing.",
-                         summary["release_errors"])
+            logger.error("Tester order release finished with %s error(s); exiting unsuccessfully.",
+                         summary.get("release_errors", 0) + summary.get("paid_timeout_errors", 0))
         return 1 if release_failed or summary.get("halted_http_status") else 0
     except (WorkerConfigurationError, SmsConfigurationError) as error:
         # Our configuration errors never include setting values or credentials.
         print(f"Worker configuration error: {error}", file=sys.stderr)
         return 1
     except PyMongoError:
-        print("Worker MongoDB operation failed; unfinished sends can retry after lease expiry.", file=sys.stderr)
+        print("Worker MongoDB operation failed; a later run can resume safely.", file=sys.stderr)
         return 1
 
 

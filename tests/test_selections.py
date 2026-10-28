@@ -43,6 +43,7 @@ def settings():
 def order(order_id=None, **changes):
     return {"_id": order_id or ObjectId(), "id": "OR0000087510", "first_name": "  احمد ", "last_name": " فرجی  ",
             "phone": "09123456789", "state": "pending", "tester_gender": "female", "date_created": "2026-10-14T00:00:00Z",
+            "date_paid": datetime.now(timezone.utc).isoformat(),
             "address": "must-not-leak", "payment_method": "private", "tracking_code": "private", **changes}
 
 
@@ -193,6 +194,51 @@ class SelectionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await self.call("submit", pids=self.pids))[0], 200)
         self.assertEqual(self.stored_order[service.ORDER_WRITTEN_AT], self.clock)
 
+    async def test_payment_deadline_limits_sms_window_at_exact_boundary(self):
+        self.freeze_window()
+        self.stored_order["date_paid"] = (self.clock - timedelta(minutes=35)).isoformat()
+        selection = (await self.call())[1]["selection"]
+        self.assertEqual(selection["remaining_seconds"], 300)
+        self.clock += timedelta(minutes=5)
+        self.assertEqual((await self.call())[1]["selection"]["availability"], "expired")
+        status, body, _ = await self.call("submit", pids=self.pids)
+        self.assertEqual((status, body["detail"]["code"]), (410, "selection_expired"))
+        self.assertNotIn("recommended_products", self.stored_order)
+        self.assertEqual(self.stored_order["state"], "pending")
+
+    async def test_invalid_payment_date_never_allows_new_submit(self):
+        for value in (None, "invalid", "", 0, True, [], {}):
+            self.stored_order["date_paid"] = value
+            status, body, _ = await self.call("submit", pids=self.pids)
+            self.assertEqual((status, body["detail"]["code"]), (409, "invalid_payment_date"))
+            self.assertNotIn("recommended_products", self.stored_order)
+
+    async def test_payment_guard_rechecks_actual_date_during_order_write(self):
+        self.freeze_window()
+        self.stored_order["date_paid"] = self.clock
+        original = self.db["preprocess_orders"].update_one
+        async def expire_before_write(*args, **kwargs):
+            self.stored_order["date_paid"] = self.clock - timedelta(minutes=40)
+            return await original(*args, **kwargs)
+        with patch.object(self.db["preprocess_orders"], "update_one", side_effect=expire_before_write):
+            self.assertNotEqual((await self.call("submit", pids=self.pids))[0], 200)
+        self.assertNotIn("recommended_products", self.stored_order)
+        self.assertEqual(self.stored_order["state"], "pending")
+
+    async def test_written_legacy_receipt_recovers_without_a_payment_date(self):
+        original = self.db[worker.SELECTIONS].find_one_and_update
+        async def fail_final(query, update, **kwargs):
+            if update.get("$set", {}).get("status") == "submitted":
+                raise AutoReconnect("synthetic receipt failure")
+            return await original(query, update, **kwargs)
+        with patch.object(self.db[worker.SELECTIONS], "find_one_and_update", side_effect=fail_final):
+            self.assertEqual((await self.call("submit", pids=self.pids))[0], 503)
+        self.stored_order.pop("date_paid")
+        self.stored_order["state"] = "pending"  # Simulate a written receipt from the old API.
+        saved = copy.deepcopy(self.stored_order)
+        self.assertEqual((await self.call())[1]["selection"]["status"], "submitted")
+        self.assertEqual(self.stored_order, saved)
+
     async def test_configured_window_drives_context_submit_and_release_without_intent(self):
         self.freeze_window()
         self.config = replace(self.config, selection_window_minutes=7)
@@ -244,7 +290,7 @@ class SelectionTests(unittest.IsolatedAsyncioTestCase):
         self.clock += timedelta(hours=1)
         await worker.create_indexes(worker.worker_collections(self.db, self.config))
         result = await worker.release_resolved_tester_orders(worker.worker_collections(self.db, self.config), self.config)
-        self.assertEqual(result["released_submitted"], 1)
+        self.assertEqual(result["released_submitted"], 0)  # Submit already released atomically.
         self.assertEqual(self.stored_order["tester_gender"], "تستر انتخابی")
         self.assertEqual((await self.call())[1]["selection"]["status"], "submitted")
 
@@ -559,7 +605,8 @@ class SelectionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(body["selection"]["selected_pids"], pids)
         self.assertEqual(self.selection["status"], "submitted")
         self.assertIsInstance(self.selection["order_id"], ObjectId)
-        self.assertEqual({key: value for key, value in self.stored_order.items() if key not in {"recommended_products", service.ORDER_MARKER, service.ORDER_WRITTEN_AT}}, original)
+        self.assertEqual({key: value for key, value in self.stored_order.items() if key not in {"recommended_products", service.ORDER_MARKER, service.ORDER_WRITTEN_AT}},
+                         {**original, "state": "not_seen", "tester_gender": "تستر انتخابی"})
         self.assertEqual(self.stored_order[service.ORDER_MARKER], self.selection["submission_id"])
         self.fresh_catalog.assert_awaited_once_with(self.db)
 
