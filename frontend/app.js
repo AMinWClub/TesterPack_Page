@@ -11,7 +11,7 @@ const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
 const farsiNumber = n => Number(n).toLocaleString('fa-IR');
 const selected = [];
 let activeFilter = 'all';
-let activeSeason = 'all';
+const activeSeasons = new Set();
 const activeAccords = new Set();
 let accordOptions = [];
 const SEASON_LABELS = { spring: 'بهار', summer: 'تابستان', autumn: 'پاییز', winter: 'زمستان' };
@@ -134,6 +134,7 @@ async function loadCatalog() {
     const keys = new Set(products.flatMap(product => product.accordKeys));
     accordOptions = [...keys].map(key => ({ key, label: typeof data.accordLabels?.[key] === 'string' ? data.accordLabels[key] : key }))
       .sort((a, b) => a.label.localeCompare(b.label, 'fa'));
+    renderSeasonOptions();
     renderAccordOptions();
     showCatalogState(products.length ? 'ready' : 'empty');
     renderCatalog();
@@ -182,7 +183,7 @@ function renderCatalog(reset = true) {
   const compact = normalized.replaceAll(' ', '');
   const tokens = normalized.split(' ').filter(Boolean);
   filteredProducts = PERFUMES.filter(p => (activeFilter === 'all' || p.genderGroup === activeFilter)
-    && (activeSeason === 'all' || p.seasonKeys.includes(activeSeason))
+    && (!activeSeasons.size || p.seasonKeys.some(key => activeSeasons.has(key)))
     && (!activeAccords.size || p.accordKeys.some(key => activeAccords.has(key)))
     && (!normalized || tokens.every(token => p.searchText.includes(token)) || p.searchCompact.includes(compact)));
   $('#productGrid').innerHTML = '';
@@ -201,28 +202,34 @@ function renderCatalog(reset = true) {
 function renderAccordOptions() {
   const search = normalizeSearch($('#accordSearch').value);
   const options = accordOptions.filter(option => normalizeSearch(`${option.label} ${option.key}`).includes(search));
-  $('#accordOptions').innerHTML = options.map(({ key, label }) => `<label class="accord-option"><input type="checkbox" value="${escapeHtml(key)}" ${activeAccords.has(key) ? 'checked' : ''} /><span>${escapeHtml(label)}</span></label>`).join('');
+  $('#accordOptions').innerHTML = options.map(({ key, label }) => `<label class="accord-option"><input type="checkbox" value="${escapeHtml(key)}" ${activeAccords.has(key) ? 'checked' : ''} /><span>${escapeHtml(label)} <small class="accord-original" dir="ltr">(${escapeHtml(key)})</small></span></label>`).join('');
   $('#accordEmpty').hidden = options.length > 0;
+}
+
+function renderSeasonOptions() {
+  $$('#seasonOptions input').forEach(input => { input.checked = activeSeasons.has(input.value); });
+  $('#seasonFilterCount').textContent = activeSeasons.size ? farsiNumber(activeSeasons.size) : '';
 }
 
 function renderActiveFilters() {
   const tags = [];
   if (query) tags.push(['query', '', `جست‌وجو: ${query}`]);
   if (activeFilter !== 'all') tags.push(['gender', '', activeFilter]);
-  if (activeSeason !== 'all') tags.push(['season', '', SEASON_LABELS[activeSeason]]);
+  activeSeasons.forEach(key => tags.push(['season', key, SEASON_LABELS[key] || key]));
   activeAccords.forEach(key => tags.push(['accord', key, accordOptions.find(option => option.key === key)?.label || key]));
   $('#activeCatalogFilters').hidden = tags.length === 0;
   $('#activeFilterTags').innerHTML = tags.map(([group, key, label]) => `<button type="button" class="active-filter-tag" data-clear-group="${group}" data-clear-key="${escapeHtml(key)}" aria-label="حذف فیلتر ${escapeHtml(label)}">${escapeHtml(label)} <span aria-hidden="true">×</span></button>`).join('');
-  $('#seasonFilter').value = activeSeason;
+  renderSeasonOptions();
   $('#accordFilterCount').textContent = activeAccords.size ? farsiNumber(activeAccords.size) : '';
   $$('#accordOptions input').forEach(input => { input.checked = activeAccords.has(input.value); });
 }
 
 function resetCatalogFilters() {
-  activeFilter = 'all'; activeSeason = 'all'; activeAccords.clear(); query = '';
+  activeFilter = 'all'; activeSeasons.clear(); activeAccords.clear(); query = '';
   $('#searchInput').value = ''; $('#accordSearch').value = '';
+  $('#seasonFilter').open = false;
   $('#accordFilter').open = false;
-  renderAccordOptions(); renderActiveFilters(); renderCatalog();
+  renderSeasonOptions(); renderAccordOptions(); renderActiveFilters(); renderCatalog();
 }
 
 function selectedRowTemplate(item) {
@@ -276,10 +283,10 @@ function toggleProduct(id) {
   const i = selected.indexOf(id);
   if (i >= 0) {
     selected.splice(i, 1);
-    showToast(`«${cleanText(item.name).trimEnd()}» از جعبه انتخاب حذف شد`);
+    showToast(`«${cleanText(item.name).trimEnd()}» از جعبه انتخاب حذف شد.`);
   } else if (selected.length < MAX_TESTERS && !unavailablePids.has(id)) {
     selected.push(id);
-    showToast(`«${cleanText(item.name).trimEnd()}» به جعبه انتخاب اضافه شد`);
+    showToast(`«${cleanText(item.name).trimEnd()}» به جعبه انتخاب اضافه شد.`);
   } else {
     showToast('هر سفارش فقط شامل ۱۰ تستر است');
   }
@@ -302,7 +309,7 @@ function accordsTemplate(accords) {
     const strength = Number(accord.strength);
     const color = /^#(?:[0-9a-f]{3}|[0-9a-f]{6})$/i.test(accord.color) ? accord.color : '#c9a961';
     return `<li class="pd-accord" style="--strength:${Math.min(100, strength)}%;--accord-color:${color}">
-      <span>${escapeHtml(accord.name)}</span><small>${farsiNumber(strength)}٪</small>
+      <span class="pd-accord-name">${escapeHtml(accord.name)} <small class="accord-original" dir="ltr">(${escapeHtml(accord.originalName || accord.name)})</small></span><small class="pd-accord-strength">${farsiNumber(strength)}٪</small>
     </li>`;
   }).join('')}</ul>`;
 }
@@ -583,7 +590,12 @@ $('#filters').addEventListener('click', e => {
   activeFilter = button.dataset.filter;
   renderCatalog();
 });
-$('#seasonFilter').addEventListener('change', e => { activeSeason = e.target.value; renderCatalog(); });
+$('#seasonOptions').addEventListener('change', e => {
+  const input = e.target.closest('input[type="checkbox"]');
+  if (!input) return;
+  input.checked ? activeSeasons.add(input.value) : activeSeasons.delete(input.value);
+  renderCatalog();
+});
 $('#accordSearch').addEventListener('input', renderAccordOptions);
 $('#accordOptions').addEventListener('change', e => {
   const input = e.target.closest('input[type="checkbox"]');
@@ -596,16 +608,22 @@ $('#activeFilterTags').addEventListener('click', e => {
   if (!button) return;
   if (button.dataset.clearGroup === 'query') { query = ''; $('#searchInput').value = ''; }
   if (button.dataset.clearGroup === 'gender') activeFilter = 'all';
-  if (button.dataset.clearGroup === 'season') activeSeason = 'all';
+  if (button.dataset.clearGroup === 'season') activeSeasons.delete(button.dataset.clearKey);
   if (button.dataset.clearGroup === 'accord') activeAccords.delete(button.dataset.clearKey);
   renderCatalog();
 });
 $('#resetFilters').addEventListener('click', resetCatalogFilters);
 $('#clearAllFilters').addEventListener('click', resetCatalogFilters);
-document.addEventListener('click', e => { if (!$('#accordFilter').contains(e.target)) $('#accordFilter').open = false; });
-$('#accordFilter').addEventListener('keydown', e => {
-  if (e.key === 'Escape') { $('#accordFilter').open = false; $('#accordFilter summary').focus(); }
+document.addEventListener('click', e => {
+  if (!$('#accordFilter').contains(e.target)) $('#accordFilter').open = false;
+  if (!$('#seasonFilter').contains(e.target)) $('#seasonFilter').open = false;
 });
+$$('#accordFilter, #seasonFilter').forEach(filter => filter.addEventListener('keydown', e => {
+  if (e.key === 'Escape') {
+    filter.open = false;
+    $('summary', filter).focus();
+  }
+}));
 $('#headerCount').addEventListener('click', () => {
   if (window.matchMedia('(max-width: 940px)').matches) openDrawer();
   else $('#selectionPanel').scrollIntoView({behavior:'smooth',block:'center'});

@@ -63,8 +63,9 @@
   justify-content: space-between; align-items: center; padding: 6px 12px; gap: 10px; font-size: 12px;
 }
 .pd-accord::before { content: ""; position: absolute; inset: 0 0 0 auto; width: var(--strength); background: var(--accord-color); opacity: .28; z-index: -1; }
-.pd-accord span { min-width: 0; overflow-wrap: anywhere; font-weight: 700; }
-.pd-accord small { flex-shrink: 0; font-size: 11px; color: #54617a; }
+.pd-accord-name { min-width: 0; overflow-wrap: anywhere; font-weight: 700; }
+.pd-accord-name .accord-original { font-size: 10px; font-weight: 400; color: #8c93a0; }
+.pd-accord-strength { flex-shrink: 0; font-size: 11px; color: #54617a; }
 .pd-notes { display: grid; gap: 12px; margin-top: 14px; }
 .pd-note-group { border-top: 1px solid #eae5db; padding-top: 12px; }
 .pd-note-group h4 { font-size: 11px; font-weight: 700; color: #7c6b4b; margin: 0 0 8px; }

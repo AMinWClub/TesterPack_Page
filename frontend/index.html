@@ -16,11 +16,11 @@
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Vazirmatn:wght@300;400;500;600;700;800;900&display=swap"
     rel="stylesheet" />
-  <link rel="stylesheet" href="/frontend/styles.css?v=1" />
-  <link rel="stylesheet" href="/frontend/perfume-details.css?v=1" />
-  <link rel="stylesheet" href="/frontend/catalog.css?v=1" />
-  <link rel="stylesheet" href="/frontend/selection.css?v=1" />
-  <script src="/frontend/app.js?v=1" defer></script>
+  <link rel="stylesheet" href="/frontend/styles.css?v=2" />
+  <link rel="stylesheet" href="/frontend/perfume-details.css?v=2" />
+  <link rel="stylesheet" href="/frontend/catalog.css?v=2" />
+  <link rel="stylesheet" href="/frontend/selection.css?v=2" />
+  <script src="/frontend/app.js?v=2" defer></script>
 </head>
 
 <body>
@@ -44,6 +44,9 @@
     </symbol>
     <symbol id="i-arrow" viewBox="0 0 24 24">
       <path d="M20 12H4m7-7-7 7 7 7" />
+    </symbol>
+    <symbol id="i-chevron-down" viewBox="0 0 24 24">
+      <path d="m6 9 6 6 6-6" />
     </symbol>
     <symbol id="i-shield" viewBox="0 0 24 24">
       <path d="M12 2 20 5v6c0 5-3.2 8.7-8 11-4.8-2.3-8-6-8-11V5l8-3Z" />
@@ -165,15 +168,19 @@
               <button class="pill" type="button" data-filter="مردانه" aria-pressed="false">مردانه</button>
               <button class="pill" type="button" data-filter="یونیسکس" aria-pressed="false">یونیسکس</button>
             </div>
-            <label class="season-filter" for="seasonFilter"><span>فصل استفاده</span>
-              <select id="seasonFilter">
-                <option value="all">همه فصل‌ها</option>
-                <option value="spring">بهار</option><option value="summer">تابستان</option>
-                <option value="autumn">پاییز</option><option value="winter">زمستان</option>
-              </select>
-            </label>
+            <details class="season-filter" id="seasonFilter">
+              <summary><span>فصل استفاده <span id="seasonFilterCount"></span></span><svg class="filter-chevron" aria-hidden="true"><use href="#i-chevron-down" /></svg></summary>
+              <div class="season-picker">
+                <div class="season-options" id="seasonOptions" role="group" aria-label="انتخاب چند فصل">
+                  <label class="season-option"><input type="checkbox" value="spring" /><span>بهار <small class="accord-original" dir="ltr">(spring)</small></span></label>
+                  <label class="season-option"><input type="checkbox" value="summer" /><span>تابستان <small class="accord-original" dir="ltr">(summer)</small></span></label>
+                  <label class="season-option"><input type="checkbox" value="autumn" /><span>پاییز <small class="accord-original" dir="ltr">(autumn)</small></span></label>
+                  <label class="season-option"><input type="checkbox" value="winter" /><span>زمستان <small class="accord-original" dir="ltr">(winter)</small></span></label>
+                </div>
+              </div>
+            </details>
             <details class="accord-filter" id="accordFilter">
-              <summary>رایحه‌های اصلی <span id="accordFilterCount"></span></summary>
+              <summary><span>رایحه‌های اصلی <span id="accordFilterCount"></span></span><svg class="filter-chevron" aria-hidden="true"><use href="#i-chevron-down" /></svg></summary>
               <div class="accord-picker">
                 <label class="sr-only" for="accordSearch">جست‌وجوی رایحه</label>
                 <input id="accordSearch" type="search" autocomplete="off" placeholder="جست‌وجوی رایحه" />
