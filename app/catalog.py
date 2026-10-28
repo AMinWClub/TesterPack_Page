@@ -21,6 +21,7 @@ router = APIRouter(prefix="/api/tester", tags=["catalog"])
 CATALOG_LIMIT = 498
 PRODUCT_FILTER = {
     "vol_idx": {"$exists": True},
+    "vol_idx": {"$lte": 500},
     "name": {"$not": {"$regex": "شخصی"}},
     "$expr": {"$gt": [{"$size": {"$filter": {
         "input": {"$objectToArray": {"$ifNull": ["$variations", {}]}},
