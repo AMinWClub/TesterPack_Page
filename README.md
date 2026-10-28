@@ -408,6 +408,36 @@ HTTP موفق به‌تنهایی کافی نیست. طبق قرارداد پر�
 python -m unittest tests.test_sms_faraz tests.test_tester_sms_worker -v
 ```
 
+## کوتاه‌کنندهٔ اختیاری لینک با Zaya
+
+ماژول مستقل `app/services/url_shortener/zaya.py` بعد از `ensure_selection` و پیش از `render_sms` لینک نهایی پیامک را انتخاب می‌کند. پیش‌فرض `ZAYA_ENABLED=false` است: لینک اصلی ارسال می‌شود و در اجرای معمول هیچ درخواست Zaya، بررسی ایندکس یا خواندن/نوشتن `tester_sms_url` انجام نمی‌شود. Dry Run و حالت SMS غیرفعال نیز کوتاه‌کننده را اجرا نمی‌کنند. Paid Release مستقل هیچ تنظیم Zaya را نمی‌خواند.
+
+```dotenv
+ZAYA_ENABLED=false
+ZAYA_API_URL=https://zaya.io/api/v1/links
+ZAYA_TEAM_ID=463
+ZAYA_BEARER_TOKEN=
+ZAYA_TIMEOUT_SECONDS=5
+```
+
+برای فعال‌سازی، Token را تنظیم، ایندکس‌ها را با `python -m app.workers.tester_sms --create-indexes` آماده و سپس `ZAYA_ENABLED=true` کنید. این فرمان صریح، ایندکس یکتای `tester_sms_url_order_unique` روی `order_id` با Collation ساده را ایجاد می‌کند؛ اجرای عادی ایندکس نمی‌سازد. وقتی Zaya فعال است، نبود ایندکس یا پیکربندی نامعتبر پیش از ارسال خطای واضح می‌دهد. Timeout باید عدد متناهی بزرگ‌تر از صفر و حداکثر ۱۰ ثانیه باشد؛ مقدار پیش‌فرض ۵ است.
+
+درخواست `POST`، پارامترهای `team_id` و `url` را با URL Encoding در Query String می‌فرستد؛ JSON Body ندارد. Headerهای `Authorization: Bearer ...` و `Accept: application/json` ارسال می‌شوند. درخواست در Thread اجرا و انتظار Async محدود می‌شود تا Event Loop مسدود نشود. Redirect دنبال نمی‌شود تا Bearer به مقصد دیگری منتقل نشود. پاسخ `2xx` فقط با `data.short_url` معتبر پذیرفته می‌شود؛ URL باید وب عمومی، بدون Credential، Fragment یا کاراکتر کنترلی باشد. خطای HTTP، Network، Timeout، JSON نامعتبر یا نبود لینک معتبر، نتیجهٔ پایدار `fallback` و استفاده از لینک اصلی می‌دهد؛ خود این خطاها ارسال فراز را متوقف نمی‌کنند.
+
+هر سفارش یک سند منطقی در `tester_sms_url` دارد: `order_id`، `original_url`، `short_url`، `final_url`، `status`، `provider="zaya"`، `team_id`، `provider_response`، `http_status`، `error_code`، `created_at` و `updated_at`. وضعیت `processing` همچنین `claim_id` و `lease_expires_at` دارد. پاسخ Provider با Allowlist ذخیره می‌شود: فقط `data.short_url` و در صورت وجود `data.id` عدد صحیح مثبت؛ سایر فیلدها و بدنهٔ خطا ممکن است اطلاعات حساس بازتاب دهند و ذخیره نمی‌شوند. Bearer در MongoDB ذخیره نمی‌شود. URL اصلی و کوتاه‌شده در این Collection عمداً طبق قرارداد قابلیت ذخیره می‌شوند و مانند لینک اختصاصی، اطلاعات محرمانه‌اند؛ Log فقط کد خطای ثابت دارد و URL، توکن خام، پاسخ Provider یا مشخصات مشتری را چاپ نمی‌کند.
+
+ثبت اولیه با Upsert اتمیک و ایندکس یکتا Claim می‌شود. فقط مالک Claim درخواست HTTP می‌فرستد؛ Workerهای دیگر تا نهایی‌شدن رکورد ارسال آن سفارش را به اجرای بعدی موکول می‌کنند و تلاش SMS مصرف نمی‌شود. Lease برابر Timeout به‌علاوهٔ ۳۰ ثانیه است. پس از Crash/انقضا، رکورد بدون تکرار درخواست Zaya به `fallback` نهایی می‌شود؛ نتیجهٔ دیررس Worker قدیمی با شرط Claim و وضعیت نمی‌تواند آن را بازنویسی کند. `success` و `fallback` نهایی‌اند و Retry فراز همان `final_url` را استفاده می‌کند. در خطای MongoDB پیش از تثبیت نتیجه، SMS ارسال نمی‌شود تا Retry بعدی لینک متفاوتی استفاده نکند. پس از کوتاه‌سازی، وضعیت سفارش و Hard Deadline پرداخت دوباره طبق منطق فعلی پیش از Claim و ارسال بررسی می‌شوند.
+
+اگر Zaya پس از یک تلاش قبلیِ ارسال لینک اصلی فعال شود و رکورد URL موجود نباشد، لینک اصلی بدون درخواست Zaya به‌عنوان `fallback` تثبیت می‌شود. تغییر Origin یا Secret نباید URL اصلی Selection موجود را عوض کند؛ ناسازگاری با رکورد URL خطای تنظیمات می‌دهد. طبق قرارداد حالت غیرفعال، `ZAYA_ENABLED=false` همیشه لینک اصلی را بدون مراجعه به Collection استفاده می‌کند؛ برای حفظ لینک کوتاه در Retryهای سفارش‌های دارای رکورد موفق، سرویس را فعال نگه دارید. تبدیل آدرس پیامک، مسیر اختصاصی سایت یا زمان شروع مهلت از `accepted_at` را تغییر نمی‌دهد.
+
+تست‌های بدون شبکهٔ واقعی:
+
+```shell
+python -m unittest tests.test_zaya tests.test_tester_sms_worker tests.test_paid_timeout -v
+```
+
+این تست‌ها پاسخ موفق، خطاها، نبود لینک، Timeout غیرمسدودکننده، Retry با لینک ثابت، Workerهای هم‌زمان، Recovery، جلوگیری از نتیجهٔ دیررس، خطای MongoDB و عبور از مرز پرداخت حین کوتاه‌سازی را با HTTP و دیتابیس Mock بررسی می‌کنند.
+
 ## Worker سفارش‌های پک تستر
 
 Worker یک‌نوبتی، در همان اجرا ابتدا آزادسازی سفارش‌های تعیین‌تکلیف‌شده، سپس Recovery پیامک و در پایان ارسال‌های جدید/Retry را انجام می‌دهد و خارج می‌شود. Cron یا Worker دیگری لازم نیست.

@@ -35,6 +35,10 @@ from app.services.sms import (
     SmsValidationError,
 )
 from app.services.sms.faraz import normalize_recipient
+from app.services.url_shortener.zaya import (
+    COLLECTION as URLS, ZayaConfig, ZayaConfigurationError, ZayaShortener,
+    check_index as check_url_index, create_index as create_url_index,
+)
 from app.workers.paid_release import create_index as create_paid_index, paid_at_expression, release_paid_orders
 
 NOTIFICATIONS = "tester_sms_notifications"
@@ -88,7 +92,7 @@ class WorkerSettings:
         except ValueError as error:
             raise WorkerConfigurationError(str(error)) from None
         collection = os.getenv("TESTER_ORDERS_COLLECTION", "preprocess_orders").strip()
-        if not collection or "$" in collection or "\x00" in collection or collection in {NOTIFICATIONS, SELECTIONS}:
+        if not collection or "$" in collection or "\x00" in collection or collection in {NOTIFICATIONS, SELECTIONS, URLS}:
             raise WorkerConfigurationError("TESTER_ORDERS_COLLECTION must name the orders collection.")
         try:
             batch_size = int(os.getenv("TESTER_WORKER_BATCH_SIZE", "50"))
@@ -245,6 +249,7 @@ async def create_indexes(collections: dict) -> None:
     await collections["notifications"].create_index([("status", 1), ("order_synced", 1), ("accepted_at", 1)], name="tester_notification_repair")
     await collections["selections"].create_index("order_id", unique=True, name="tester_selection_order_unique")
     await collections["selections"].create_index("token_hash", unique=True, name="tester_selection_token_unique")
+    await create_url_index(collections["urls"])
 
 
 async def check_release_index(collections: dict) -> None:
@@ -294,6 +299,7 @@ def worker_collections(db, settings: WorkerSettings) -> dict:
         "orders": db[settings.orders_collection].with_options(write_concern=concern),
         "notifications": db[NOTIFICATIONS].with_options(write_concern=concern),
         "selections": db[SELECTIONS].with_options(write_concern=concern),
+        "urls": db[URLS].with_options(write_concern=concern),
     }
 
 
@@ -540,7 +546,7 @@ async def send_with_lease(sms, recipient, text, notifications, claim):
 
 
 async def process_order(order: dict, collections: dict, settings: WorkerSettings, sms: FarazSmsClient,
-                        order_match: dict) -> tuple[str, int | None]:
+                        order_match: dict, shortener: ZayaShortener | None = None) -> tuple[str, int | None]:
     current = await collections["orders"].find_one(
         {**order_match, "_id": order["_id"]}, collation=Collation(locale="simple"),
     )
@@ -554,6 +560,13 @@ async def process_order(order: dict, collections: dict, settings: WorkerSettings
     try:
         recipient = normalize_recipient(order.get(ORDER_MOBILE_FIELD))
         link = await ensure_selection(collections["selections"], order["_id"], settings)
+        if shortener is not None:
+            try:
+                link = await shortener.resolve(order["_id"], link, previous_attempts=notification.get("attempt_count", 0))
+            except ZayaConfigurationError as error:
+                raise WorkerConfigurationError(str(error)) from None
+            if link is None:
+                return "skipped", None
         text = render_sms(settings, order, link)
         sms.build_simple_payload(recipient=recipient, text=text)
     except (SmsValidationError, SmsConfigurationError):
@@ -820,6 +833,7 @@ async def run_once(db, settings: WorkerSettings, *, limit: int | None = None,
     collections = worker_collections(db, settings)
     match = sms_order_filter(settings)
     readonly = dry_run or not settings.sms_enabled
+    shortener = None
     release_enabled = settings.sms_enabled if settings.release_enabled is None else settings.release_enabled
     summary = {"eligible": 0, "accepted": 0, "failed": 0, "retry_pending": 0, "exhausted": 0, "skipped": 0, "database_errors": 0}
     summary.update({"released_submitted": 0, "released_expired": 0, "release_ready": 0,
@@ -843,6 +857,13 @@ async def run_once(db, settings: WorkerSettings, *, limit: int | None = None,
         # Validate the Simple SMS payload without generating a token or sending.
         sms.build_simple_payload(recipient="09120000000", text=render_sms(settings, {}, "https://validation.invalid"))
         await check_indexes(collections, require_release=False)
+        try:
+            zaya = ZayaConfig.from_environment()
+            if zaya is not None:
+                await check_url_index(collections["urls"])
+                shortener = ZayaShortener(collections["urls"], zaya)
+        except ZayaConfigurationError as error:
+            raise WorkerConfigurationError(str(error)) from None
         summary.update(await recover_notifications(collections, match, limit, settings))
     cursor = await collections["orders"].aggregate(
         eligible_pipeline(match, limit, settings.max_attempts), batchSize=min(limit, settings.batch_size),
@@ -854,7 +875,7 @@ async def run_once(db, settings: WorkerSettings, *, limit: int | None = None,
         if readonly:
             continue
         try:
-            status, stop_code = await process_order(order, collections, settings, sms, match)
+            status, stop_code = await process_order(order, collections, settings, sms, match, shortener)
             summary[status] += 1
             if stop_code:
                 summary["halted_http_status"] = stop_code
@@ -911,7 +932,7 @@ async def run_paid_command(args) -> dict:
     except ValueError:
         raise WorkerConfigurationError("MONGODB_TIMEOUT_MS must be a positive integer.") from None
     if (not uri or not database or not collection or "$" in collection or "\x00" in collection or timeout <= 0
-            or collection in {NOTIFICATIONS, SELECTIONS}):
+            or collection in {NOTIFICATIONS, SELECTIONS, URLS}):
         raise WorkerConfigurationError("Valid MongoDB settings and an orders collection are required.")
     raw_limit = os.getenv("TESTER_PAID_RELEASE_BATCH_SIZE", "50").strip()
     if not re.fullmatch(r"[0-9]+", raw_limit) or len(raw_limit) > 9 or int(raw_limit) <= 0:
