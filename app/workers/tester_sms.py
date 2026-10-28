@@ -27,6 +27,7 @@ from pymongo.collation import Collation
 from pymongo.errors import DuplicateKeyError, PyMongoError
 from pymongo.write_concern import WriteConcern
 
+from app.environment import read_environment
 from app.services.sms import (
     FarazSmsClient,
     SmsConfigurationError,
@@ -82,6 +83,10 @@ class WorkerSettings:
     @classmethod
     def from_environment(cls, *, require_delivery: bool = False) -> WorkerSettings:
         load_dotenv(ENV_FILE, encoding="utf-8")
+        try:
+            environment = read_environment()
+        except ValueError as error:
+            raise WorkerConfigurationError(str(error)) from None
         collection = os.getenv("TESTER_ORDERS_COLLECTION", "preprocess_orders").strip()
         if not collection or "$" in collection or "\x00" in collection or collection in {NOTIFICATIONS, SELECTIONS}:
             raise WorkerConfigurationError("TESTER_ORDERS_COLLECTION must name the orders collection.")
@@ -113,7 +118,7 @@ class WorkerSettings:
             orders_collection=collection,
             batch_size=batch_size,
             sms_enabled=enabled == "true",
-            selection_base_url=os.getenv("TESTER_SELECTION_BASE_URL", "").strip().rstrip("/"),
+            selection_base_url=environment.selection_base_url,
             token_secret=os.getenv("TESTER_TOKEN_SECRET", ""),
             retry_delay_minutes=retry_settings["TESTER_SMS_RETRY_DELAY_MINUTES"],
             max_attempts=retry_settings["TESTER_SMS_MAX_ATTEMPTS"],
@@ -873,8 +878,8 @@ async def run_command(args) -> dict:
     # Reuse the application's MongoDB settings without changing its lifespan.
     try:
         from app.config import MONGODB_DB_NAME, MONGODB_TIMEOUT_MS, MONGODB_URI
-    except (KeyError, ValueError):
-        raise WorkerConfigurationError("Valid MONGODB_URI, MONGODB_DB_NAME and MONGODB_TIMEOUT_MS settings are required.") from None
+    except (KeyError, ValueError) as error:
+        raise WorkerConfigurationError(f"Invalid MongoDB configuration: {error}") from None
 
     client = AsyncMongoClient(
         MONGODB_URI, serverSelectionTimeoutMS=MONGODB_TIMEOUT_MS, timeoutMS=MONGODB_TIMEOUT_MS, tz_aware=True,
@@ -896,7 +901,10 @@ async def run_paid_command(args) -> dict:
     """Only database settings are parsed; unrelated delivery settings are ignored."""
     load_dotenv(ENV_FILE, encoding="utf-8")
     uri = os.getenv("MONGODB_URI", "")
-    database = os.getenv("MONGODB_DB_NAME", "")
+    try:
+        database = read_environment().mongodb_db_name
+    except ValueError as error:
+        raise WorkerConfigurationError(str(error)) from None
     collection = os.getenv("TESTER_ORDERS_COLLECTION", "preprocess_orders").strip()
     try:
         timeout = int(os.getenv("MONGODB_TIMEOUT_MS", "5000"))

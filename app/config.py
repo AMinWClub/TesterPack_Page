@@ -2,13 +2,15 @@ import os
 from pathlib import Path
 
 from dotenv import load_dotenv
+from app.environment import read_environment
 
 
 load_dotenv(Path(__file__).resolve().parent.parent / ".env", encoding="utf-8")
 
 APP_NAME = os.getenv("APP_NAME", "Minimal FastAPI")
 MONGODB_URI = os.environ["MONGODB_URI"]
-MONGODB_DB_NAME = os.environ["MONGODB_DB_NAME"]
+ENVIRONMENT = read_environment()
+MONGODB_DB_NAME = ENVIRONMENT.mongodb_db_name
 MONGODB_TIMEOUT_MS = int(os.getenv("MONGODB_TIMEOUT_MS", "5000"))
 
 if not MONGODB_URI or not MONGODB_DB_NAME:

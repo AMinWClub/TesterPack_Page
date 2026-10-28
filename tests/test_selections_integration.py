@@ -124,7 +124,8 @@ class SelectionMongoTests(unittest.IsolatedAsyncioTestCase):
         await self.db.preprocess_orders.update_one({"_id": self.source_order["_id"]},
             {"$set": {"date_paid": datetime.now(timezone.utc) - timedelta(minutes=41)}})
         args = SimpleNamespace(release_paid_timeout=True, create_paid_index=False, dry_run=False, limit=5)
-        with patch.dict(os.environ, {"MONGODB_DB_NAME": self.database_name, "TESTER_ORDERS_COLLECTION": self.config.orders_collection,
+        with patch.dict(os.environ, {"APP_ENV": "local", "MONGODB_DB_NAME_LOCAL": self.database_name,
+                "TESTER_SELECTION_BASE_URL_LOCAL": "http://localhost:8000", "TESTER_ORDERS_COLLECTION": self.config.orders_collection,
                 "TESTER_SMS_ENABLED": "broken", "TESTER_RELEASE_ENABLED": "broken",
                 "TESTER_SMS_TEMPLATE": "{bad}", "TESTER_SELECTION_WINDOW_MINUTES": "broken", "FARAZ_TIMEOUT_SECONDS": "broken"}), \
                 patch.object(worker.WorkerSettings, "from_environment", side_effect=AssertionError("No SMS config")), \

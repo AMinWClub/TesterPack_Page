@@ -1266,6 +1266,10 @@ class WorkerSettingsAndTokenTests(unittest.TestCase):
         patcher = patch.object(worker, "load_dotenv")
         patcher.start()
         self.addCleanup(patcher.stop)
+        environment = patch.object(worker, "read_environment", side_effect=lambda: SimpleNamespace(
+            selection_base_url=os.getenv("TESTER_SELECTION_BASE_URL", "").strip().rstrip("/")))
+        environment.start()
+        self.addCleanup(environment.stop)
         self.environment = {"TESTER_SMS_TEMPLATE": SMS_TEMPLATE}
 
     def test_removed_cutoff_is_not_required_or_validated(self):
