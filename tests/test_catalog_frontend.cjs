@@ -179,7 +179,7 @@ async function main() {
     assert.deepEqual(await evaluate('accordOptions.map(option=>option.key).sort()'), ['mystery accord','sweet','woody']);
     assert(await evaluate('accordOptions.find(option=>option.key==="woody").label==="چوبی"'));
     // OR within accords; AND across gender, season and normalized text search.
-    await evaluate(`(() => {const season=document.querySelector('#seasonFilter');season.value='spring';season.dispatchEvent(new Event('change',{bubbles:true}));})()`);
+    await evaluate(`document.querySelector('#seasonFilter input[value="spring"]').click()`);
     assert(await evaluate('filteredProducts.length===166 && selected.length===4'));
     await evaluate(`document.querySelector('#accordFilter').open=true;document.querySelector('#accordSearch').value='چوبی';document.querySelector('#accordSearch').dispatchEvent(new Event('input',{bubbles:true}))`);
     assert(await evaluate('document.querySelectorAll("#accordOptions input").length===1'));
@@ -192,7 +192,7 @@ async function main() {
     await evaluate(`query='nothing matches';renderCatalog()`);
     assert(await evaluate('!document.querySelector("#emptyResults").hidden && document.querySelector("#resultCount").textContent.includes("۰")'));
     await evaluate(`document.querySelector('#resetFilters').click()`);
-    assert(await evaluate('filteredProducts.length===498 && !activeAccords.size && activeSeason==="all" && query==="" && selected.length===4 && document.querySelector("#activeCatalogFilters").hidden'));
+    assert(await evaluate('filteredProducts.length===498 && !activeAccords.size && !activeSeasons.size && query==="" && selected.length===4 && document.querySelector("#activeCatalogFilters").hidden'));
     // Individual active tags, unknown-label fallback, no-result accord search, XSS escaping.
     await evaluate(`activeAccords.add('mystery accord');renderCatalog();document.querySelector('[data-clear-group="accord"]').click()`);
     assert(await evaluate('activeAccords.size===0 && filteredProducts.length===498'));
@@ -214,9 +214,9 @@ async function main() {
     await click('.product-card .product-name'); await until('document.querySelector("#perfumeContent").dataset.state==="ready"');
     assert.equal(mode.detailRequests, detailCalls, 'Successful detail was not cached');
     await close();
-    await evaluate(`selected.splice(0);renderSelection();for(const p of PERFUMES.slice(0,10))toggleProduct(p.pid)`);
-    assert(await evaluate('selected.length===10&&document.querySelectorAll(".product-button:disabled").length>0'));
-    await evaluate('toggleProduct(PERFUMES[10].pid)'); assert(await evaluate('selected.length===10'));
+    await evaluate(`selected.splice(0);renderSelection();for(const p of PERFUMES.slice(0,MAX_TESTERS))toggleProduct(p.pid)`);
+    assert(await evaluate('selected.length===MAX_TESTERS&&document.querySelectorAll(".product-button:disabled").length>0'));
+    await evaluate('toggleProduct(PERFUMES[MAX_TESTERS].pid)'); assert(await evaluate('selected.length===MAX_TESTERS'));
 
     // API unavailable must never silently restore the twelve mock perfumes.
     mode.catalog = 'error'; await load();

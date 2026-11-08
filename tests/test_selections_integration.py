@@ -54,7 +54,7 @@ class SelectionMongoTests(unittest.IsolatedAsyncioTestCase):
             "order_id": self.source_order["_id"], "status": "accepted",
             "accepted_at": datetime.now(timezone.utc) - timedelta(seconds=1),
         })
-        self.pids = [str(index) for index in range(1, 11)]
+        self.pids = [str(index) for index in range(1, service.COUNT + 1)]
         self.app = make_app(self.db, self.config)
         self.app.include_router(catalog_router)
         self.app.state.catalog = CatalogCache(self.db)
@@ -115,7 +115,7 @@ class SelectionMongoTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((status, body["selection"]["status"]), (200, "submitted"))
         saved = await self.stored_order()
         self.assertEqual((saved["state"], saved["tester_gender"]), ("not_seen", "تستر انتخابی"))
-        self.assertEqual(len(saved["recommended_products"]), 10)
+        self.assertEqual(len(saved["recommended_products"]), service.COUNT)
         self.assertIsInstance(saved[service.ORDER_WRITTEN_AT], datetime)
         self.assertEqual((await self.call("submit", pids=self.pids))[0], 200)
         self.assertEqual(await self.stored_order(), saved)
@@ -224,7 +224,7 @@ class SelectionMongoTests(unittest.IsolatedAsyncioTestCase):
         status, result, _ = await self.call("submit", pids=self.pids)
         self.assertEqual(status, 200)
         self.assertEqual(result["selection"]["status"], "submitted")
-        self.assertEqual((await self.stored_order())["recommended_products"], [row["name"] for row in self.rows[:10]])
+        self.assertEqual((await self.stored_order())["recommended_products"], [row["name"] for row in self.rows[:service.COUNT]])
         self.assertEqual((await self.call())[1], result)
         self.assertEqual((await self.call("submit", pids=self.pids))[1], result)
 
@@ -279,14 +279,14 @@ class SelectionMongoTests(unittest.IsolatedAsyncioTestCase):
         await self.db.products_api.update_one({"pid": 1}, {"$set": {"variations.a.in_stock": False}})
         self.assertEqual((await self.call("submit", pids=self.pids))[0], 409)
         await self.db.products_api.update_one({"pid": 1}, {"$set": {"variations.a.in_stock": True}})
-        self.assertEqual((await self.call("submit", pids=self.pids[:9] + ["499"]))[0], 409)
+        self.assertEqual((await self.call("submit", pids=self.pids[:-1] + ["499"]))[0], 409)
         await self.db.products_api.update_one({"pid": 1}, {"$set": {"name": None}})
         self.assertEqual((await self.call("submit", pids=self.pids))[0], 409)
         self.assertEqual((await self.selection())["status"], "pending")
         self.assertNotIn("recommended_products", await self.stored_order())
 
     async def test_existing_recommendations_even_null_or_same_names_are_immutable(self):
-        for value in (None, [], [row["name"] for row in self.rows[:10]]):
+        for value in (None, [], [row["name"] for row in self.rows[:service.COUNT]]):
             await self.db.preprocess_orders.update_one({"_id": self.source_order["_id"]}, {"$set": {"recommended_products": value}})
             before = await self.stored_order()
             self.assertEqual((await self.call("submit", pids=self.pids))[0], 409)
@@ -294,7 +294,7 @@ class SelectionMongoTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await self.selection())["status"], "pending")
 
     async def test_real_atomic_concurrency_different_and_identical_requests(self):
-        other = [str(index) for index in range(11, 21)]
+        other = [str(index) for index in range(11, 11 + service.COUNT)]
         results = await asyncio.gather(self.call("submit", pids=self.pids), self.call("submit", pids=other))
         self.assertEqual(sorted(result[0] for result in results), [200, 409])
         winning = (await self.selection())["selected_pids"]
@@ -486,7 +486,7 @@ class SelectionMongoTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_real_pipeline_clock_consistency_exact_deadline_and_literal_names(self):
         orders = self.db.preprocess_orders
-        intent = {"submission_id": "a" * 32, "selected_names": [f"$literal-name-{i}" for i in range(10)]}
+        intent = {"submission_id": "a" * 32, "selected_names": [f"$literal-name-{i}" for i in range(service.COUNT)]}
         now = service.utc_date((await self.db.command("hello"))["localTime"])
         deadline = now + timedelta(seconds=3)
         original = await self.stored_order()

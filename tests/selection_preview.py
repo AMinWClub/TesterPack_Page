@@ -20,6 +20,7 @@ from pymongo import AsyncMongoClient
 
 from app.catalog import CatalogCache, router as catalog_router
 from app.config import MONGODB_DB_NAME, MONGODB_TIMEOUT_MS, MONGODB_URI
+from app.selection_config import TESTER_SELECTION_COUNT
 from app.main import FRONTEND, frontend, health
 from app.selections import router as selection_router
 from app.selection_security import SelectionSecurity
@@ -72,10 +73,10 @@ async def lifespan(app):
             })
             if scenario == "expiry_review":
                 intent_id = uuid4().hex
-                names = [row["name"] for row in rows[:10]]
+                names = [row["name"] for row in rows[:TESTER_SELECTION_COUNT]]
                 await db[worker.SELECTIONS].update_one({"order_id": fixture["_id"]}, {"$set": {
                     "status": "review_required", "review_reason": "unverified_order_write_time",
-                    "submission_id": intent_id, "selected_pids": [str(i) for i in range(1, 11)], "selected_names": names,
+                    "submission_id": intent_id, "selected_pids": [str(i) for i in range(1, TESTER_SELECTION_COUNT + 1)], "selected_names": names,
                 }})
                 await db.preprocess_orders.update_one({"_id": fixture["_id"]}, {"$set": {
                     "recommended_products": names, "tester_selection_submission_id": intent_id,

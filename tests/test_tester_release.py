@@ -41,8 +41,8 @@ def fixture(status="pending", *, age=30, written=False, now=NOW, **changes):
                     "token_hash": hashlib.sha256(worker.token_for_order(source["_id"], settings().token_secret).encode()).hexdigest()}
         if status in {"submitted", "submitting", "review_required"}:
             selected.update(submission_id=ObjectId().binary.hex() + "a" * 8,
-                            selected_pids=[str(i) for i in range(10)],
-                            selected_names=[f"$Exact source name {i}" for i in range(10)],
+                            selected_pids=[str(i) for i in range(selection_api.COUNT)],
+                            selected_names=[f"$Exact source name {i}" for i in range(selection_api.COUNT)],
                             submitting_at=accepted + timedelta(minutes=1),
                             expires_at=accepted + timedelta(minutes=30))
             if status == "submitted" or written:
@@ -175,11 +175,11 @@ class TesterReleaseTests(unittest.IsolatedAsyncioTestCase):
         for corruption in ("names", "marker", "duplicate", "blank", "late_write", "missing_time", "marker_newline", "missing_submitted_at"):
             source, _, selected = self.add("submitted", age=10)
             if corruption == "names":
-                source["recommended_products"] = ["different"] * 10
+                source["recommended_products"] = ["different"] * selection_api.COUNT
             elif corruption == "marker":
                 source[selection_api.ORDER_MARKER] = "b" * 32
             elif corruption == "duplicate":
-                selected["selected_pids"] = ["1"] * 10
+                selected["selected_pids"] = ["1"] * selection_api.COUNT
             elif corruption == "blank":
                 selected["selected_names"][0] = "\u1680\x1c "
                 source["recommended_products"] = selected["selected_names"].copy()
@@ -297,7 +297,7 @@ class TesterReleaseTests(unittest.IsolatedAsyncioTestCase):
                 elif corruption == "missing_start":
                     selected.pop("submitting_at")
                 elif corruption == "duplicates":
-                    selected["selected_pids"] = ["same"] * 10
+                    selected["selected_pids"] = ["same"] * selection_api.COUNT
                 elif corruption == "pid_count":
                     selected["selected_pids"].pop()
                 elif corruption == "names_count":
@@ -431,7 +431,7 @@ class TesterReleaseTests(unittest.IsolatedAsyncioTestCase):
         healthy, _, _ = self.add("submitted", age=31)
         incomplete, _, _ = self.add("submitting", age=31)
         malformed, _, selected = self.add("review_required", age=31, written=True)
-        selected["selected_pids"] = ["duplicate"] * 10
+        selected["selected_pids"] = ["duplicate"] * selection_api.COUNT
         self.add("submitting", age=31, written=True)  # Pending is not a past release.
         bad["state"] = healthy["state"] = incomplete["state"] = malformed["state"] = "not_seen"
         healthy["tester_gender"] = "تستر انتخابی"
@@ -459,19 +459,19 @@ class TesterReleaseTests(unittest.IsolatedAsyncioTestCase):
         source, _, _ = self.add("submitted", age=10)
         original_update = self.collections["orders"].update_one
         async def changed_receipt(query, update, **kwargs):
-            source["recommended_products"] = ["externally changed"] * 10
+            source["recommended_products"] = ["externally changed"] * selection_api.COUNT
             return await original_update(query, update, **kwargs)
         with patch.object(self.collections["orders"], "update_one", side_effect=changed_receipt):
             self.assertEqual((await self.release())["release_skipped"], 1)
         self.assertEqual(source["state"], "pending")
         source["recommended_products"] = self.collections["selections"].documents[0]["selected_names"].copy()
         async def crosses_deadline(query, update, **kwargs):
-            source["recommended_products"] = ["externally changed"] * 10
+            source["recommended_products"] = ["externally changed"] * selection_api.COUNT
             self.clock.return_value = NOW + timedelta(minutes=20)
             return await original_update(query, update, **kwargs)
         with patch.object(self.collections["orders"], "update_one", side_effect=crosses_deadline):
             self.assertEqual((await self.release())["released_expired"], 1)
-        self.assertEqual(source["recommended_products"], ["externally changed"] * 10)
+        self.assertEqual(source["recommended_products"], ["externally changed"] * selection_api.COUNT)
         # A server clock moving backwards must also be rechecked in UPDATE.
         self.clock.return_value = NOW
         expired, _, _ = self.add(age=30)
@@ -487,7 +487,7 @@ class TesterReleaseTests(unittest.IsolatedAsyncioTestCase):
         for index in range(12):
             self.add("pending", age=5)
             source, _, selected = self.add("submitted", age=5)
-            selected["selected_pids"] = ["duplicate"] * 10
+            selected["selected_pids"] = ["duplicate"] * selection_api.COUNT
         ready = [self.add(status, age=age)[0] for status, age in
                  (("pending", 31), ("submitted", 10), ("review_required", 31), (None, 31))]
         for _ in ready:

@@ -17,7 +17,7 @@ async function main() {
   fs.mkdirSync(artifacts, { recursive:true });
   const executable = process.env.CATALOG_BROWSER_PATH || 'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe';
   const browser = spawn(executable, ['--headless=new','--disable-gpu','--no-first-run','--no-default-browser-check',
-    '--remote-debugging-port=9232',`--user-data-dir=${path.join(artifacts,'edge-profile')}`,'about:blank'], { windowsHide:true, stdio:'ignore' });
+    '--remote-debugging-port=9232',`--user-data-dir=${fs.mkdtempSync(path.join(artifacts,'edge-profile-'))}`,'about:blank'], { windowsHide:true, stdio:'ignore' });
   let socket;
   const wait = ms => new Promise(resolve=>setTimeout(resolve,ms));
   const modes = { context:'real', submit:'real' };
@@ -83,16 +83,16 @@ async function main() {
       await evaluate('document.fonts.ready.then(()=>true)');
     };
     const screenshot=async name=>{const shot=await send('Page.captureScreenshot',{format:'png'});fs.writeFileSync(path.join(artifacts,name+'.png'),Buffer.from(shot.data,'base64'));};
-    const chooseTen=async()=>{
+    const chooseTesters=async()=>{
       await until('catalogState==="ready"');
-      await evaluate('for(const item of PERFUMES.slice(0,10)){if(!selectedHas(item.pid))document.querySelector(`[data-toggle="${CSS.escape(item.pid)}"]`).click();}');
-      assert(await evaluate('selected.length===10&&document.querySelectorAll(".product-button:disabled").length>0'));
+      await evaluate('for(const item of PERFUMES.slice(0,MAX_TESTERS)){if(!selectedHas(item.pid))document.querySelector(`[data-toggle="${CSS.escape(item.pid)}"]`).click();}');
+      assert(await evaluate('selected.length===MAX_TESTERS&&document.querySelectorAll(".product-button:disabled").length>0'));
     };
     const review=async()=>{
       if(await evaluate('innerWidth<=940')){await click('#openDrawer');await click('#mobileFinalize');}
       else await click('#finalizeButton');
       await until('document.querySelector("#demoModal").getAttribute("aria-hidden")==="false"');
-      assert(await evaluate('document.querySelectorAll("#modalSelected li").length===10'));
+      assert(await evaluate('document.querySelectorAll("#modalSelected li").length===MAX_TESTERS'));
     };
     await send('Page.enable');await send('Runtime.enable');await send('Network.enable');
     await send('Page.addScriptToEvaluateOnNewDocument',{source:'Date.now=()=>4070908800000;'});
@@ -126,7 +126,7 @@ async function main() {
     assert(await evaluate('document.querySelectorAll(".pd-trait").length===2'));
     await click('#perfumeSelect');assert(await evaluate('selected.length===1'));
     await click('#closePerfume');await until('!document.querySelector("#perfumeDialog").open');
-    await chooseTen();await review();await screenshot('review-mobile');
+    await chooseTesters();await review();await screenshot('review-mobile');
     const before=submits;
     await evaluate('document.querySelector("#modalDone").click();document.querySelector("#modalDone").click()');
     await until('selectionState==="submitted"&&!submitBusy');
@@ -135,7 +135,7 @@ async function main() {
     for(const [width,height]of [[1440,1000],[390,844],[320,740]]){
       const catalogs=catalogRequests;
       await load(fixtures.success.path,width,height);
-      assert(await evaluate('selectionState==="submitted"&&document.querySelectorAll("#submittedList li").length===10&&document.querySelector("#collection").hidden'));
+      assert(await evaluate('selectionState==="submitted"&&document.querySelectorAll("#submittedList li").length===MAX_TESTERS&&document.querySelector("#collection").hidden'));
       assert.equal(catalogRequests,catalogs,'Receipt unexpectedly fetched the live catalog');
       assert(await evaluate('document.querySelector("#submittedList").textContent.includes("Original Source Perfume")'));
       const selectedBefore=await evaluate('JSON.stringify(selected)');await evaluate('toggleProduct(selected[0])');
@@ -144,19 +144,19 @@ async function main() {
       await evaluate('scrollTo(0,0)');await screenshot('submitted-'+width);
     }
     // The server committed, but its HTTP response was lost. Context proves success.
-    await load(fixtures.lost_response.path);await chooseTen();await review();
+    await load(fixtures.lost_response.path);await chooseTesters();await review();
     modes.submit='lose-response';await click('#modalDone');await until('selectionState==="submitted"&&!submitBusy');
     await click('#modalDone');
     // Both requests are unreachable. Lock choices until Context proves pending.
-    await load(fixtures.uncertain.path);await chooseTen();await review();
+    await load(fixtures.uncertain.path);await chooseTesters();await review();
     modes.submit='drop';modes.context='error';await click('#modalDone');await until('selectionState==="uncertain"&&!submitBusy');
     assert(await evaluate('!canEditSelection()&&document.querySelector("#submissionMessage").textContent.includes("مشخص نیست")'));
     const frozen=await evaluate('JSON.stringify(selected)');await evaluate('toggleProduct(selected[0])');assert.equal(await evaluate('JSON.stringify(selected)'),frozen);
     await click('#closeModal');modes.context='real';modes.submit='real';await click('#retrySelectionContext');
-    await until('selectionState==="pending"');assert(await evaluate('selected.length===10&&canEditSelection()'));
+    await until('selectionState==="pending"');assert(await evaluate('selected.length===MAX_TESTERS&&canEditSelection()'));
     await review();await click('#modalDone');await until('selectionState==="submitted"&&!submitBusy');await click('#modalDone');
     // A rejected product gives a readable error and editable choices after Context.
-    await load(fixtures.unavailable.path);await chooseTen();await review();modes.submit='unavailable';
+    await load(fixtures.unavailable.path);await chooseTesters();await review();modes.submit='unavailable';
     await click('#modalDone');await until('selectionState==="pending"&&!submitBusy&&!document.querySelector("#submissionMessage").hidden');
     assert(await evaluate('document.querySelector("#submissionMessage").textContent.includes("موجود نیست")&&canEditSelection()'));
     await click('#modalBack');modes.submit='real';
@@ -190,12 +190,12 @@ async function main() {
       await evaluate('scrollTo({top:0,behavior:"instant"})');await screenshot('review-required-'+width);
     }
     // A live page and an open final modal lock without Refresh; Date.now cannot extend it.
-    await load(fixtures.expiry_live.path);await chooseTen();await review();
+    await load(fixtures.expiry_live.path);await chooseTesters();await review();
     setWindow('expiry_live',4);
     await evaluate('(async()=>{applySelectionContext(await selectionApi("context"));Date.now=()=>0;})()');
     assert(await evaluate('canEditSelection()&&document.querySelector("#demoModal").getAttribute("aria-hidden")==="false"'));
     await until('selectionState==="expired"');
-    assert(await evaluate('selected.length===10&&!canEditSelection()&&document.querySelector("#demoModal").getAttribute("aria-hidden")==="true"&&document.querySelector("#collection").hidden'));
+    assert(await evaluate('selected.length===MAX_TESTERS&&!canEditSelection()&&document.querySelector("#demoModal").getAttribute("aria-hidden")==="true"&&document.querySelector("#collection").hidden'));
     const beforeExpiredClick=submits;
     await evaluate('document.querySelector("#modalDone").click();toggleProduct(selected[0]);');
     assert.equal(submits,beforeExpiredClick);
@@ -206,7 +206,7 @@ async function main() {
     await load('/'+'9'.repeat(18));
     assert(await evaluate('selectionState==="error"&&document.querySelector("#orderFields").hidden&&document.querySelector("#collection").hidden'));
     await screenshot('invalid-link-mobile');
-    await load('/');await chooseTen();
+    await load('/');await chooseTesters();
     assert(await evaluate('selectionState==="preview"&&document.querySelector("#finalizeButton").disabled&&document.querySelector("#orderFields").hidden'));
     assert.equal(errors.length,0,JSON.stringify(errors));
     assert(headers.length>0&&headers.every(h=>h.noStore&&h.noReferrer&&h.noIndex),'Missing privacy headers');

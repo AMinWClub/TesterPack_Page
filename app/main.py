@@ -4,11 +4,12 @@ from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.middleware.gzip import GZipMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from pymongo import AsyncMongoClient
 
 from app.config import APP_NAME, MONGODB_DB_NAME, MONGODB_TIMEOUT_MS, MONGODB_URI, TESTER_SELECTION_RATE_LIMIT_PER_MINUTE
+from app.selection_config import TESTER_SELECTION_COUNT
 from app.catalog import CatalogCache, router as catalog_router
 from app.selections import router as selection_router
 from app.selection_security import SelectionSecurity, install_access_log_redaction
@@ -59,8 +60,14 @@ FRONTEND = Path(__file__).resolve().parent.parent / "frontend"
 
 @app.get("/", include_in_schema=False)
 async def frontend():
-    return FileResponse(FRONTEND / "index.html", headers={"Cache-Control": "no-store"})
+    count = str(TESTER_SELECTION_COUNT)
+    html = (FRONTEND / "index.html").read_text(encoding="utf-8")
+    html = html.replace("__TESTER_COUNT__", count).replace(
+        "__TESTER_COUNT_FA__", count.translate(str.maketrans("0123456789", "۰۱۲۳۴۵۶۷۸۹")),
+    )
+    return HTMLResponse(html, headers={"Cache-Control": "no-store"})
 
 
+app.add_api_route("/frontend/index.html", frontend, methods=["GET"], include_in_schema=False)
 app.mount("/frontend", StaticFiles(directory=FRONTEND), name="frontend")
 app.add_api_route("/{token:selection_token}", frontend, methods=["GET"], include_in_schema=False)

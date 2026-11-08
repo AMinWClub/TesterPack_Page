@@ -1,5 +1,6 @@
 /** Real catalog and token-linked order selection; tokens stay out of API URLs. */
-const MAX_TESTERS = 10;
+const MAX_TESTERS = Number(document.querySelector('meta[name="tester-selection-count"]').content);
+if (!Number.isInteger(MAX_TESTERS) || MAX_TESTERS < 1 || MAX_TESTERS > 498) throw new Error('Invalid tester count');
 const PAGE_SIZE = 24;
 let PERFUMES = [];
 const productsByPid = new Map();
@@ -253,7 +254,7 @@ function renderSelection() {
   $('#mobileCount').textContent = farsiNumber(n);
   $('#remainingLabel').textContent = n === MAX_TESTERS ? 'جعبه تکمیل شد ✦' : `${farsiNumber(remaining)} جای خالی`;
   $('#mobileRemaining').textContent = n === MAX_TESTERS ? 'آماده مرور انتخاب‌ها' : `${farsiNumber(remaining)} انتخاب باقی‌مانده`;
-  $('#finalizeHint').textContent = n === MAX_TESTERS ? 'عالی! هر ۱۰ رایحه رو انتخاب کردی.' : `برای ادامه، ${farsiNumber(remaining)} عطر دیگه انتخاب کن.`;
+  $('#finalizeHint').textContent = n === MAX_TESTERS ? `عالی! هر ${farsiNumber(MAX_TESTERS)} رایحه رو انتخاب کردی.` : `برای ادامه، ${farsiNumber(remaining)} عطر دیگه انتخاب کن.`;
   $('#finalizeButton').disabled = n !== MAX_TESTERS || selectionState !== 'pending' || submitBusy || deadlinePassed();
   $('#mobileFinalize').disabled = $('#finalizeButton').disabled;
   if (selectionState === 'preview') $('#finalizeHint').textContent = 'برای ثبت واقعی، لینک اختصاصی پیامک را باز کنید.';
@@ -288,7 +289,7 @@ function toggleProduct(id) {
     selected.push(id);
     showToast(`«${cleanText(item.name).trimEnd()}» به جعبه انتخاب اضافه شد.`);
   } else {
-    showToast('هر سفارش فقط شامل ۱۰ تستر است');
+    showToast(`هر سفارش فقط شامل ${farsiNumber(MAX_TESTERS)} تستر است`);
   }
   renderCatalog(false);
   renderSelection();
@@ -387,7 +388,7 @@ function syncPerfumeSelection() {
   button.classList.toggle('is-selected', isSelected);
   button.setAttribute('aria-pressed', String(isSelected));
   button.setAttribute('aria-label', `${isSelected ? 'حذف' : 'افزودن'} ${item.name} ${isSelected ? 'از انتخاب‌ها' : 'به تسترهای من'}`);
-  button.innerHTML = `<svg class="ico" aria-hidden="true"><use href="#${isSelected ? 'i-check' : 'i-plus'}"/></svg>${isSelected ? 'حذف از انتخاب‌ها' : unavailablePids.has(perfumeId) ? 'فعلاً قابل انتخاب نیست' : full ? 'ظرفیت ۱۰ تستر تکمیل است' : 'افزودن به تسترهای من'}`;
+  button.innerHTML = `<svg class="ico" aria-hidden="true"><use href="#${isSelected ? 'i-check' : 'i-plus'}"/></svg>${isSelected ? 'حذف از انتخاب‌ها' : unavailablePids.has(perfumeId) ? 'فعلاً قابل انتخاب نیست' : full ? `ظرفیت ${farsiNumber(MAX_TESTERS)} تستر تکمیل است` : 'افزودن به تسترهای من'}`;
   $('#perfumeSelectionStatus').textContent = `${isSelected ? 'در انتخاب‌های شما · ' : ''}${farsiNumber(selected.length)} از ${farsiNumber(MAX_TESTERS)} تستر انتخاب شده`;
 }
 
@@ -494,7 +495,7 @@ function openModal() {
   lastFocus = document.activeElement;
   $('#modalSelected').innerHTML = selected.map(id => `<li>${escapeHtml(getProduct(id).name)}</li>`).join('');
   $('#modalTitle').textContent = 'مرور نهایی انتخاب‌ها';
-  $('#modalDescription').textContent = 'این ۱۰ عطر برای پک تستر شما ثبت می‌شوند. پس از تأیید، امکان تغییر انتخاب‌ها وجود ندارد.';
+  $('#modalDescription').textContent = `این ${farsiNumber(MAX_TESTERS)} عطر برای پک تستر شما ثبت می‌شوند. پس از تأیید، امکان تغییر انتخاب‌ها وجود ندارد.`;
   $('#modalDone').textContent = 'تأیید و ثبت نهایی';
   $('#modalDone').disabled = false;
   $('#modalBack').hidden = false;
@@ -790,7 +791,7 @@ async function loadSelectionContext() {
 
 function showSubmissionSuccess() {
   $('#modalTitle').textContent = 'انتخاب‌های شما با موفقیت ثبت شد.';
-  $('#modalDescription').textContent = '۱۰ عطر انتخابی شما برای آماده‌سازی پک تستر ثبت شدند. از همراهی شما با سراد سپاسگزاریم.';
+  $('#modalDescription').textContent = `${farsiNumber(MAX_TESTERS)} عطر انتخابی شما برای آماده‌سازی پک تستر ثبت شدند. از همراهی شما با سراد سپاسگزاریم.`;
   $('#modalSelected').innerHTML = submittedNames.map(name => `<li>${escapeHtml(name)}</li>`).join('');
   $('#modalDone').textContent = 'مشاهده انتخاب‌های ثبت‌شده';
   $('#modalBack').hidden = true;
@@ -859,7 +860,7 @@ document.addEventListener('visibilitychange', () => {
 renderSelection();
 if (isSelectionPage) loadSelectionContext();
 else {
-  $('#orderState').innerHTML = '<strong>پیش‌نمایش کاتالوگ سراد</strong><p>برای مشاهده سفارش و ثبت ۱۰ تستر، لینک اختصاصی پیامک را باز کنید.</p>';
+  $('#orderState').innerHTML = `<strong>پیش‌نمایش کاتالوگ سراد</strong><p>برای مشاهده سفارش و ثبت ${farsiNumber(MAX_TESTERS)} تستر، لینک اختصاصی پیامک را باز کنید.</p>`;
   updateSelectionPage();
   loadCatalog();
 }

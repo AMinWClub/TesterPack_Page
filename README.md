@@ -169,7 +169,7 @@ Content-Type: application/json
     "id": "OR0000087510",
     "customer_name": "احمد فرجی",
     "phone": "09123456789",
-    "tester_count": 10
+    "tester_count": 6
   },
   "selection": {
     "status": "pending",
@@ -190,12 +190,12 @@ Content-Type: application/json
 POST /api/tester/selection/submit
 Content-Type: application/json
 
-{"token":"aB7xQ2mN9pR4tY6kL8","pids":["1001","1002","1003","1004","1005","1006","1007","1008","1009","1010"]}
+{"token":"aB7xQ2mN9pR4tY6kL8","pids":["1001","1002","1003","1004","1005","1006"]}
 ```
 
-PIDهای بالا نمونه‌اند؛ Body فقط `token` و ۱۰ PID رشته‌ایِ متمایز دارد. نامی از فرانت پذیرفته نمی‌شود. قبل از پذیرش Intent، یک Query تازه روی `products_api` با همان فیلتر، ترتیب `vol_idx` و سقف ۴۹۸ اجرا می‌شود؛ کش کاتالوگ مبنای ثبت نیست. محصول ناموجود، خارج از ۴۹۸ عضو فعلی، PID مبهم یا نام خالی/غیررشته‌ای باعث رد کل ثبت می‌شود.
+PIDهای بالا نمونه‌اند؛ Body فقط `token` و ۶ PID رشته‌ایِ متمایز دارد. نامی از فرانت پذیرفته نمی‌شود. قبل از پذیرش Intent، یک Query تازه روی `products_api` با همان فیلتر، ترتیب `vol_idx` و سقف ۴۹۸ اجرا می‌شود؛ کش کاتالوگ مبنای ثبت نیست. محصول ناموجود، خارج از ۴۹۸ عضو فعلی، PID مبهم یا نام خالی/غیررشته‌ای باعث رد کل ثبت می‌شود.
 
-`recommended_products` دقیقاً از ۱۰ مقدار اصلی `products_api.name` به ترتیب PIDهای ارسال‌شده ساخته می‌شود. فاصله‌ها، متن انگلیسی و نام کامل منبع حفظ می‌شوند؛ نام Fragrantica، ترجمه و خلاصه‌سازی جایگزین آن نمی‌شوند. پاسخ Submit موفق همان قرارداد Context با `status: submitted`، `selected_pids` و `selected_names` ده‌عضوی است.
+`recommended_products` دقیقاً از ۶ مقدار اصلی `products_api.name` به ترتیب PIDهای ارسال‌شده ساخته می‌شود. فاصله‌ها، متن انگلیسی و نام کامل منبع حفظ می‌شوند؛ نام Fragrantica، ترجمه و خلاصه‌سازی جایگزین آن نمی‌شوند. پاسخ Submit موفق همان قرارداد Context با `status: submitted`، `selected_pids` و `selected_names` شش‌عضوی است.
 
 | HTTP | رفتار |
 | --- | --- |
@@ -223,14 +223,14 @@ PIDهای بالا نمونه‌اند؛ Body فقط `token` و ۱۰ PID رشت�
 | `submitted` | هر دو سند سازگارند و انتخاب‌ها برای همیشه فقط‌خواندنی‌اند |
 | `review_required` | ثبت نیمه‌تمامی که پس از Deadline نمی‌توان سفارش آن را نوشت، یا زمان نوشتن آن قابل اثبات نیست؛ برای بررسی پشتیبانی حفظ می‌شود |
 
-بعد از اعتبارسنجی تازه، عملیات شرطی اتمیک `pending → submitting` با شرط `$$NOW < expires_at` فقط به یک درخواست اجازهٔ ثبت Intent می‌دهد. Intent شامل `submission_id`، ۱۰ `selected_pids`، ۱۰ `selected_names`، زمان‌ها و snapshot معتبر `sms_accepted_at` و `expires_at` است؛ درخواست دیگر نمی‌تواند آن را جایگزین یا تمدید کند. ساخت Intent به‌تنهایی ثبت نهایی نیست؛ موجودی رزرو یا کم نمی‌شود.
+بعد از اعتبارسنجی تازه، عملیات شرطی اتمیک `pending → submitting` با شرط `$$NOW < expires_at` فقط به یک درخواست اجازهٔ ثبت Intent می‌دهد. Intent شامل `submission_id`، ۶ `selected_pids`، ۶ `selected_names`، زمان‌ها و snapshot معتبر `sms_accepted_at` و `expires_at` است؛ درخواست دیگر نمی‌تواند آن را جایگزین یا تمدید کند. ساخت Intent به‌تنهایی ثبت نهایی نیست؛ موجودی رزرو یا کم نمی‌شود.
 
 سپس سفارش فقط با `_id` واقعی، شرط دقیق `state=pending`، شرط `recommended_products: {$exists: false}`، نبود Marker و بررسی `$$NOW < expires_at` نوشته می‌شود. همان Update Pipeline، تاریخ واقعی پرداخت و شرط سخت `$$NOW < date_paid + 40 minutes` را نیز دوباره بررسی می‌کند. در شاخهٔ مجاز، وضعیت، جنسیت، نام‌ها و مدارک ثبت همگی یکجا نوشته می‌شوند؛ Timestamp از همان `$$NOW` ثابت Pipeline است. مساوی Deadline یا پس از آن، خروجی `$$ROOT` و سند بدون تغییر است. نام‌ها و شناسه با `$literal` درج می‌شوند:
 
 ```text
 state: not_seen
 tester_gender: تستر انتخابی
-recommended_products: [10 exact source names]
+recommended_products: [6 exact source names]
 tester_selection_submission_id: <same submission_id>
 tester_selection_written_at: UTC BSON Date (same pipeline $$NOW)
 ```
@@ -246,21 +246,21 @@ order_id: ObjectId (unchanged)
 token_hash / token_version / created_at: unchanged
 status: submitted
 submission_id: unique intent identifier
-selected_pids: [10 strings in customer order]
-selected_names: [10 exact products_api.name strings]
+selected_pids: [6 strings in customer order]
+selected_names: [6 exact products_api.name strings]
 submitting_at / submitted_at / updated_at: UTC datetime
 sms_accepted_at / expires_at: trusted UTC deadline snapshot
 ```
 
 اگر قبل از نوشتن سفارش Crash رخ دهد، Context یا Submit فقط تا پیش از Deadline همان Intent را ادامه می‌دهد. پس از انقضا، سفارش خالی باقی می‌ماند و Selection با `review_required` و `review_reason=deadline_before_order_write` برای پشتیبانی نگهداری می‌شود. Intent و اطلاعات Audit پاک یا جایگزین نمی‌شوند. اگر نوشتن سفارش پیش از Deadline موفق شده ولی پاسخ یا نهایی‌کردن Selection از دست رفته باشد، Marker، نام‌ها و `tester_selection_written_at` از دیتابیس بررسی می‌شوند و حتی پس از انقضا فقط Selection تکمیل می‌شود؛ سفارش دوباره نوشته نمی‌شود. یک نوشتن به‌موقع که هم‌زمان با ثبت وضعیت پشتیبانی کامل شده باشد نیز با همین شواهد قابل نهایی‌شدن است. زمان‌های ناموجود/نامعتبر در رکورد نیمه‌تمام، به‌جای حدس موفقیت، `review_reason=unverified_order_write_time` می‌گیرند. رسیدهای از قبل `submitted`، از جمله رسیدهای پیش از این تغییر که فیلد زمان جدید ندارند، حفظ می‌شوند. هیچ Migration اجرا نمی‌شود.
 
-Intent متفاوت `409` می‌گیرد. Retry همان ۱۰ PID با همان ترتیب پس از ثبت موفق، حتی بعد از انقضا، همان رسید قبلی را بازمی‌گرداند. Intent و سفارش ناسازگار خودکار بازنویسی نمی‌شوند.
+Intent متفاوت `409` می‌گیرد. Retry همان ۶ PID با همان ترتیب پس از ثبت موفق، حتی بعد از انقضا، همان رسید قبلی را بازمی‌گرداند. Intent و سفارش ناسازگار خودکار بازنویسی نمی‌شوند.
 
 برای مشاهدهٔ موارد نیازمند پشتیبانی، در دیتابیس تنظیم‌شده فقط رکوردهای `tester_selections` با `{status: "review_required"}` را بررسی کنید. `review_reason` علت غیرحساس را نگه می‌دارد؛ زمان شروع Intent ناموجود یا خارج از مهلت نیز `unverified_intent_time` می‌گیرد و اجازهٔ نوشتن سفارش ندارد. این وضعیت به‌صورت خودکار به `pending` برنمی‌گردد و مهلت تمدید نمی‌شود.
 
 این روش به Transaction وابسته نیست و روی Standalone نیز کار می‌کند. Write Concern همان `majority` فعلی Worker است. ایندکس‌های یکتای `order_id` و `token_hash` فعلی حفظ می‌شوند؛ Collection، Worker، Queue یا Migration جدیدی وجود ندارد. `ensure_selection` همچنان فقط `$setOnInsert` دارد و Selection ثبت‌شده را Reset نمی‌کند.
 
-فرانت پیش از ثبت، فهرست ۱۰ نام را برای مرور نشان می‌دهد. هنگام ارسال، تغییر انتخاب‌ها و کلیک مجدد قفل می‌شوند. در خطای شبکه موفقیت حدس زده نمی‌شود؛ Context وضعیت واقعی را بررسی/بازیابی می‌کند. اگر آن هم در دسترس نبود، وضعیت نامشخص باقی می‌ماند و Retry فقط همان PIDهای ثابت را می‌فرستد. پس از موفقیت یا بازکردن دوباره لینک، رسید از نام‌های ذخیره‌شده نمایش داده می‌شود، حتی اگر محصول بعداً ناموجود باشد؛ کاتالوگ زنده برای نمایش رسید لازم نیست.
+فرانت پیش از ثبت، فهرست ۶ نام را برای مرور نشان می‌دهد. هنگام ارسال، تغییر انتخاب‌ها و کلیک مجدد قفل می‌شوند. در خطای شبکه موفقیت حدس زده نمی‌شود؛ Context وضعیت واقعی را بررسی/بازیابی می‌کند. اگر آن هم در دسترس نبود، وضعیت نامشخص باقی می‌ماند و Retry فقط همان PIDهای ثابت را می‌فرستد. پس از موفقیت یا بازکردن دوباره لینک، رسید از نام‌های ذخیره‌شده نمایش داده می‌شود، حتی اگر محصول بعداً ناموجود باشد؛ کاتالوگ زنده برای نمایش رسید لازم نیست.
 
 ### مهلت قابل تنظیم لینک
 
@@ -340,7 +340,7 @@ python -m tests.selection_preview --port 8789
 node tests/test_selection_frontend.cjs
 ```
 
-هر اجرای کامل تست مرورگر به Preview تازه نیاز دارد. تست شامل سفارش واقعی در دیتابیس ایزوله، مرور/ثبت ۱۰ انتخاب، شمارهٔ کامل، Modal، دوبارکلیک، بازگشایی فقط‌خواندنی، پاسخ موفق گم‌شده، شبکهٔ نامشخص، محصول ناموجود، لینک نامعتبر، امنیت Header/Referer و عرض‌های ۳۲۰/۳۹۰/۷۶۸/۱۴۴۰ است. تصاویر و گزارش در `test-artifacts/selection/` ذخیره می‌شوند. مسیر مرورگر با `CATALOG_BROWSER_PATH` قابل تنظیم است.
+هر اجرای کامل تست مرورگر به Preview تازه نیاز دارد. تست شامل سفارش واقعی در دیتابیس ایزوله، مرور/ثبت تعداد انتخابِ تنظیم‌شده، شمارهٔ کامل، Modal، دوبارکلیک، بازگشایی فقط‌خواندنی، پاسخ موفق گم‌شده، شبکهٔ نامشخص، محصول ناموجود، لینک نامعتبر، امنیت Header/Referer و عرض‌های ۳۲۰/۳۹۰/۷۶۸/۱۴۴۰ است. تصاویر و گزارش در `test-artifacts/selection/` ذخیره می‌شوند. مسیر مرورگر با `CATALOG_BROWSER_PATH` قابل تنظیم است.
 
 ## سرویس پیامک ساده فرازSMS
 
@@ -540,7 +540,7 @@ python -m app.workers.tester_sms --once --limit 50
 | Intent بدون ثبت معتبر، `pending` یا Selection ناموجود | بدون تغییر | آزادسازی مستقل از Selection | بدون تغییر، حتی null، خالی یا ناموجود |
 | رسید `submitted` ناقص، دیرهنگام یا ناسازگار | بدون تغییر | آزادسازی از مسیر انقضا | بدون تغییر |
 
-اثبات ثبت معتبر شامل شناسهٔ معتبر Submission، دقیقاً ۱۰ PID معتبر و یکتا با همان قواعد API، ۱۰ نام معتبر، تطابق کامل نام‌ها و Marker با سفارش و `accepted_at <= submitting_at <= tester_selection_written_at < Deadline` است. برای `submitted`، وجود `submitted_at` معتبر و برابر با زمان ثبت سفارش همچنان الزامی است؛ برای `submitting` و `review_required`، نبود این فیلد مانع نیست چون ثبت واقعی در سفارش اثبات می‌شود. Deadline منجمد Intent حفظ می‌شود و در نبود آن، تنظیم مشترک مبنا است. صرف وجود `recommended_products` یا Intent ناقص کافی نیست. بررسی ساختار مدارک با `$jsonSchema` در Query و سپس بررسی مجدد سفارش و Selection پیش از Update انجام می‌شود؛ Validator یا مدل جدیدی ساخته نمی‌شود. موجودی فعلی کاتالوگ دوباره مبنای رد رسید ذخیره‌شده قرار نمی‌گیرد.
+اثبات ثبت معتبر شامل شناسهٔ معتبر Submission، دقیقاً ۶ PID معتبر و یکتا با همان قواعد API، ۶ نام معتبر، تطابق کامل نام‌ها و Marker با سفارش و `accepted_at <= submitting_at <= tester_selection_written_at < Deadline` است. برای `submitted`، وجود `submitted_at` معتبر و برابر با زمان ثبت سفارش همچنان الزامی است؛ برای `submitting` و `review_required`، نبود این فیلد مانع نیست چون ثبت واقعی در سفارش اثبات می‌شود. Deadline منجمد Intent حفظ می‌شود و در نبود آن، تنظیم مشترک مبنا است. صرف وجود `recommended_products` یا Intent ناقص کافی نیست. بررسی ساختار مدارک با `$jsonSchema` در Query و سپس بررسی مجدد سفارش و Selection پیش از Update انجام می‌شود؛ Validator یا مدل جدیدی ساخته نمی‌شود. موجودی فعلی کاتالوگ دوباره مبنای رد رسید ذخیره‌شده قرار نمی‌گیرد.
 
 مسیر موفق، حتی اگر Worker چند ساعت دیر اجرا شود، یک `$set` اتمیک روی سفارش دارد:
 
@@ -685,7 +685,7 @@ TESTER_RUN_MONGO_INTEGRATION=1 python -m unittest tests.test_tester_sms_integrat
 ```
 
 قطع ارتباط با بستن واقعی کلاینت MongoDB و اتصال دوباره آزمایش می‌شود؛ سرویس MongoDB مشترک متوقف نمی‌شود.
-Integration شامل state دقیق (و رد آرایه/نوع متفاوت)، مستقل‌بودن از تمام انواع جنسیت، تاریخ قدیمی یا ناموجود، روش ارسال حضوری/فوری، ایندکس جدید بدون Partial، حفظ ایندکس‌های قدیمی، `$lookup`، Claim هم‌زمان، Retry، Repair بعد از آزادسازی و Dry Run کاملاً خواندنی است. تست‌های Selection، ثبت ۱۰ نام دقیق، مشاهدهٔ رسید/انقضا بعد از تغییر state و جلوگیری اتمیک از ثبت جدید خارج از pending را نیز پوشش می‌دهند. آزادسازی Submit معتبرِ پیش از Deadline در اجرای دیرهنگام، تغییر اتمیک جنسیت و state و حفظ جنسیت در تمام مسیرهای انقضا تست می‌شوند.
+Integration شامل state دقیق (و رد آرایه/نوع متفاوت)، مستقل‌بودن از تمام انواع جنسیت، تاریخ قدیمی یا ناموجود، روش ارسال حضوری/فوری، ایندکس جدید بدون Partial، حفظ ایندکس‌های قدیمی، `$lookup`، Claim هم‌زمان، Retry، Repair بعد از آزادسازی و Dry Run کاملاً خواندنی است. تست‌های Selection، ثبت ۶ نام دقیق، مشاهدهٔ رسید/انقضا بعد از تغییر state و جلوگیری اتمیک از ثبت جدید خارج از pending را نیز پوشش می‌دهند. آزادسازی Submit معتبرِ پیش از Deadline در اجرای دیرهنگام، تغییر اتمیک جنسیت و state و حفظ جنسیت در تمام مسیرهای انقضا تست می‌شوند.
 خلاصهٔ Explain روی دادهٔ ساختگی در `test-artifacts/tester-worker-explain.json` ذخیره می‌شود؛ این پوشه وارد Git نمی‌شود.
 تست‌های آزادسازی در `tests.test_tester_release` و `tests.test_tester_release_integration` قرار دارند؛ Integration فقط دیتابیس موقت `tester_release_it_<uuid>` را تغییر می‌دهد و پس از اجرا حذف می‌کند. سناریوها شامل مرز برابر Deadline، همهٔ وضعیت‌ها، نبود زمان معتبر، Batch کوچک و رسید خراب، دو Worker هم‌زمان، حفظ Audit/Recovery، Dry Run و شکست قابل بازیابی دیتابیس است. Explain صف آزادسازی در `test-artifacts/tester-release-explain.json` ذخیره می‌شود؛ هیچ درخواست واقعی فراز در این تست‌ها مجاز نیست.
 
@@ -807,3 +807,7 @@ db.preprocess_orders.find(
 مرز نهایی با ساعت MongoDB (`$$NOW`) و در همان Update بررسی می‌شود. آزادسازی در اولین Batch بعد از موعد انجام می‌شود، نه یک تایمر دائمی دقیقاً در ثانیهٔ ۴۰ دقیقه. ارسال اولیه و Retry پیش از Claim و دوباره پیش از dispatch این مرز را بررسی می‌کنند. JSON شامل `normalized`، `invalid_paid_dates`، `released_paid_timeout`، `paid_timeout_ready`، `paid_timeout_errors` و دو پرچم backlog است. خطای دیتابیس Exit Code غیرصفر دارد؛ `--dry-run` هیچ داده‌ای نمی‌نویسد و فقط همان Batch محدود را گزارش می‌کند.
 
 Benchmark واقعی ۲۰٬۰۰۰ سفارش ایزوله: Queryهای Backfill و موعدرسیده هرکدام ۵۱ Docs و ۵۱ Keys، بدون COLLSCAN؛ زمان یک اجرای آن‌ها به‌ترتیب `12.92 ms` و `15.32 ms` و اجرای Batch شامل ۱۰ نرمال‌سازی و ۱۰ آزادسازی `339.81 ms` بود. این اعداد فقط همین محیط‌اند. اجرای تست: `TESTER_RUN_PAID_PERFORMANCE=1 python -m unittest tests.test_paid_release_performance -v`؛ روی PowerShell متغیر را با `$env:TESTER_RUN_PAID_PERFORMANCE='1'` تنظیم کنید. تست دیتابیس UUID مستقل می‌سازد و در پایان پاک می‌کند.
+
+### تعداد تسترهای انتخابی
+
+`TESTER_SELECTION_COUNT=6` در `.env` تعداد انتخاب‌ها را برای متن‌ها، شمارنده‌ها، ظرفیت و اعتبارسنجی فرانت، API و Worker تعیین می‌کند. مقدار باید عدد صحیح بین ۱ و ۴۹۸ باشد؛ مقدار نامعتبر هنگام شروع برنامه خطا می‌دهد. پس از تغییر، برنامه و همهٔ Workerها را مجدداً راه‌اندازی کنید و صفحه را تازه کنید. مثال‌های API بالا بر اساس مقدار پیش‌فرض ۶ هستند.

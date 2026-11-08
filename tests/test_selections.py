@@ -109,7 +109,7 @@ class SelectionTests(unittest.IsolatedAsyncioTestCase):
         blocker = patch("socket.create_connection", side_effect=AssertionError("Unit tests must not use the network"))
         blocker.start()
         self.addCleanup(blocker.stop)
-        self.pids = [str(index) for index in range(1, 11)]
+        self.pids = [str(index) for index in range(1, service.COUNT + 1)]
 
     async def call(self, action="context", **extra):
         return await request(self.app, f"/api/tester/selection/{action}", {"token": self.token, **extra})
@@ -480,13 +480,13 @@ class SelectionTests(unittest.IsolatedAsyncioTestCase):
         for index, product in enumerate(self.rows):
             product["name"] = "$name" if index == 0 else f"$$source-name-{index}"
         self.assertEqual((await self.call("submit", pids=self.pids))[0], 200)
-        self.assertEqual(self.stored_order["recommended_products"], [row["name"] for row in self.rows[:10]])
+        self.assertEqual(self.stored_order["recommended_products"], [row["name"] for row in self.rows[:service.COUNT]])
 
     async def test_valid_context_full_phone_trimmed_name_display_id_and_privacy(self):
         self.stored_order["sms_sent"] = True
         status, body, headers = await self.call()
         self.assertEqual(status, 200)
-        self.assertEqual(body["order"], {"id": "OR0000087510", "customer_name": "احمد فرجی", "phone": "09123456789", "tester_count": 10})
+        self.assertEqual(body["order"], {"id": "OR0000087510", "customer_name": "احمد فرجی", "phone": "09123456789", "tester_count": service.COUNT})
         self.assertEqual(body["selection"]["status"], "pending")
         self.assertEqual(body["selection"]["selected_pids"], [])
         self.assertEqual(body["selection"]["selected_names"], [])
@@ -585,7 +585,7 @@ class SelectionTests(unittest.IsolatedAsyncioTestCase):
                 expected = 200
                 self.assertEqual((await self.call())[0], expected)
                 self.assertEqual((await self.call("submit", pids=self.pids))[0], expected)
-                self.assertEqual(len(self.stored_order["recommended_products"]), 10)
+                self.assertEqual(len(self.stored_order["recommended_products"]), service.COUNT)
 
     async def test_missing_or_arbitrary_purchased_product_does_not_restrict_link(self):
         for value in (None, [], "other", [123], {"unexpected": "shape"}):
@@ -611,7 +611,7 @@ class SelectionTests(unittest.IsolatedAsyncioTestCase):
         self.fresh_catalog.assert_awaited_once_with(self.db)
 
     async def test_count_duplicates_and_nonstring_pids_rejected_without_writes(self):
-        for pids in (self.pids[:9], self.pids + ["11"], self.pids[:9]+["1"], list(range(10)), "123", None):
+        for pids in (self.pids[:-1], self.pids + ["11"], self.pids[:-1]+["1"], list(range(service.COUNT)), "123", None):
             self.assertEqual((await self.call("submit", pids=pids))[0], 422)
             self.assertNotIn("recommended_products", self.stored_order)
             self.assertEqual(self.selection["status"], "pending")
@@ -624,7 +624,7 @@ class SelectionTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(self.selection["status"], "pending")
 
     async def test_any_existing_field_including_null_and_identical_names_is_never_overwritten(self):
-        for value in (None, [], ["old"], [row["name"] for row in self.rows[:10]]):
+        for value in (None, [], ["old"], [row["name"] for row in self.rows[:service.COUNT]]):
             self.stored_order["recommended_products"] = value
             # The worker fake conflates missing and null; the explicit Python guard
             # and real integration tests both check that null is also protected.
@@ -642,7 +642,7 @@ class SelectionTests(unittest.IsolatedAsyncioTestCase):
         self.fresh_catalog.assert_awaited_once()
 
     async def test_two_different_requests_only_one_wins(self):
-        other = [str(index) for index in range(11, 21)]
+        other = [str(index) for index in range(11, 11 + service.COUNT)]
         results = await asyncio.gather(self.call("submit", pids=self.pids), self.call("submit", pids=other))
         self.assertEqual(sorted(result[0] for result in results), [200, 409])
         winner = next(result[1] for result in results if result[0] == 200)

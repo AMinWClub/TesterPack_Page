@@ -17,12 +17,13 @@ from app.catalog import canonical_pid, eligible_products
 from app.services.sms import SmsValidationError
 from app.services.sms.faraz import normalize_recipient
 from app.selection_security import TOKEN_PATTERN
+from app.selection_config import TESTER_SELECTION_COUNT
 from app.workers.tester_sms import TOKEN_VERSION, order_filter, paid_window_guard, selection_deadline, sms_full_name, worker_collections
 from app.workers.paid_release import deadline_expression
 
 router = APIRouter(prefix="/api/tester/selection", tags=["selection"])
 logger = logging.getLogger(__name__)
-COUNT = 10
+COUNT = TESTER_SELECTION_COUNT
 ORDER_MARKER = "tester_selection_submission_id"
 ORDER_WRITTEN_AT = "tester_selection_written_at"
 ORDER_PROJECTION = {key: 1 for key in ("_id", "state", "id", "first_name", "last_name", "phone", "recommended_products", ORDER_MARKER, ORDER_WRITTEN_AT)}
@@ -41,7 +42,7 @@ def validate_token(token):
 
 def validate_pids(pids):
     if not isinstance(pids, list) or len(pids) != COUNT:
-        fail(422, "invalid_count", "لطفاً دقیقاً ۱۰ عطر انتخاب کنید.")
+        fail(422, "invalid_count", f"لطفاً دقیقاً {str(COUNT).translate(str.maketrans('0123456789', '۰۱۲۳۴۵۶۷۸۹'))} عطر انتخاب کنید.")
     if any(not isinstance(pid, str) or not pid.strip() or pid != pid.strip() or len(pid) > 128
            or any(ord(char) < 32 for char in pid) for pid in pids):
         fail(422, "invalid_products", "شناسهٔ یکی از عطرها معتبر نیست.")

@@ -209,10 +209,10 @@ class TesterReleaseMongoTests(unittest.IsolatedAsyncioTestCase):
         for _ in range(12):
             await self.add("pending", age=5)
             source, _, selected = await self.add("submitted", age=5)
-            await self.collections["selections"].update_one({"_id": selected["_id"]}, {"$set": {"selected_pids": ["duplicate"] * 10}})
+            await self.collections["selections"].update_one({"_id": selected["_id"]}, {"$set": {"selected_pids": ["duplicate"] * selection_api.COUNT}})
         # A Unicode-only blank name must agree with Python's intent validation too.
         source, _, selected = await self.add("submitted", age=5)
-        names = ["\u1680\x1c "] * 10
+        names = ["\u1680\x1c "] * selection_api.COUNT
         await self.collections["selections"].update_one({"_id": selected["_id"]}, {"$set": {"selected_names": names}})
         await self.collections["orders"].update_one({"_id": source["_id"]}, {"$set": {"recommended_products": names}})
         ready = [(await self.add(status, age=age))[0] for status, age in
@@ -298,7 +298,7 @@ class TesterReleaseMongoTests(unittest.IsolatedAsyncioTestCase):
                 await resume.wait()
             return await original(collection, query, update, *args, **kwargs)
         with patch.object(AsyncCollection, "find_one_and_update", new=pause_final_receipt):
-            task = asyncio.create_task(selection_api.submit(self.db, self.settings, token, [str(i) for i in range(1, 11)]))
+            task = asyncio.create_task(selection_api.submit(self.db, self.settings, token, [str(i) for i in range(1, selection_api.COUNT + 1)]))
             try:
                 await asyncio.wait_for(written.wait(), timeout=5)
                 before = await self.stored(source)
@@ -361,7 +361,7 @@ class TesterReleaseMongoTests(unittest.IsolatedAsyncioTestCase):
                 elif corruption == "early_start":
                     selected["submitting_at"] = notification["accepted_at"] - timedelta(milliseconds=1)
                 elif corruption == "duplicates":
-                    selected["selected_pids"] = ["same"] * 10
+                    selected["selected_pids"] = ["same"] * selection_api.COUNT
                 else:
                     selected["selected_pids"][0] = " leading-space"
                 await self.collections["orders"].replace_one({"_id": source["_id"]}, copy.deepcopy(source))
@@ -472,7 +472,7 @@ class TesterReleaseMongoTests(unittest.IsolatedAsyncioTestCase):
         healthy, _, _ = await self.add("submitted", age=31)
         incomplete, _, _ = await self.add("review_required", age=31)
         malformed, _, selected = await self.add("submitting", age=31, written=True)
-        await self.collections["selections"].update_one({"_id": selected["_id"]}, {"$set": {"selected_pids": ["duplicate"] * 10}})
+        await self.collections["selections"].update_one({"_id": selected["_id"]}, {"$set": {"selected_pids": ["duplicate"] * selection_api.COUNT}})
         await self.add("review_required", age=31, written=True)
         for source in (bad, healthy, incomplete, malformed):
             values = {"state": "not_seen"}
