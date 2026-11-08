@@ -29,20 +29,21 @@ def written_fields(selection, accepted):
             selection_api.ORDER_WRITTEN_AT: accepted + timedelta(minutes=2)}
 
 
-def fixture(status="pending", *, age=30, written=False, now=NOW, **changes):
+def fixture(status="pending", *, age=30, written=False, now=NOW, selection_count=None, **changes):
     """One consistent synthetic order + accepted notification + optional intent."""
     source = order(state="pending", sms_sent=True, **changes)
     accepted = now - timedelta(minutes=age)
     notification = {"order_id": source["_id"], "status": "accepted", "accepted_at": accepted}
     selected = None
+    count = selection_api.COUNT if selection_count is None else selection_count
     if status is not None:
         selected = {"_id": ObjectId(), "order_id": source["_id"], "status": status,
                     "token_version": worker.TOKEN_VERSION,
                     "token_hash": hashlib.sha256(worker.token_for_order(source["_id"], settings().token_secret).encode()).hexdigest()}
         if status in {"submitted", "submitting", "review_required"}:
             selected.update(submission_id=ObjectId().binary.hex() + "a" * 8,
-                            selected_pids=[str(i) for i in range(selection_api.COUNT)],
-                            selected_names=[f"$Exact source name {i}" for i in range(selection_api.COUNT)],
+                            selected_pids=[str(i) for i in range(count)],
+                            selected_names=[f"$Exact source name {i}" for i in range(count)],
                             submitting_at=accepted + timedelta(minutes=1),
                             expires_at=accepted + timedelta(minutes=30))
             if status == "submitted" or written:
@@ -80,6 +81,41 @@ class TesterReleaseTests(unittest.IsolatedAsyncioTestCase):
 
     async def release(self, **kwargs):
         return await worker.release_resolved_tester_orders(self.collections, self.settings, **kwargs)
+
+    async def test_historical_receipts_release_at_any_count_without_rewriting_evidence(self):
+        rows = [self.add(status, age=age, written=True, selection_count=count)
+                for count in (10, 6, 17) for age in (5, 31)
+                for status in ("submitted", "submitting", "review_required")]
+        before = [copy.deepcopy((source["recommended_products"], selected)) for source, _, selected in rows]
+        with patch.object(selection_api, "COUNT", 5):
+            summary = await self.release()
+        self.assertEqual((summary["released_submitted"], summary["released_expired"], summary["release_errors"]), (18, 0, 0))
+        for (source, _, selected), evidence in zip(rows, before):
+            self.assertEqual((source["state"], source["tester_gender"]), ("not_seen", "تستر انتخابی"))
+            self.assertEqual((source["recommended_products"], selected), evidence)
+
+    async def test_historical_malformed_receipts_are_not_successful_choices(self):
+        rows = []
+        for corruption in ("missing", "duplicate", "blank", "mismatch", "scalar", "marker"):
+            source, _, selected = self.add("submitted", age=5, selection_count=10)
+            if corruption == "missing":
+                selected.pop("selected_names")
+            elif corruption == "duplicate":
+                selected["selected_pids"][1] = selected["selected_pids"][0]
+            elif corruption == "blank":
+                selected["selected_names"][0] = "\u1680\x1c "
+                source["recommended_products"] = selected["selected_names"].copy()
+            elif corruption == "mismatch":
+                selected["selected_names"].pop()
+                source["recommended_products"] = selected["selected_names"].copy()
+            elif corruption == "scalar":
+                selected["selected_pids"] = "bad"
+            else:
+                source[selection_api.ORDER_MARKER] = "different"
+            rows.append((source, selected))
+        with patch.object(selection_api, "COUNT", 5):
+            self.assertEqual((await self.release())["released_submitted"], 0)
+        self.assertTrue(all(source["state"] == "pending" for source, _ in rows))
 
     async def test_submitted_releases_early_and_repeated_run_is_idempotent(self):
         source, notification, selected = self.add("submitted", age=10)

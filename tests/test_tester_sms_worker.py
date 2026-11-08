@@ -68,6 +68,8 @@ def expression(value, document, variables=None):
     evaluate = lambda item: expression(item, document, variables)
     if operator == "$literal":
         return operands
+    if operator == "$size":
+        return len(evaluate(operands))
     if operator == "$add":
         items = [evaluate(item) for item in operands]
         if None in items:
@@ -689,7 +691,7 @@ class TesterWorkerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(selections.documents[0]["token_hash"], hashlib.sha256(token.encode("ascii")).hexdigest())
         self.assertEqual(selections.documents[0]["token_version"], worker.TOKEN_VERSION)
         self.assertNotIn(token, repr(selections.documents))
-        self.assertEqual(set(selections.documents[0]), {"order_id", "token_hash", "token_version", "status", "created_at"})
+        self.assertEqual(set(selections.documents[0]), {"order_id", "token_hash", "token_version", "status", "created_at", "required_count"})
 
     async def test_duplicate_key_race_reuses_existing_notification_and_selection(self):
         collections = worker.worker_collections(self.db, self.settings)

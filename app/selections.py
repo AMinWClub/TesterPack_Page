@@ -40,13 +40,28 @@ def validate_token(token):
     return hashlib.sha256(token.encode("ascii")).hexdigest()
 
 
-def validate_pids(pids):
-    if not isinstance(pids, list) or len(pids) != COUNT:
-        fail(422, "invalid_count", f"لطفاً دقیقاً {str(COUNT).translate(str.maketrans('0123456789', '۰۱۲۳۴۵۶۷۸۹'))} عطر انتخاب کنید.")
-    if any(not isinstance(pid, str) or not pid.strip() or pid != pid.strip() or len(pid) > 128
-           or any(ord(char) < 32 for char in pid) for pid in pids):
+def valid_pid(pid):
+    return (isinstance(pid, str) and bool(pid.strip()) and pid == pid.strip() and len(pid) <= 128
+            and not any(ord(char) < 32 for char in pid))
+
+
+def required_count(selection):
+    # Legacy pending links adopt today's policy only when a new intent is accepted.
+    # Merely viewing a link never backfills old documents. Invalid stored values
+    # fail closed; receipt validation never uses this capacity policy.
+    count = selection.get("required_count", COUNT)
+    if type(count) is not int or not 1 <= count <= 498:
+        fail(409, "inconsistent_selection", "ظرفیت انتخاب این سفارش نیاز به بررسی پشتیبانی دارد.")
+    return count
+
+
+def validate_pids(pids, count=None):
+    count = COUNT if count is None else count
+    if not isinstance(pids, list) or len(pids) != count:
+        fail(422, "invalid_count", f"لطفاً دقیقاً {str(count).translate(str.maketrans('0123456789', '۰۱۲۳۴۵۶۷۸۹'))} عطر انتخاب کنید.")
+    if any(not valid_pid(pid) for pid in pids):
         fail(422, "invalid_products", "شناسهٔ یکی از عطرها معتبر نیست.")
-    if len(set(pids)) != COUNT:
+    if len(set(pids)) != count:
         fail(422, "duplicate_products", "هر عطر را فقط یک بار انتخاب کنید.")
     return pids
 
@@ -61,7 +76,7 @@ def require_pending(order):
         fail(409, "order_not_pending", "این سفارش از مرحلهٔ انتخاب تستر خارج شده و امکان ثبت انتخاب جدید ندارد.")
 
 
-def order_display(order):
+def order_display(order, tester_count=None):
     name = sms_full_name(order)
     identifier = order.get("id")
     try:
@@ -70,7 +85,8 @@ def order_display(order):
         fail(409, "inconsistent_order", "اطلاعات این سفارش نیاز به بررسی پشتیبانی دارد.")
     if not isinstance(identifier, str) or not identifier.strip():
         fail(409, "inconsistent_order", "اطلاعات این سفارش نیاز به بررسی پشتیبانی دارد.")
-    return {"id": identifier, "customer_name": name, "phone": phone, "tester_count": COUNT}
+    return {"id": identifier, "customer_name": name, "phone": phone,
+            "tester_count": COUNT if tester_count is None else tester_count}
 
 
 async def linked_order(db, settings, token):
@@ -149,9 +165,9 @@ def intent_valid(selection):
     pids, names = selection.get("selected_pids"), selection.get("selected_names")
     return (isinstance(selection.get("submission_id"), str)
             and re.fullmatch(r"[a-f0-9]{32}", selection["submission_id"]) is not None
-            and isinstance(pids, list) and len(pids) == COUNT
-            and all(isinstance(pid, str) and pid.strip() for pid in pids) and len(set(pids)) == COUNT
-            and isinstance(names, list) and len(names) == COUNT
+            and isinstance(pids, list) and bool(pids)
+            and all(valid_pid(pid) for pid in pids) and len(set(pids)) == len(pids)
+            and isinstance(names, list) and len(names) == len(pids)
             and all(isinstance(name, str) and name.strip() for name in names))
 
 
@@ -176,7 +192,9 @@ def response_context(selection, order, window=None):
             availability, code = "expired", "selection_expired"
         else:
             availability, code = "active", None
-    return {"order": order_display(order), "selection": {
+    count = (len(selection["selected_pids"])
+             if selection["status"] != "pending" and intent_valid(selection) else required_count(selection))
+    return {"order": order_display(order, count), "selection": {
         "status": selection["status"], "selected_pids": selection.get("selected_pids", []),
         "selected_names": selection.get("selected_names", []),
         "availability": availability, "code": code,
@@ -302,8 +320,9 @@ async def context(db, settings, token):
 
 async def submit(db, settings, token, pids):
     collections, selection, order = await linked_order(db, settings, token)
-    validate_pids(pids)
     if selection["status"] in {"submitting", "submitted", "review_required"}:
+        if not intent_valid(selection):
+            fail(409, "inconsistent_selection", "وضعیت انتخاب‌های این سفارش نیاز به بررسی پشتیبانی دارد.")
         if selection.get("selected_pids") != pids:
             fail(409, "different_submission", "انتخاب‌های این سفارش قبلاً برای ثبت دریافت شده‌اند و قابل تغییر نیستند.")
         if selection["status"] == "submitted":
@@ -318,6 +337,8 @@ async def submit(db, settings, token, pids):
         if result["selection"]["code"] == "sms_not_accepted":
             fail(409, "sms_not_accepted", "تأیید ارسال پیامک هنوز ثبت نشده است. لطفاً دوباره بررسی کنید.")
         fail(409, "selection_review_required", "وضعیت انتخاب‌های شما نیاز به بررسی پشتیبانی دارد.")
+    count = required_count(selection)
+    validate_pids(pids, count)
     window = await link_window(collections, selection, settings)
     require_active(window)
     require_pending(order)
@@ -339,9 +360,10 @@ async def submit(db, settings, token, pids):
         fail(409, "invalid_products", "نام یکی از عطرها در دسترس نیست. لطفاً انتخاب‌ها را بررسی کنید.")
     selection = await collections["selections"].find_one_and_update({
         "_id": selection["_id"], "order_id": selection["order_id"], "token_hash": selection["token_hash"], "status": "pending",
+        "required_count": selection["required_count"] if "required_count" in selection else {"$exists": False},
         "$expr": deadline_guard(window),
     }, {"$set": {"status": "submitting", "submission_id": uuid4().hex,
-                 "selected_pids": pids, "selected_names": names, "expires_at": window["expires_at"],
+                 "required_count": count, "selected_pids": pids, "selected_names": names, "expires_at": window["expires_at"],
                  "sms_accepted_at": window["accepted_at"]}, "$currentDate": {"submitting_at": True, "updated_at": True}},
         return_document=ReturnDocument.AFTER, collation=SIMPLE)
     if selection is None:

@@ -28,6 +28,28 @@ from tests.test_sms_faraz import FakeHttpResponse, simple_success_body
 
 @unittest.skipUnless(os.getenv("TESTER_RUN_SELECTION_INTEGRATION") == "1", "Set TESTER_RUN_SELECTION_INTEGRATION=1 for isolated MongoDB tests")
 class SelectionMongoTests(unittest.IsolatedAsyncioTestCase):
+    async def test_frozen_ten_link_and_legacy_receipt_survive_current_count_changes(self):
+        await self.db[worker.SELECTIONS].update_one({"order_id": self.source_order["_id"]}, {"$set": {"required_count": 10}})
+        pids = [str(i) for i in range(1, 11)]
+        with patch.object(service, "COUNT", 6):
+            self.assertEqual((await self.call())[1]["order"]["tester_count"], 10)
+            self.assertEqual((await self.call("submit", pids=pids[:6]))[0], 422)
+            self.assertEqual((await self.call("submit", pids=pids))[0], 200)
+        await self.db[worker.SELECTIONS].update_one({"order_id": self.source_order["_id"]}, {"$unset": {"required_count": ""}})
+        before = (await self.selection(), await self.stored_order())
+        with patch.object(service, "COUNT", 5):
+            self.assertEqual((await self.call())[1]["order"]["tester_count"], 10)
+            self.assertEqual((await self.call("submit", pids=pids))[0], 200)
+        self.assertEqual((await self.selection(), await self.stored_order()), before)
+
+    async def test_legacy_pending_concurrent_submissions_freeze_capacity_atomically(self):
+        await self.db[worker.SELECTIONS].update_one({"order_id": self.source_order["_id"]}, {"$unset": {"required_count": ""}})
+        with patch.object(service, "COUNT", 5):
+            pids = [str(i) for i in range(1, 6)]
+            results = await asyncio.gather(self.call("submit", pids=pids), self.call("submit", pids=list(reversed(pids))))
+        self.assertEqual(sorted(result[0] for result in results), [200, 409])
+        self.assertEqual((await self.selection())["required_count"], 5)
+
     async def asyncSetUp(self):
         from app.config import MONGODB_URI, MONGODB_DB_NAME, MONGODB_TIMEOUT_MS
         self.uri, self.production_database, self.timeout = MONGODB_URI, MONGODB_DB_NAME, MONGODB_TIMEOUT_MS

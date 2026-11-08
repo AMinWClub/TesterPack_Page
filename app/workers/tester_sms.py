@@ -304,6 +304,8 @@ def worker_collections(db, settings: WorkerSettings) -> dict:
 
 
 async def ensure_selection(selections, order_id, settings: WorkerSettings) -> str:
+    from app.selection_config import TESTER_SELECTION_COUNT
+
     token = token_for_order(order_id, settings.token_secret)
     token_hash = hashlib.sha256(token.encode("ascii")).hexdigest()
     try:
@@ -312,6 +314,7 @@ async def ensure_selection(selections, order_id, settings: WorkerSettings) -> st
             "token_hash": token_hash,
             "token_version": TOKEN_VERSION,
             "status": "pending",
+            "required_count": TESTER_SELECTION_COUNT,
             "created_at": datetime.now(timezone.utc),
         }}, upsert=True)
     except DuplicateKeyError:
@@ -628,15 +631,10 @@ def release_order_filter(settings: WorkerSettings) -> dict:
 
 def valid_release_selection(selection: dict, order: dict, accepted_at: datetime, deadline: datetime) -> bool:
     """Prove the order was written on time, independently of API finalization."""
-    from fastapi import HTTPException
-    from app.selections import ORDER_WRITTEN_AT, owns_order, utc_date, validate_pids, written_in_time
+    from app.selections import ORDER_WRITTEN_AT, owns_order, utc_date, written_in_time
 
     status = selection.get("status")
     if status not in ("submitting", "review_required", "submitted"):
-        return False
-    try:
-        validate_pids(selection.get("selected_pids"))
-    except HTTPException:
         return False
     frozen = utc_date(selection.get("expires_at"))
     window = {"accepted_at": accepted_at, "expires_at": min(deadline, frozen) if frozen else deadline}
@@ -647,14 +645,14 @@ def valid_release_selection(selection: dict, order: dict, accepted_at: datetime,
 def release_pipeline(settings: WorkerSettings, *, after: dict | None = None, limit: int | None = None) -> list[dict]:
     # Lazy import avoids the existing selections -> worker import cycle and reuses
     # the receipt field names/window rather than defining another selection model.
-    from app.selections import COUNT, ORDER_MARKER, ORDER_WRITTEN_AT
+    from app.selections import ORDER_MARKER, ORDER_WRITTEN_AT
 
     match = release_order_filter(settings)
     if after is not None:
         match["_id"] = {"$gt": after["_id"]}
     # Validate before LIMIT: malformed or inconsistent old receipts cannot starve
     # later ready orders. This is a query predicate, not a collection validator.
-    strings = {"bsonType": "array", "minItems": COUNT, "maxItems": COUNT,
+    strings = {"bsonType": "array", "minItems": 1,
                "items": {"bsonType": "string", "pattern": r"(*UCP)[^\s\x1c-\x1f]"}}
     receipt_schema = {
         "required": ["submission_id", "selected_pids", "selected_names", "submitting_at"],
@@ -702,6 +700,13 @@ def release_pipeline(settings: WorkerSettings, *, after: dict | None = None, lim
             {"$eq": [{"$type": f"${ORDER_WRITTEN_AT}"}, "date"]},
         ]}}]}},
         {"$set": {"_valid_receipt": {"$and": [
+            # $and evaluation order is not guaranteed. Guard each $size itself
+            # so malformed legacy documents cannot abort the release batch.
+            {"$eq": [{"$size": {"$cond": [
+                {"$eq": [{"$type": "$_selection.selected_pids"}, "array"]}, "$_selection.selected_pids", [],
+            ]}}, {"$size": {"$cond": [
+                {"$eq": [{"$type": "$_selection.selected_names"}, "array"]}, "$_selection.selected_names", [],
+            ]}}]},
             {"$or": [
                 {"$eq": ["$_selection.status", "submitting"]},
                 {"$eq": ["$_selection.status", "review_required"]},

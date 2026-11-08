@@ -36,13 +36,13 @@ class SelectionCountTests(unittest.TestCase):
                     self.assertEqual(error.exception.detail["code"], "invalid_count")
                     self.assertIn(str(count).translate(str.maketrans("0123456789", "۰۱۲۳۴۵۶۷۸۹")), error.exception.detail["message"])
 
-    def test_worker_receipt_schema_uses_configured_count(self):
+    def test_worker_receipt_schema_is_independent_of_configured_count(self):
         import json
         for count in (4, 6, 10):
             with self.subTest(count=count), patch.object(selections, "COUNT", count):
                 pipeline = json.dumps(worker.release_pipeline(settings(), limit=5))
-                self.assertIn(f'"minItems": {count}', pipeline)
-                self.assertIn(f'"maxItems": {count}', pipeline)
+                self.assertIn('"minItems": 1', pipeline)
+                self.assertNotIn('"maxItems"', pipeline)
 
 
 class SelectionCountPageTests(unittest.IsolatedAsyncioTestCase):

@@ -1,5 +1,5 @@
 /** Real catalog and token-linked order selection; tokens stay out of API URLs. */
-const MAX_TESTERS = Number(document.querySelector('meta[name="tester-selection-count"]').content);
+let MAX_TESTERS = Number(document.querySelector('meta[name="tester-selection-count"]').content);
 if (!Number.isInteger(MAX_TESTERS) || MAX_TESTERS < 1 || MAX_TESTERS > 498) throw new Error('Invalid tester count');
 const PAGE_SIZE = 24;
 let PERFUMES = [];
@@ -248,21 +248,23 @@ function selectedListTemplate() {
 
 function renderSelection() {
   const n = selected.length;
-  const remaining = MAX_TESTERS - n;
+  const capacity = selectionState === 'submitted' ? submittedNames.length : MAX_TESTERS;
+  const remaining = Math.max(0, capacity - n);
   $('#headerSelected').textContent = farsiNumber(n);
   $('#asideCount').textContent = farsiNumber(n);
   $('#mobileCount').textContent = farsiNumber(n);
-  $('#remainingLabel').textContent = n === MAX_TESTERS ? 'جعبه تکمیل شد ✦' : `${farsiNumber(remaining)} جای خالی`;
-  $('#mobileRemaining').textContent = n === MAX_TESTERS ? 'آماده مرور انتخاب‌ها' : `${farsiNumber(remaining)} انتخاب باقی‌مانده`;
-  $('#finalizeHint').textContent = n === MAX_TESTERS ? `عالی! هر ${farsiNumber(MAX_TESTERS)} رایحه رو انتخاب کردی.` : `برای ادامه، ${farsiNumber(remaining)} عطر دیگه انتخاب کن.`;
+  $('#remainingLabel').textContent = n === capacity ? 'جعبه تکمیل شد ✦' : `${farsiNumber(remaining)} جای خالی`;
+  $('#mobileRemaining').textContent = n === capacity ? 'آماده مرور انتخاب‌ها' : `${farsiNumber(remaining)} انتخاب باقی‌مانده`;
+  $('#finalizeHint').textContent = n === capacity ? `عالی! هر ${farsiNumber(capacity)} رایحه رو انتخاب کردی.` : `برای ادامه، ${farsiNumber(remaining)} عطر دیگه انتخاب کن.`;
   $('#finalizeButton').disabled = n !== MAX_TESTERS || selectionState !== 'pending' || submitBusy || deadlinePassed();
   $('#mobileFinalize').disabled = $('#finalizeButton').disabled;
   if (selectionState === 'preview') $('#finalizeHint').textContent = 'برای ثبت واقعی، لینک اختصاصی پیامک را باز کنید.';
   $('#selectedList').innerHTML = selectedListTemplate();
   $('#drawerContent').innerHTML = `<div class="selection-subheading"><strong>رایحه‌های انتخاب‌شده</strong><span>${farsiNumber(remaining)} جای خالی</span></div><div class="selected-list">${selectedListTemplate()}</div>`;
-  $('#progressTrack').innerHTML = Array.from({ length: MAX_TESTERS }, (_, i) => `<span class="${i < n?'active':''}"></span>`).join('');
+  $('#progressTrack').innerHTML = Array.from({ length: capacity }, (_, i) => `<span class="${i < n?'active':''}"></span>`).join('');
+  $('#progressTrack').setAttribute('aria-valuemax', String(capacity));
   $('#progressTrack').setAttribute('aria-valuenow', String(n));
-  $('#mobileProgress').style.setProperty('--mobile-fill', `${n / MAX_TESTERS * 100}%`);
+  $('#mobileProgress').style.setProperty('--mobile-fill', `${capacity ? n / capacity * 100 : 0}%`);
   syncPerfumeSelection();
 }
 
@@ -740,18 +742,26 @@ function updateSelectionPage() {
 
 function applySelectionContext(data) {
   if (!data.order || !['pending', 'submitted', 'submitting', 'review_required'].includes(data.selection?.status)
-      || data.order.tester_count !== MAX_TESTERS || typeof data.order.customer_name !== 'string'
+      || !Number.isSafeInteger(data.order.tester_count) || data.order.tester_count < 1 || typeof data.order.customer_name !== 'string'
       || typeof data.order.phone !== 'string' || typeof data.order.id !== 'string') throw new Error('Invalid context');
   const status = data.selection.status;
-  if (status === 'submitted' && (!Array.isArray(data.selection.selected_names) || data.selection.selected_names.length !== MAX_TESTERS
+  if (status === 'submitted' && (!Array.isArray(data.selection.selected_names) || !data.selection.selected_names.length
       || !data.selection.selected_names.every(name => typeof name === 'string' && name.trim())
-      || !Array.isArray(data.selection.selected_pids) || data.selection.selected_pids.length !== MAX_TESTERS)) throw new Error('Invalid receipt');
+      || !Array.isArray(data.selection.selected_pids)
+      || data.selection.selected_pids.length !== data.selection.selected_names.length
+      || !data.selection.selected_pids.every(pid => typeof pid === 'string' && pid.trim() && pid === pid.trim()
+        && pid.length <= 128 && !/[\x00-\x1f]/.test(pid))
+      || new Set(data.selection.selected_pids).size !== data.selection.selected_pids.length
+      || data.order.tester_count !== data.selection.selected_pids.length)) throw new Error('Invalid receipt');
+  if (status === 'pending' && data.order.tester_count > 498) throw new Error('Invalid capacity');
   $('#orderCustomerName').textContent = data.order.customer_name;
   $('#orderNumber').textContent = data.order.id;
   $('#orderPhone').textContent = data.order.phone;
   const availability = data.selection.availability;
   if (!['active', 'expired', 'awaiting_sms', 'review_required', 'submitted'].includes(availability)) throw new Error('Invalid window');
   if (availability === 'active' && (!Number.isFinite(data.selection.remaining_seconds) || data.selection.remaining_seconds <= 0)) throw new Error('Invalid window');
+  if (status !== 'submitted') MAX_TESTERS = data.order.tester_count;
+  $$('[data-tester-count]').forEach(node => { node.textContent = farsiNumber(data.order.tester_count); });
   selectionDeadline = performance.now() + Math.max(0, (data.selection.remaining_seconds || 0) * 1000 - (data.requestDurationMs || 0));
   selectionState = status === 'submitted' ? 'submitted' : availability === 'active' ? 'pending' : availability;
   $('#selectionNoticeSupport').hidden = !data.selection.requires_support;
@@ -791,7 +801,7 @@ async function loadSelectionContext() {
 
 function showSubmissionSuccess() {
   $('#modalTitle').textContent = 'انتخاب‌های شما با موفقیت ثبت شد.';
-  $('#modalDescription').textContent = `${farsiNumber(MAX_TESTERS)} عطر انتخابی شما برای آماده‌سازی پک تستر ثبت شدند. از همراهی شما با سراد سپاسگزاریم.`;
+  $('#modalDescription').textContent = `${farsiNumber(submittedNames.length)} عطر انتخابی شما برای آماده‌سازی پک تستر ثبت شدند. از همراهی شما با سراد سپاسگزاریم.`;
   $('#modalSelected').innerHTML = submittedNames.map(name => `<li>${escapeHtml(name)}</li>`).join('');
   $('#modalDone').textContent = 'مشاهده انتخاب‌های ثبت‌شده';
   $('#modalBack').hidden = true;

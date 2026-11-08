@@ -28,6 +28,30 @@ from tests.test_sms_faraz import FakeHttpResponse
 
 @unittest.skipUnless(os.getenv("TESTER_RUN_MONGO_INTEGRATION") == "1", "Set TESTER_RUN_MONGO_INTEGRATION=1 for isolated MongoDB tests")
 class TesterReleaseMongoTests(unittest.IsolatedAsyncioTestCase):
+    async def test_historical_receipts_and_malformed_arrays_with_current_five(self):
+        good = []
+        bad = []
+        for count in (10, 6, 17):
+            for status in ("submitted", "submitting", "review_required"):
+                good.append(await self.add(status, age=5, written=True, selection_count=count))
+        for field, value in (("selected_pids", None), ("selected_pids", "bad"), ("selected_pids", []),
+                             ("selected_pids", ["same"] * 10), ("selected_names", ["name"] * 9),
+                             ("selected_names", [None] * 10), ("selected_names", ["\u1680\x1c "] * 10)):
+            source, _, selected = await self.add("submitted", age=5, selection_count=10)
+            await self.collections["selections"].update_one({"_id": selected["_id"]}, {"$set": {field: value}})
+            if field == "selected_names":
+                await self.collections["orders"].update_one({"_id": source["_id"]}, {"$set": {"recommended_products": value}})
+            bad.append(source)
+        with patch.object(selection_api, "COUNT", 5):
+            summary = await worker.release_resolved_tester_orders(self.collections, self.settings)
+        self.assertEqual((summary["released_submitted"], summary["released_expired"], summary["release_errors"]), (9, 0, 0))
+        for source, _, selected in good:
+            saved = await self.stored(source)
+            self.assertEqual((saved["state"], saved["tester_gender"]), ("not_seen", "تستر انتخابی"))
+            self.assertEqual(saved["recommended_products"], selected["selected_names"])
+        for source in bad:
+            self.assertEqual((await self.stored(source))["state"], "pending")
+
     async def asyncSetUp(self):
         from app.config import MONGODB_URI, MONGODB_DB_NAME, MONGODB_TIMEOUT_MS
         self.production_database = MONGODB_DB_NAME

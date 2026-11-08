@@ -21,7 +21,7 @@
   <link rel="stylesheet" href="/frontend/perfume-details.css?v=2" />
   <link rel="stylesheet" href="/frontend/catalog.css?v=2" />
   <link rel="stylesheet" href="/frontend/selection.css?v=2" />
-  <script src="/frontend/app.js?v=3" defer></script>
+  <script src="/frontend/app.js?v=4" defer></script>
 </head>
 
 <body>
@@ -79,7 +79,7 @@
         <svg class="ico">
           <use href="#i-bag" />
         </svg>
-        <span dir="ltr"><b id="headerSelected">۰</b><span class="slash"> / </span>__TESTER_COUNT_FA__</span>
+        <span dir="ltr"><b id="headerSelected">۰</b><span class="slash"> / </span><span data-tester-count>__TESTER_COUNT_FA__</span></span>
       </button>
     </div>
   </header>
@@ -89,8 +89,8 @@
       <section class="hero" aria-labelledby="heroTitle">
         <div class="hero-content">
           <div class="hero-mini-label">پک تستر سراد</div>
-          <h1 id="heroTitle"><em>__TESTER_COUNT_FA__ رایحه،</em> به انتخاب شما</h1>
-          <p>__TESTER_COUNT_FA__ عطر دلخواهتان را برای پک تستر خود انتخاب کنید.</p>
+          <h1 id="heroTitle"><em><span data-tester-count>__TESTER_COUNT_FA__</span> رایحه،</em> به انتخاب شما</h1>
+          <p><span data-tester-count>__TESTER_COUNT_FA__</span> عطر دلخواهتان را برای پک تستر خود انتخاب کنید.</p>
         </div>
         <ol class="hero-steps" aria-label="مراحل انتخاب تستر">
           <li><a href="#collection">جست‌وجو</a></li>
@@ -114,7 +114,7 @@
           <div class="order-field"><span>شماره سفارش</span><strong class="latin" id="orderNumber">—</strong></div>
           <div class="order-field"><span>شماره همراه</span><strong class="latin" dir="ltr" id="orderPhone">—</strong></div>
           <div class="order-field order-field-last"><span>تعداد تستر</span><strong><b
-                class="gold-number">__TESTER_COUNT_FA__</b> رایحه</strong></div>
+                class="gold-number"><span data-tester-count>__TESTER_COUNT_FA__</span></b> رایحه</strong></div>
         </div>
       </section>
     </div>
@@ -131,7 +131,7 @@
     <section class="wrap selection-result" id="submittedSelection" aria-labelledby="submittedTitle" hidden>
       <div class="section-kicker"><span></span> YOUR DISCOVERY BOX</div>
       <h2 id="submittedTitle" tabindex="-1">انتخاب‌های شما با موفقیت ثبت شد.</h2>
-      <p>__TESTER_COUNT_FA__ عطر انتخابی شما برای آماده‌سازی پک تستر ثبت شدند. از همراهی شما با سراد سپاسگزاریم.</p>
+      <p><span data-tester-count>__TESTER_COUNT_FA__</span> عطر انتخابی شما برای آماده‌سازی پک تستر ثبت شدند. از همراهی شما با سراد سپاسگزاریم.</p>
       <ol class="submitted-list" id="submittedList"></ol>
       <p class="selection-locked-note">این انتخاب‌ها نهایی شده‌اند و امکان ویرایش یا ثبت دوباره ندارند.</p>
     </section>
@@ -219,15 +219,15 @@
             <div class="selection-title-row">
               <div>
                 <h2>جعبه انتخاب تو</h2>
-                <p>__TESTER_COUNT_FA__ رایحه، یک تجربه شخصی.</p>
+                <p><span data-tester-count>__TESTER_COUNT_FA__</span> رایحه، یک تجربه شخصی.</p>
               </div>
-              <div class="selection-counter"><b id="asideCount">۰</b><span>از __TESTER_COUNT_FA__</span></div>
+              <div class="selection-counter"><b id="asideCount">۰</b><span>از <span data-tester-count>__TESTER_COUNT_FA__</span></span></div>
             </div>
             <div class="progress-track" id="progressTrack" role="progressbar" aria-label="پیشرفت انتخاب عطرها"
               aria-valuenow="0" aria-valuemin="0" aria-valuemax="__TESTER_COUNT__"></div>
           </div>
           <div class="selection-main">
-            <div class="selection-subheading"><strong>رایحه‌های انتخاب‌شده</strong><span id="remainingLabel">__TESTER_COUNT_FA__ جای
+            <div class="selection-subheading"><strong>رایحه‌های انتخاب‌شده</strong><span id="remainingLabel"><span data-tester-count>__TESTER_COUNT_FA__</span> جای
                 خالی</span></div>
             <div class="selected-list" id="selectedList"></div>
             <div class="selection-tip"><svg class="ico">
@@ -238,7 +238,7 @@
               انتخاب‌ها <svg class="ico">
                 <use href="#i-arrow" />
               </svg></button>
-            <p id="finalizeHint">برای ادامه، __TESTER_COUNT_FA__ عطر رو انتخاب کن.</p>
+            <p id="finalizeHint">برای ادامه، <span data-tester-count>__TESTER_COUNT_FA__</span> عطر رو انتخاب کن.</p>
           </div>
         </div>
         <!-- <div class="aside-quote"><span>“</span> عطر فقط یک رایحه نیست؛ امضای نامرئی شماست. <span>”</span></div> -->
@@ -258,7 +258,7 @@
     <div class="mobile-selection-info"><span class="mobile-bag"><svg class="ico">
           <use href="#i-bag" />
         </svg></span>
-      <div><strong><b id="mobileCount">۰</b> از __TESTER_COUNT_FA__ تستر</strong><small id="mobileRemaining">__TESTER_COUNT_FA__ انتخاب باقی‌مانده</small>
+      <div><strong><b id="mobileCount">۰</b> از <span data-tester-count>__TESTER_COUNT_FA__</span> تستر</strong><small id="mobileRemaining"><span data-tester-count>__TESTER_COUNT_FA__</span> انتخاب باقی‌مانده</small>
       </div>
     </div><button type="button" id="openDrawer">مشاهده انتخاب‌ها <svg class="ico">
         <use href="#i-arrow" />
@@ -289,7 +289,7 @@
       </svg></div>
     <div class="section-kicker"><span></span> A PERFECT DISCOVERY <span></span></div>
     <h2 id="modalTitle">مرور نهایی انتخاب‌ها</h2>
-    <p id="modalDescription">این __TESTER_COUNT_FA__ عطر برای پک تستر شما ثبت می‌شوند. پس از تأیید، امکان تغییر انتخاب‌ها وجود ندارد.</p>
+    <p id="modalDescription">این <span data-tester-count>__TESTER_COUNT_FA__</span> عطر برای پک تستر شما ثبت می‌شوند. پس از تأیید، امکان تغییر انتخاب‌ها وجود ندارد.</p>
     <ol class="modal-selected" id="modalSelected"></ol>
     <p class="submission-message" id="submissionMessage" role="status" aria-live="polite" hidden></p>
     <button id="modalDone" type="button" class="modal-done">تأیید و ثبت نهایی</button>

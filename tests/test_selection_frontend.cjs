@@ -100,6 +100,30 @@ async function main() {
     await send('Emulation.setEmulatedMedia',{features:[{name:'prefers-reduced-motion',value:'reduce'}]});
     await send('Fetch.enable',{patterns:[{urlPattern:'*/api/tester/selection/*',requestStage:'Request'},{urlPattern:'*/api/tester/selection/submit',requestStage:'Response'}]});
 
+    // Historical receipts use their actual count; frozen pending links use the
+    // server's per-selection capacity rather than today's HTML default.
+    for (const count of [10, 6]) {
+      for (const width of [1440, 390]) {
+        await load(fixtures['historical_' + count].path, width);
+        assert(await evaluate(`selectionState==='submitted' && selected.length===${count}
+          && document.querySelectorAll('#submittedList li').length===${count}
+          && [...document.querySelectorAll('[data-tester-count]')].every(el=>el.textContent===farsiNumber(${count}))
+          && document.querySelector('#progressTrack').getAttribute('aria-valuemax')==='${count}'
+          && document.querySelector('#mobileProgress').style.getPropertyValue('--mobile-fill')==='100%'
+          && !canEditSelection() && document.documentElement.scrollWidth<=innerWidth`));
+        assert(await evaluate(`(async()=>{const result=await selectionApi('submit',{pids:selected});return result.selection.status==='submitted'&&result.order.tester_count===${count};})()`));
+        assert(await evaluate(`(async()=>{const original=await selectionApi('context');
+          const changes=[{selected_names:[]},{selected_names:['wrong length']},{selected_pids:['duplicate','duplicate']},
+            {selected_names:original.selection.selected_names.map(()=>null)},
+            {selected_pids:original.selection.selected_pids.map(()=> 'duplicate')}];
+          return changes.every(change=>{const data=structuredClone(original);Object.assign(data.selection,change);
+            try{applySelectionContext(data);return false;}catch{return true;}});})()`));
+      }
+    }
+    await load(fixtures.frozen_10.path);
+    assert(await evaluate('MAX_TESTERS===10 && Number(document.querySelector(\'meta[name="tester-selection-count"]\').content)!==10'));
+    await chooseTesters();await review();await click('#modalDone');await until('selectionState==="submitted"&&!submitBusy');
+    assert(await evaluate('submittedNames.length===10&&document.querySelector("#modalDescription").textContent.includes(farsiNumber(10))'));
     for(const [width,height]of [[1440,1000],[768,1024],[390,844],[320,740]]){
       await load(fixtures.success.path,width,height);await until('catalogState==="ready"');
       assert(await evaluate('isSelectionPage&&/^\\/[A-Za-z0-9_-]{18}$/.test(location.pathname)&&typeof selectionToken==="string"&&selectionToken.length===18'));

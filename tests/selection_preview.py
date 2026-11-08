@@ -53,7 +53,8 @@ async def lifespan(app):
             "longevity": {"votes": {"longLasting": 10}}, "sillage": {"votes": {"strong": 10}},
         } for i in range(1, 31)])
         fixtures = {}
-        for scenario in ("success", "uncertain", "lost_response", "unavailable", "expiry_expired", "expiry_waiting", "expiry_live", "expiry_review"):
+        for scenario in ("success", "uncertain", "lost_response", "unavailable", "expiry_expired", "expiry_waiting", "expiry_live", "expiry_review",
+                         "historical_10", "historical_6", "frozen_10"):
             # Exercise exact-case HMAC/Hash lookup and both URL-safe symbols.
             for _ in range(1000):
                 fixture = order(first_name="  مشتری  ", last_name=" آزمایشی ", phone="09120000000", id="OR-TEST-" + scenario)
@@ -71,6 +72,25 @@ async def lifespan(app):
                 "accepted_at": None if scenario == "expiry_waiting" else datetime.now(timezone.utc)
                     - timedelta(minutes=31 if scenario in {"expiry_expired", "expiry_review"} else 0, seconds=1),
             })
+            if scenario == "frozen_10":
+                await db[worker.SELECTIONS].update_one({"order_id": fixture["_id"]}, {"$set": {"required_count": 10}})
+            if scenario.startswith("historical_"):
+                count = int(scenario.rsplit("_", 1)[1])
+                written = datetime.now(timezone.utc) - timedelta(milliseconds=100)
+                intent_id = uuid4().hex
+                names = [row["name"] for row in rows[:count]]
+                await db[worker.SELECTIONS].update_one({"order_id": fixture["_id"]}, {
+                    "$unset": {"required_count": ""}, "$set": {
+                        "status": "submitted", "submission_id": intent_id,
+                        "selected_pids": [str(i) for i in range(1, count + 1)], "selected_names": names,
+                        "submitting_at": written - timedelta(milliseconds=100), "submitted_at": written,
+                        "expires_at": written + timedelta(minutes=30),
+                    },
+                })
+                await db.preprocess_orders.update_one({"_id": fixture["_id"]}, {"$set": {
+                    "state": "not_seen", "tester_gender": "تستر انتخابی", "recommended_products": names,
+                    "tester_selection_submission_id": intent_id, "tester_selection_written_at": written,
+                }})
             if scenario == "expiry_review":
                 intent_id = uuid4().hex
                 names = [row["name"] for row in rows[:TESTER_SELECTION_COUNT]]
