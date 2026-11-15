@@ -26,7 +26,7 @@ logger = logging.getLogger(__name__)
 COUNT = TESTER_SELECTION_COUNT
 ORDER_MARKER = "tester_selection_submission_id"
 ORDER_WRITTEN_AT = "tester_selection_written_at"
-ORDER_PROJECTION = {key: 1 for key in ("_id", "state", "id", "first_name", "last_name", "phone", "recommended_products", ORDER_MARKER, ORDER_WRITTEN_AT)}
+ORDER_PROJECTION = {key: 1 for key in ("_id", "state", "id", "first_name", "last_name", "phone", "product_id", "recommended_products", ORDER_MARKER, ORDER_WRITTEN_AT)}
 SIMPLE = Collation(locale="simple")
 
 
@@ -417,3 +417,25 @@ async def selection_context(request: Request):
 @router.post("/submit")
 async def selection_submit(request: Request):
     return await handle(request, submitting=True)
+
+
+@router.post("/recommendations")
+async def selection_recommendations(request: Request):
+    """Token-scoped, read-only recommendations; never expose purchase history."""
+    body = await read_body(request, submitting=False)
+    settings = getattr(request.app.state, "selection_settings", None)
+    if settings is None:
+        fail(503, "configuration_unavailable", "سرویس انتخاب تستر موقتاً در دسترس نیست.")
+    try:
+        _, selection, order = await linked_order(request.app.state.db, settings, body["token"])
+        # No recommendation queries for completed/expired/unaccepted selections.
+        if selection["status"] != "pending":
+            return {"pids": []}
+        window = await link_window(worker_collections(request.app.state.db, settings), selection, settings)
+        if window["expires_at"] is None or window["now"] >= window["expires_at"]:
+            return {"pids": []}
+        from app.services.matcher.recommendations import recommendations_for_order
+        return {"pids": await recommendations_for_order(request.app.state.db, order)}
+    except PyMongoError:
+        logger.warning("Personal recommendations database read unavailable")
+        fail(503, "database_unavailable", "پیشنهادهای شخصی فعلاً در دسترس نیستند.")

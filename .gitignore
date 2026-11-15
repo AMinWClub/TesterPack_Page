@@ -32,3 +32,4 @@ Thumbs.db
 
 # Generated integration test reports
 test-artifacts/
+*-backup

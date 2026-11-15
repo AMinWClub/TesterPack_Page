@@ -45,3 +45,8 @@
   .finder-lower .result-count { margin-top: 12px; }
 }
 .product-name, .product-brand { overflow-wrap: anywhere; }
+
+/* Personalized recommendations: hidden unless the token has usable history. */
+#forYouFilter[hidden] { display: none !important; }
+#forYouFilter:not(.is-active) { border-color: #bca269; background: #fff9ef; color: var(--navy); }
+#forYouFilter.is-active { box-shadow: 0 2px 10px #c9a96135; }

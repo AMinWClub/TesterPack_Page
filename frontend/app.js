@@ -11,6 +11,9 @@ const $ = (selector, root = document) => root.querySelector(selector);
 const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
 const farsiNumber = n => Number(n).toLocaleString('fa-IR');
 const selected = [];
+let recommendedPids = [];
+let recommendedPidSet = new Set();
+let recommendationRequestMade = false;
 let activeFilter = 'all';
 const activeSeasons = new Set();
 const activeAccords = new Set();
@@ -183,10 +186,15 @@ function renderCatalog(reset = true) {
   const normalized = normalizeSearch(query);
   const compact = normalized.replaceAll(' ', '');
   const tokens = normalized.split(' ').filter(Boolean);
-  filteredProducts = PERFUMES.filter(p => (activeFilter === 'all' || p.genderGroup === activeFilter)
+  filteredProducts = PERFUMES.filter(p => (activeFilter === 'all'
+    || (activeFilter === 'forYou' ? recommendedPidSet.has(p.pid) : p.genderGroup === activeFilter))
     && (!activeSeasons.size || p.seasonKeys.some(key => activeSeasons.has(key)))
     && (!activeAccords.size || p.accordKeys.some(key => activeAccords.has(key)))
     && (!normalized || tokens.every(token => p.searchText.includes(token)) || p.searchCompact.includes(compact)));
+  if (activeFilter === 'forYou') {
+    const rank = new Map(recommendedPids.map((pid, i) => [pid, i]));
+    filteredProducts.sort((a, b) => rank.get(a.pid) - rank.get(b.pid));
+  }
   $('#productGrid').innerHTML = '';
   appendProducts();
   $('#emptyResults').hidden = filteredProducts.length > 0;
@@ -215,7 +223,7 @@ function renderSeasonOptions() {
 function renderActiveFilters() {
   const tags = [];
   if (query) tags.push(['query', '', `جست‌وجو: ${query}`]);
-  if (activeFilter !== 'all') tags.push(['gender', '', activeFilter]);
+  if (activeFilter !== 'all') tags.push(['gender', '', activeFilter === 'forYou' ? 'برای تو' : activeFilter]);
   activeSeasons.forEach(key => tags.push(['season', key, SEASON_LABELS[key] || key]));
   activeAccords.forEach(key => tags.push(['accord', key, accordOptions.find(option => option.key === key)?.label || key]));
   $('#activeCatalogFilters').hidden = tags.length === 0;
@@ -589,7 +597,7 @@ $('#searchInput').addEventListener('input', e => { query = e.target.value; rende
 $('#clearSearch').addEventListener('click', () => { query = ''; $('#searchInput').value = ''; renderCatalog(); $('#searchInput').focus(); });
 $('#filters').addEventListener('click', e => {
   const button = e.target.closest('[data-filter]');
-  if (!button) return;
+  if (!button || (button.dataset.filter === 'forYou' && !recommendedPids.length)) return;
   activeFilter = button.dataset.filter;
   renderCatalog();
 });
@@ -686,6 +694,25 @@ async function selectionApi(action, extra = {}) {
   });
   data.requestDurationMs = performance.now() - started;
   return data;
+}
+
+
+async function loadPersonalRecommendations() {
+  if (recommendationRequestMade || !isSelectionPage || selectionState !== 'pending') return;
+  recommendationRequestMade = true;
+  try {
+    const result = await selectionApi('recommendations');
+    if (!Array.isArray(result.pids) || result.pids.length > 20
+        || !result.pids.every(pid => typeof pid === 'string' && pid.length > 0 && pid.length <= 128)) return;
+    const ids = [...new Set(result.pids)].filter(pid => productsByPid.has(pid));
+    if (selectionState !== 'pending' || !ids.length) return;
+    recommendedPids = ids;
+    recommendedPidSet = new Set(ids);
+    $('#forYouFilter').hidden = false;
+    renderCatalog();
+  } catch {
+    // A matcher failure never blocks the normal catalog or selection flow.
+  }
 }
 
 function closeSelectionOverlays() {
@@ -789,6 +816,7 @@ async function loadSelectionContext() {
     const data = await selectionApi('context');
     applySelectionContext(data);
     if (selectionState === 'pending' && catalogState !== 'ready') await loadCatalog();
+    if (selectionState === 'pending' && catalogState === 'ready') void loadPersonalRecommendations();
   } catch (error) {
     selectionState = recovering ? 'uncertain' : 'error';
     const message = error.message === 'API request failed' || !error.status
