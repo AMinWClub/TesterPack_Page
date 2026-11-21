@@ -18,10 +18,9 @@ from app.catalog_labels import (
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/tester", tags=["catalog"])
-CATALOG_LIMIT = 498
 PRODUCT_FILTER = {
     "vol_idx": {"$exists": True},
-    "vol_idx": {"$lte": 500},
+    "vol_idx": {"$lte": 502},
     "name": {"$not": {"$regex": "شخصی"}},
     "$expr": {"$gt": [{"$size": {"$filter": {
         "input": {"$objectToArray": {"$ifNull": ["$variations", {}]}},
@@ -81,7 +80,7 @@ def display_product(product, fragrance=None):
 
 async def eligible_products(db):
     """The same fresh, ordered catalog boundary for browsing and final submission."""
-    return await db["products_api"].find(PRODUCT_FILTER, PRODUCT_PROJECTION).sort("vol_idx", 1).limit(CATALOG_LIMIT).to_list()
+    return await db["products_api"].find(PRODUCT_FILTER, PRODUCT_PROJECTION).sort("vol_idx", 1).to_list()
 
 
 class CatalogCache:
