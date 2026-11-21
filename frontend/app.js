@@ -14,6 +14,7 @@ const selected = [];
 let recommendedPids = [];
 let recommendedPidSet = new Set();
 let recommendationRequestMade = false;
+let forYouHintTimer;
 let activeFilter = 'all';
 const activeSeasons = new Set();
 const activeAccords = new Set();
@@ -697,6 +698,31 @@ async function selectionApi(action, extra = {}) {
 }
 
 
+function positionForYouHint() {
+  const hint = $('#forYouHint');
+  if (hint.hidden) return;
+  hint.style.setProperty('--hint-shift', '0px');
+  const bounds = hint.getBoundingClientRect();
+  const shift = Math.max(16 - bounds.left, Math.min(0, document.documentElement.clientWidth - 16 - bounds.right));
+  hint.style.setProperty('--hint-shift', `${shift}px`);
+  const button = $('#forYouFilter').getBoundingClientRect();
+  const arrow = Math.max(16, Math.min(bounds.width - 26, button.left + button.width / 2 - bounds.left - shift - 5));
+  hint.style.setProperty('--hint-arrow', `${arrow}px`);
+}
+
+function closeForYouHint() {
+  clearTimeout(forYouHintTimer);
+  if (document.activeElement === $('#closeForYouHint')) $('#forYouFilter').focus({ preventScroll: true });
+  $('#forYouHint').hidden = true;
+  $('#forYouFilter').removeAttribute('aria-describedby');
+}
+
+$('#closeForYouHint').addEventListener('click', closeForYouHint);
+$('#forYouHint').addEventListener('keydown', event => {
+  if (event.key === 'Escape') { event.stopPropagation(); closeForYouHint(); }
+});
+window.addEventListener('resize', positionForYouHint);
+
 async function loadPersonalRecommendations() {
   if (recommendationRequestMade || !isSelectionPage || selectionState !== 'pending') return;
   recommendationRequestMade = true;
@@ -709,6 +735,11 @@ async function loadPersonalRecommendations() {
     recommendedPids = ids;
     recommendedPidSet = new Set(ids);
     $('#forYouFilter').hidden = false;
+    $('#forYouHintAnchor').hidden = false;
+    $('#forYouHint').hidden = false;
+    $('#forYouFilter').setAttribute('aria-describedby', 'forYouHintText');
+    positionForYouHint();
+    forYouHintTimer = setTimeout(closeForYouHint, 30000);
     renderCatalog();
   } catch {
     // A matcher failure never blocks the normal catalog or selection flow.
@@ -716,6 +747,7 @@ async function loadPersonalRecommendations() {
 }
 
 function closeSelectionOverlays() {
+  closeForYouHint();
   if ($('#perfumeDialog').open) $('#perfumeDialog').close();
   if ($('#mobileDrawer').classList.contains('is-open')) closeDrawer();
   $('#demoModal').inert = true;

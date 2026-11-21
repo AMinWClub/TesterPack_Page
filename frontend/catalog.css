@@ -50,3 +50,11 @@
 #forYouFilter[hidden] { display: none !important; }
 #forYouFilter:not(.is-active) { border-color: #bca269; background: #fff9ef; color: var(--navy); }
 #forYouFilter.is-active { box-shadow: 0 2px 10px #c9a96135; }
+.for-you-hint-anchor { position: relative; display: inline-flex; }
+.for-you-hint { position: absolute; bottom: calc(100% + 12px); inset-inline-end: 0; z-index: 15; display: flex; align-items: flex-start; gap: 10px; width: 310px; max-width: calc(100vw - 32px); padding: 16px 14px; border: 1px solid var(--gold); border-radius: 16px; background: var(--navy-dark); color: #fff; box-shadow: 0 12px 32px #04194726; transform: translateX(var(--hint-shift, 0px)); }
+.for-you-hint::after { content: ''; position: absolute; top: calc(100% - 5px); left: var(--hint-arrow, 36px); width: 10px; height: 10px; border-right: 1px solid var(--gold); border-bottom: 1px solid var(--gold); background: var(--navy-dark); transform: rotate(45deg); }
+.for-you-hint p { margin: 0; flex: 1; font-size: 14px; line-height: 1.9; }
+.for-you-hint-mark { color: var(--gold-light); font-size: 18px; line-height: 1.5; }
+.for-you-hint-close { display: grid; place-items: center; flex-shrink: 0; width: 32px; height: 32px; padding: 6px; margin: -4px 0; border: 1px solid #e6d5aa55; border-radius: 50%; color: var(--gold-light); background: transparent; }
+.for-you-hint-close:hover { background: #ffffff18; color: #fff; }
+.for-you-hint-close:focus-visible { outline: 2px solid var(--gold-light); outline-offset: 3px; }

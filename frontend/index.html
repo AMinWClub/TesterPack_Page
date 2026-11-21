@@ -19,9 +19,9 @@
     rel="stylesheet" />
   <link rel="stylesheet" href="/frontend/styles.css?v=3" />
   <link rel="stylesheet" href="/frontend/perfume-details.css?v=3" />
-  <link rel="stylesheet" href="/frontend/catalog.css?v=3" />
+  <link rel="stylesheet" href="/frontend/catalog.css?v=6" />
   <link rel="stylesheet" href="/frontend/selection.css?v=3" />
-  <script src="/frontend/app.js?v=5" defer></script>
+  <script src="/frontend/app.js?v=8" defer></script>
 </head>
 
 <body>
@@ -168,7 +168,14 @@
               <button class="pill" type="button" data-filter="زنانه" aria-pressed="false">زنانه</button>
               <button class="pill" type="button" data-filter="مردانه" aria-pressed="false">مردانه</button>
               <button class="pill" type="button" data-filter="یونیسکس" aria-pressed="false">یونیسکس</button>
-               <button class="pill" id="forYouFilter" type="button" data-filter="forYou" aria-pressed="false" hidden>✦ برای تو</button>
+              <div class="for-you-hint-anchor" id="forYouHintAnchor" hidden>
+                <button class="pill" id="forYouFilter" type="button" data-filter="forYou" aria-pressed="false" hidden>✦ برای تو</button>
+                <div class="for-you-hint" id="forYouHint" hidden>
+                  <span class="for-you-hint-mark" aria-hidden="true">✦</span>
+                  <p id="forYouHintText" role="status">عطرهای این بخش بر اساس خریدهای قبلی شما از سراد پیشنهاد شده‌اند.</p>
+                  <button class="for-you-hint-close" id="closeForYouHint" type="button" aria-label="بستن راهنمای برای تو"><svg class="ico" aria-hidden="true"><use href="#i-x" /></svg></button>
+                </div>
+              </div>
             </div>
             <details class="season-filter" id="seasonFilter">
               <summary><span>فصل استفاده <span id="seasonFilterCount"></span></span><svg class="filter-chevron" aria-hidden="true"><use href="#i-chevron-down" /></svg></summary>
