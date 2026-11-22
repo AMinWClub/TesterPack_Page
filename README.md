@@ -819,3 +819,8 @@ Benchmark واقعی ۲۰٬۰۰۰ سفارش ایزوله: Queryهای Backfill 
 **سیاست لینک قدیمیِ Pending بدون `required_count`:** تا پیش از پذیرش Intent، ظرفیت برابر تنظیم جاری سرور است و مشاهدهٔ لینک هیچ سندی را تغییر نمی‌دهد. اگر تنظیم در فاصلهٔ مشاهده تا ثبت تغییر کند، درخواست با تعداد قدیمی رد می‌شود و کاربر باید وضعیت صفحه را دوباره دریافت کند. اولین ثبت معتبر، `required_count` و Intent را با یک Update شرطی اتمیک ذخیره می‌کند؛ درخواست‌های هم‌زمان نمی‌توانند ظرفیت یا انتخاب برنده را عوض کنند. ظرفیت از آرایه‌های پراکنده یا ناقص حدس زده نمی‌شود. وجود `required_count` نامعتبر باعث خطای کنترل‌شدهٔ `inconsistent_selection` می‌شود و با مقدار جاری جایگزین نمی‌شود.
 
 برای رسید یا Intent قدیمی بدون `required_count`، همان ساختار و مدارک ذخیره‌شده مبنا هستند و نیازی به Migration یا Backfill نیست. خواندن رسید و Retry موفق، دادهٔ قبلی را بازنویسی نمی‌کند. این تغییر منطق SMS، Zaya و آزادسازی مستقل چهل‌دقیقه‌ای را عوض نمی‌کند.
+
+
+## Google Sheets API
+
+Daily sales reports are served by this application at `POST /googlesheetapi/` with the `X-API-Key` header. See [GOOGLESHEET_API.md](GOOGLESHEET_API.md) for configuration, Google Apps Script migration, and tests.

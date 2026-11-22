@@ -12,6 +12,8 @@ from app.config import APP_NAME, MONGODB_DB_NAME, MONGODB_TIMEOUT_MS, MONGODB_UR
 from app.selection_config import TESTER_SELECTION_COUNT
 from app.catalog import CatalogCache, router as catalog_router
 from app.selections import router as selection_router
+from app.googlesheetapi.routes import router as googlesheet_router
+from app.googlesheetapi.repository import close_mongo_clients
 from app.selection_security import SelectionSecurity, install_access_log_redaction
 from app.workers.tester_sms import WorkerConfigurationError, WorkerSettings
 
@@ -35,6 +37,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             app.state.selection_settings = None
         yield
     finally:
+        close_mongo_clients()
         await client.close()
         app.state.mongo_client = None
         app.state.db = None
@@ -47,6 +50,7 @@ app.add_middleware(GZipMiddleware, minimum_size=1000, compresslevel=5)
 app.add_middleware(SelectionSecurity, requests_per_minute=TESTER_SELECTION_RATE_LIMIT_PER_MINUTE)
 app.include_router(catalog_router)
 app.include_router(selection_router)
+app.include_router(googlesheet_router)
 install_access_log_redaction()
 
 
