@@ -9,6 +9,7 @@ class RowFilter(BaseModel):
     source: str = Field(min_length=1, max_length=250)
     medium: str = Field(min_length=1, max_length=250)
     campaign: str | None = Field(default=None, max_length=250)
+    discount_code: str | None = Field(default=None, max_length=250)
 
     @model_validator(mode="after")
     def validate_utms(self):
@@ -40,6 +41,7 @@ class RowTotals(BaseModel):
 
 
 class ReportResponse(BaseModel):
+    matching_logic: str = "utm_or_discount_regex_v1"
     start_date: str
     end_date: str
     timezone: str = "Asia/Tehran"

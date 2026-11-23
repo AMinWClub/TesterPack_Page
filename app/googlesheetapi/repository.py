@@ -8,6 +8,7 @@ from collections import defaultdict
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from functools import lru_cache
+import re
 from zoneinfo import ZoneInfo
 
 from bson.decimal128 import Decimal128
@@ -74,6 +75,7 @@ def build_pipeline(start_day: date, end_day: date) -> list[dict]:
                 "source": "$utm_source",
                 "medium": "$utm_medium",
                 "campaign": "$utm_campaign",
+                "discount_code": "$discount_code",
             },
             "total": {"$sum": {"$ifNull": ["$_report_total", Decimal128("0")]}},
             "bad_total_count": {"$sum": {"$cond": [{"$eq": ["$_report_total", None]}, 1, 0]}},
@@ -103,10 +105,15 @@ def _decimal_string(value: Decimal) -> str:
 def totals_by_row(
     collection, rows: list[RowFilter], start_day: date, end_day: date, max_time_ms: int
 ) -> dict[int, list[str]]:
-    """One query for all supplied rows. Missing campaign => NO campaign constraint."""
+    """One aggregation; UTM OR literal substring regex for discount_code.
+
+    Sheet rows still require source+medium. A bucket matching both conditions
+    is counted once for each sheet row. Missing campaign is a wildcard.
+    """
     days = [day.isoformat() for day in iter_dates(start_day, end_day)]
     full_key_to_rows: dict[tuple[str, str, str], list[int]] = defaultdict(list)
     source_medium_to_rows: dict[tuple[str, str], list[int]] = defaultdict(list)
+    discount_to_rows: dict[str, list[int]] = defaultdict(list)
     results: dict[int, dict[str, Decimal]] = {row.row: defaultdict(Decimal) for row in rows}
 
     for row in rows:
@@ -117,6 +124,16 @@ def totals_by_row(
             full_key_to_rows[(source, medium, campaign)].append(row.row)
         else:
             source_medium_to_rows[(source, medium)].append(row.row)
+        code = normalize_utm(row.discount_code)
+        if code:
+            discount_to_rows[code].append(row.row)
+
+    # Re-escape user-entered codes: a dot, bracket, etc. is literal, not a regex
+    # operator. This makes case-insensitive substring matching safe and stable.
+    discount_patterns = [
+        (re.compile(re.escape(code), re.IGNORECASE), matching_rows)
+        for code, matching_rows in discount_to_rows.items()
+    ]
 
     if rows:
         for group in collection.aggregate(
@@ -126,12 +143,14 @@ def totals_by_row(
             src = normalize_utm(keys.get("source"))
             med = normalize_utm(keys.get("medium"))
             camp = normalize_utm(keys.get("campaign"))
-            if not src or not med:
-                continue
-            matched = (
-                full_key_to_rows.get((src, med, camp), [])
-                + source_medium_to_rows.get((src, med), [])
-            )
+            discount = normalize_utm(keys.get("discount_code"))
+
+            matched = set(full_key_to_rows.get((src, med, camp), ()))
+            matched.update(source_medium_to_rows.get((src, med), ()))
+            if discount:
+                for pattern, matching_rows in discount_patterns:
+                    if pattern.search(discount):
+                        matched.update(matching_rows)
             if not matched:
                 continue
             if group.get("bad_total_count") or group.get("bad_date_count"):
@@ -139,7 +158,6 @@ def totals_by_row(
             day = keys.get("day")
             if day is None:
                 raise ValueError("MongoDB returned null reporting date")
-            # DB dates should be bounded by the $match; fail if unexpected.
             if day < start_day.isoformat() or day > end_day.isoformat():
                 raise ValueError("MongoDB returned a date outside the requested window")
             amount = _decimal(group["total"])
