@@ -19,8 +19,10 @@ from app.catalog_labels import (
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/tester", tags=["catalog"])
 PRODUCT_FILTER = {
-    "vol_idx": {"$exists": True},
-    "vol_idx": {"$lte": 502},
+    "$or": [
+        {"vol_idx": {"$lte": 506}},
+        {"vol_idx": 510},
+    ],
     "name": {"$not": {"$regex": "شخصی"}},
     "$expr": {"$gt": [{"$size": {"$filter": {
         "input": {"$objectToArray": {"$ifNull": ["$variations", {}]}},
