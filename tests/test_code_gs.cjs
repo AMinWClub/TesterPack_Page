@@ -32,17 +32,19 @@ function buildMock(options = {}) {
   set(2, 19, 39642400);  // numeric historical sales, observed in the uploaded file
   set(3, 19, options.duplicateHasUnsafeData ? 'do-not-delete' : '');
   if (options.duplicateHasFormula) formulas.set(key(3, 19), '=42');
-  if (options.duplicateHasUnrefreshedNumeric) set(5, 19, 900);
+  if (options.duplicateHasUnrefreshedNumeric) set(7, 19, 900);
   set(3, 11, 46318); // preexisting stale second data row amount must be updated
   const inputs = [
     ['bale', 'daily', '', ''],
     ['instagram', 'konnjed', 'aban', 'konjed'],  // J = discount code, OR with UTM
     ['landing', 'home', 'bf', ''],
-    ['bale', '', '', 'konjed'], // excluded: source and medium are still required
+    ['bale', '', '', 'konjed'], // source-only UTM OR discount
+    ['bale', '', 'bf', ''],   // source+campaign without medium
+    ['', 'daily', 'bf', 'konjed'], // excluded: source is required
   ];
   const makeRange = (row, col, height = 1, width = 1) => ({
     getDisplayValues() {
-      if (row === 2 && col === 7 && height === 4 && width === 4) return inputs;
+      if (row === 2 && col === 7 && height === 6 && width === 4) return inputs;
       return Array.from({length:height}, (_,i) => Array.from({length:width}, (_,j) => String(get(row+i,col+j))));
     },
     getDisplayValue() {
@@ -74,7 +76,7 @@ function buildMock(options = {}) {
     },
   });
   const sheet = {
-    getLastRow: () => 5,
+    getLastRow: () => 7,
     getLastColumn: () => lastCol,
     getRange: makeRange,
     getMaxColumns: () => 24,
@@ -82,7 +84,7 @@ function buildMock(options = {}) {
       assert.strictEqual(col, 19, 'Only trailing duplicate S may be deleted');
       assert.ok(!options.duplicateHasUnsafeData && !options.duplicateHasFormula && !options.duplicateHasUnrefreshedNumeric);
       deleted.push(col);
-      for (let r = 1; r <= 5; r++) cells.delete(key(r, col));
+      for (let r = 1; r <= 7; r++) cells.delete(key(r, col));
       lastCol = 18;
     },
     insertColumnsAfter: () => { throw new Error('No columns need inserting in this fixture'); },
@@ -107,10 +109,12 @@ function buildMock(options = {}) {
     UrlFetchApp: {
       fetch(url, args) {
         const filters = JSON.parse(args.payload).rows;
-        assert.deepStrictEqual(filters.map(r => r.row), [2, 3, 4], 'Row 3 must now be included');
+        assert.deepStrictEqual(filters.map(r => r.row), [2, 3, 4, 5, 6], 'Source-only and source+campaign rows must be included');
         assert.deepStrictEqual(filters[1], {row: 3, source: 'instagram', medium: 'konnjed', campaign: 'aban', discount_code: 'konjed'});
         assert.deepStrictEqual(filters[0], {row: 2, source: 'bale', medium: 'daily', campaign: null, discount_code: null});
         assert.deepStrictEqual(filters[2], {row: 4, source: 'landing', medium: 'home', campaign: 'bf', discount_code: null});
+        assert.deepStrictEqual(filters[3], {row: 5, source: 'bale', medium: null, campaign: null, discount_code: 'konjed'});
+        assert.deepStrictEqual(filters[4], {row: 6, source: 'bale', medium: null, campaign: 'bf', discount_code: null});
         return {
           getResponseCode: () => 200,
           getContentText: () => JSON.stringify({
@@ -122,6 +126,8 @@ function buildMock(options = {}) {
               {row: 2, totals: ['1500000','0','0','0','0','0','5000','6000']},
               {row: 3, totals: ['1700000','0','0','0','0','0','25000','35000']},
               {row: 4, totals: ['0','3200000','0','0','0','0','0','0']},
+              {row: 5, totals: ['800000','0','0','0','0','0','12000','0']},
+              {row: 6, totals: ['400000','0','0','0','0','0','0','0']},
             ],
           }),
         };
@@ -144,7 +150,9 @@ assert.strictEqual(good.get(1, 18), '1405/09/02');
 assert.strictEqual(good.get(3, 11), 1700000); // no more stale 46318
 assert.strictEqual(good.get(3, 17), 25000);
 assert.strictEqual(good.get(3, 18), 35000);
-assert.strictEqual(good.get(5, 11), '');
+assert.strictEqual(good.get(5, 11), 800000); // source only
+assert.strictEqual(good.get(6, 11), 400000); // source + campaign without medium
+assert.strictEqual(good.get(7, 11), ''); // source missing
 assert.ok(good.written.every(w => w.col >= 11)); // A:J must never be touched
 assert.ok(good.logs.some(s => String(s).includes('removed 1 trailing duplicate')));
 assert.strictEqual(good.run(), undefined);
@@ -171,6 +179,6 @@ assert.deepStrictEqual(badApi.written, []);
 
 // Failure during sales write does not prematurely write any date headers.
 const failed = buildMock({failOn:{row:2,col:12}});
-assert.ok(String(failed.run()).includes('writing sales: column 12, rows 2-5'));
+assert.ok(String(failed.run()).includes('writing sales: column 12, rows 2-7'));
 assert.ok(failed.written.every(w => w.row !== 1));
-console.log('PASS: G:J discount_code payload; row 3 included; numeric-only stale S removed; unsafe columns preserved; repeat sync idempotent; invalid API rejected; no premature headers');
+console.log('PASS: optional medium / source-only / source+campaign, G:J discount_code payload; row 3 included; numeric-only stale S removed; unsafe columns preserved; repeat sync idempotent; invalid API rejected; no premature headers');

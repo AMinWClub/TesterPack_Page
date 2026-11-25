@@ -7,14 +7,14 @@ from .normalization import normalize_utm
 class RowFilter(BaseModel):
     row: int = Field(ge=2, le=5000)
     source: str = Field(min_length=1, max_length=250)
-    medium: str = Field(min_length=1, max_length=250)
+    medium: str | None = Field(default=None, max_length=250)
     campaign: str | None = Field(default=None, max_length=250)
     discount_code: str | None = Field(default=None, max_length=250)
 
     @model_validator(mode="after")
     def validate_utms(self):
-        if not normalize_utm(self.source) or not normalize_utm(self.medium):
-            raise ValueError("source and medium must be non-empty after normalization")
+        if not normalize_utm(self.source):
+            raise ValueError("source must be non-empty after normalization")
         return self
 
 

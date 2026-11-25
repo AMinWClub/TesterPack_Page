@@ -107,12 +107,14 @@ def totals_by_row(
 ) -> dict[int, list[str]]:
     """One aggregation; UTM OR literal substring regex for discount_code.
 
-    Sheet rows still require source+medium. A bucket matching both conditions
-    is counted once for each sheet row. Missing campaign is a wildcard.
+    Source is required; missing medium and/or campaign are wildcards.
+    A bucket matching UTM and discount is counted once per sheet row.
     """
     days = [day.isoformat() for day in iter_dates(start_day, end_day)]
     full_key_to_rows: dict[tuple[str, str, str], list[int]] = defaultdict(list)
     source_medium_to_rows: dict[tuple[str, str], list[int]] = defaultdict(list)
+    source_campaign_to_rows: dict[tuple[str, str], list[int]] = defaultdict(list)
+    source_only_to_rows: dict[str, list[int]] = defaultdict(list)
     discount_to_rows: dict[str, list[int]] = defaultdict(list)
     results: dict[int, dict[str, Decimal]] = {row.row: defaultdict(Decimal) for row in rows}
 
@@ -120,10 +122,14 @@ def totals_by_row(
         source, medium, campaign = map(
             normalize_utm, (row.source, row.medium, row.campaign)
         )
-        if campaign:
+        if medium and campaign:
             full_key_to_rows[(source, medium, campaign)].append(row.row)
-        else:
+        elif medium:
             source_medium_to_rows[(source, medium)].append(row.row)
+        elif campaign:
+            source_campaign_to_rows[(source, campaign)].append(row.row)
+        else:
+            source_only_to_rows[source].append(row.row)
         code = normalize_utm(row.discount_code)
         if code:
             discount_to_rows[code].append(row.row)
@@ -147,6 +153,8 @@ def totals_by_row(
 
             matched = set(full_key_to_rows.get((src, med, camp), ()))
             matched.update(source_medium_to_rows.get((src, med), ()))
+            matched.update(source_campaign_to_rows.get((src, camp), ()))
+            matched.update(source_only_to_rows.get(src, ()))
             if discount:
                 for pattern, matching_rows in discount_patterns:
                     if pattern.search(discount):

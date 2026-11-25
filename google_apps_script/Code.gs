@@ -14,7 +14,7 @@ const SALES_SETTINGS = Object.freeze({
   campaignCol: 9,          // I
   discountCodeCol: 10,     // J - discount_code (optional OR match)
   firstOutputCol: 11,     // K; A:J will never be written by this script
-  skippedRows: [],        // all rows with source AND medium are now included
+  skippedRows: [],        // all rows with a valid source are included
   startDate: '2026-11-16', // 1405/08/25, inclusive
   maxFilters: 500
 });
@@ -79,9 +79,9 @@ function syncDailySalesUnlocked_() {
       const medium = String(input[i][1] || '').trim();
       const campaign = String(input[i][2] || '').trim();
       const discountCode = String(input[i][3] || '').trim();
-      if (!source || !medium) continue;
+      if (!source) continue;
       filters.push({
-        row: sheetRow, source, medium,
+        row: sheetRow, source, medium: medium || null,
         campaign: campaign || null,
         discount_code: discountCode || null
       });
@@ -90,7 +90,7 @@ function syncDailySalesUnlocked_() {
     if (filters.length > cfg.maxFilters) {
       throw new Error('Too many matching rows (' + filters.length + '); max is ' + cfg.maxFilters);
     }
-    if (!filters.length) throw new Error('No valid source+medium rows to query.');
+    if (!filters.length) throw new Error('No valid source rows to query.');
     console.log('UTM sync: querying ' + filters.length + ' rows');
 
     const properties = PropertiesService.getScriptProperties();
@@ -133,7 +133,7 @@ function syncDailySalesUnlocked_() {
       if (excluded.has(sheetRow)) {
         output.push(null);             // reserved for optional future manual exclusions
       } else if (!validRows.has(sheetRow)) {
-        output.push(Array(width).fill('')); // incomplete source / medium
+        output.push(Array(width).fill('')); // missing source
       } else {
         output.push(resultsByRow[sheetRow]);
       }
