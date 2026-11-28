@@ -10,7 +10,7 @@ PAID_INDEX = "tester_pending_paid_release"
 PAID_INDEX_KEYS = [("state", 1), ("tester_paid_release_at", 1), ("_id", 1)]
 PAID_FIELD = "tester_paid_release_at"
 SIMPLE = Collation(locale="simple")
-PAID_MS = 40 * 60 * 1000
+PAID_MS = 70 * 60 * 1000
 logger = logging.getLogger(__name__)
 
 
