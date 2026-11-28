@@ -17,11 +17,11 @@
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Vazirmatn:wght@300;400;500;600;700;800;900&display=swap"
     rel="stylesheet" />
-  <link rel="stylesheet" href="/frontend/styles.css?v=3" />
+  <link rel="stylesheet" href="/frontend/styles.css?v=5" />
   <link rel="stylesheet" href="/frontend/perfume-details.css?v=3" />
   <link rel="stylesheet" href="/frontend/catalog.css?v=6" />
-  <link rel="stylesheet" href="/frontend/selection.css?v=3" />
-  <script src="/frontend/app.js?v=8" defer></script>
+  <link rel="stylesheet" href="/frontend/selection.css?v=6" />
+  <script src="/frontend/app.js?v=10" defer></script>
 </head>
 
 <body>
@@ -63,6 +63,10 @@
       <circle cx="12" cy="12" r="9" />
       <path d="M12 11v6m0-10v.3" />
     </symbol>
+    <symbol id="i-clock" viewBox="0 0 24 24">
+      <circle cx="12" cy="12" r="9" />
+      <path d="M12 7v5l3 2" />
+    </symbol>
   </svg>
 
   <div class="topline" aria-hidden="true"><span>چه حس و حالی می خوای؟</span><span
@@ -75,6 +79,10 @@
       <span class="secure-label"><svg class="ico">
           <use href="#i-shield" />
         </svg>لینک اختصاصی سفارش شما</span>
+      <div class="selection-countdown selection-countdown-header" hidden>
+        <span><svg class="ico" aria-hidden="true"><use href="#i-clock" /></svg>زمان باقی‌مانده</span>
+        <b dir="ltr" role="timer" aria-label="زمان باقی‌مانده"></b>
+      </div>
       <button class="header-count" id="headerCount" type="button" aria-label="نمایش عطرهای انتخاب‌شده">
         <svg class="ico">
           <use href="#i-bag" />
@@ -262,15 +270,20 @@
   </footer>
 
   <div class="mobile-selection-bar" id="mobileSelectionBar">
-    <div class="mobile-progress" id="mobileProgress"></div>
-    <div class="mobile-selection-info"><span class="mobile-bag"><svg class="ico">
-          <use href="#i-bag" />
-        </svg></span>
-      <div><strong><b id="mobileCount">۰</b> از <span data-tester-count>__TESTER_COUNT_FA__</span> تستر</strong><small id="mobileRemaining"><span data-tester-count>__TESTER_COUNT_FA__</span> انتخاب باقی‌مانده</small>
+    <div class="mobile-selection-content">
+      <div class="mobile-selection-info">
+        <span class="mobile-bag" aria-hidden="true"><svg class="ico"><use href="#i-bag" /></svg></span>
+        <div>
+          <strong><b id="mobileCount">۰</b> از <span data-tester-count>__TESTER_COUNT_FA__</span> تستر</strong>
+          <small id="mobileRemaining"><span data-tester-count>__TESTER_COUNT_FA__</span> انتخاب باقی‌مانده</small>
+        </div>
       </div>
-    </div><button type="button" id="openDrawer">مشاهده انتخاب‌ها <svg class="ico">
-        <use href="#i-arrow" />
-      </svg></button>
+      <div class="selection-countdown selection-countdown-mobile" hidden>
+        <span><svg class="ico" aria-hidden="true"><use href="#i-clock" /></svg>زمان باقی‌مانده</span>
+        <b dir="ltr" role="timer" aria-label="زمان باقی‌مانده"></b>
+      </div>
+      <button type="button" id="openDrawer">مشاهده انتخاب‌ها <svg class="ico" aria-hidden="true"><use href="#i-arrow" /></svg></button>
+    </div>
   </div>
   <div class="drawer-backdrop" id="drawerBackdrop" hidden></div>
   <div class="mobile-drawer" id="mobileDrawer" role="dialog" aria-modal="true" aria-label="انتخاب‌های شما"

@@ -27,13 +27,45 @@
 .modal-done:disabled { background: #64739a; cursor: wait; }
 .demo-modal .submission-message { color: #8a542c; background: #faf4e9; padding: 9px 12px; border-radius: 10px; font-size: 11px; }
 .demo-modal button:focus-visible, .order-state button:focus-visible { outline: 2px solid var(--gold); outline-offset: 3px; }
+.selection-countdown {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 9px;
+  border: 1px solid var(--gold-light);
+  border-radius: 10px;
+  color: var(--navy);
+  background: #faf8f2;
+  white-space: nowrap;
+  font-size: 11px;
+  line-height: 1.4;
+}
+.selection-countdown span { display: inline-flex; align-items: center; gap: 4px; }
+.selection-countdown .ico { width: 14px; height: 14px; color: #967637; }
+.selection-countdown b { font-size: 14px; font-variant-numeric: tabular-nums; }
+.selection-countdown[data-urgency="warning"] { color: #a12a35; border-color: #e8b5ba; background: #fff5f5; }
+.selection-countdown[data-urgency="critical"] { color: #fff; border-color: #a12a35; background: #a12a35; }
+.selection-countdown[data-urgency="warning"] .ico,
+.selection-countdown[data-urgency="critical"] .ico { color: inherit; }
+.selection-countdown-mobile { display: none; }
 @keyframes selection-pulse { to { opacity: .55; } }
 @media (min-width: 941px) {
+  body:has(.selection-countdown-header:not([hidden])) {
+    --selection-header-height: 94px;
+  }
+  .site-header:has(.selection-countdown-header:not([hidden])) {
+    height: var(--selection-header-height);
+    position: sticky;
+    top: 0;
+    z-index: 40;
+    background: var(--cream);
+  }
   /* Keep the sticky selection box inside the viewport as the catalog grows. */
   .selection-panel {
     display: flex;
     flex-direction: column;
-    max-height: min(90dvh, calc(100dvh - 44px));
+    top: calc(22px + var(--selection-header-height, 0px));
+    max-height: min(90dvh, calc(100dvh - 44px - var(--selection-header-height, 0px)));
     overflow-y: auto;
     overscroll-behavior-y: contain;
     scrollbar-width: thin;
@@ -73,6 +105,18 @@
     overscroll-behavior-y: contain;
     scrollbar-width: thin;
     scrollbar-color: var(--gold) transparent;
+  }
+}
+@media (max-width: 940px) {
+  .selection-countdown-header { display: none; }
+  .selection-countdown-mobile {
+    display: inline-flex;
+    gap: 6px;
+    padding: 4px 6px;
+  }
+  .selection-countdown-mobile[data-urgency="normal"] {
+    border-color: transparent;
+    background: transparent;
   }
 }
 /* On very short desktop windows, scroll the whole box rather than hide its list. */

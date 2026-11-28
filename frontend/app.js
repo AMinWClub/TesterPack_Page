@@ -45,6 +45,9 @@ let submissionPids = null;
 let submittedNames = [];
 let selectionDeadline = 0;
 let selectionExpiryTimer;
+let selectionCountdownInterval;
+const selectionCountdowns = $$('.selection-countdown');
+const countdownNumber = new Intl.NumberFormat('fa-IR', { minimumIntegerDigits: 2, useGrouping: false });
 const deadlinePassed = () => isSelectionPage && performance.now() >= selectionDeadline;
 const canEditSelection = () => ['pending', 'preview'].includes(selectionState) && !submitBusy && !deadlinePassed();
 
@@ -273,7 +276,6 @@ function renderSelection() {
   $('#progressTrack').innerHTML = Array.from({ length: capacity }, (_, i) => `<span class="${i < n?'active':''}"></span>`).join('');
   $('#progressTrack').setAttribute('aria-valuemax', String(capacity));
   $('#progressTrack').setAttribute('aria-valuenow', String(n));
-  $('#mobileProgress').style.setProperty('--mobile-fill', `${capacity ? n / capacity * 100 : 0}%`);
   syncPerfumeSelection();
 }
 
@@ -758,7 +760,8 @@ function closeSelectionOverlays() {
 
 function checkSelectionDeadline() {
   clearTimeout(selectionExpiryTimer);
-  if (!isSelectionPage || !['pending', 'submitting', 'uncertain'].includes(selectionState)) return;
+  // Let the submit request and its recovery finish before expiring the page.
+  if (!isSelectionPage || submitBusy || !['pending', 'submitting', 'uncertain'].includes(selectionState)) return;
   const remaining = selectionDeadline - performance.now();
   if (remaining > 0) {
     selectionExpiryTimer = setTimeout(checkSelectionDeadline, Math.min(remaining, 30000));
@@ -768,6 +771,29 @@ function checkSelectionDeadline() {
   closeSelectionOverlays();
   updateSelectionPage();
   $('#selectionNoticeTitle').focus({preventScroll:true});
+}
+
+function renderSelectionCountdown() {
+  const seconds = Math.max(0, Math.ceil((selectionDeadline - performance.now()) / 1000));
+  const minutes = countdownNumber.format(Math.floor(seconds / 60));
+  const remainder = countdownNumber.format(seconds % 60);
+  for (const countdown of selectionCountdowns) {
+    $('[role="timer"]', countdown).textContent = `${minutes}:${remainder}`;
+    countdown.dataset.urgency = seconds <= 60 ? 'critical' : seconds <= 300 ? 'warning' : 'normal';
+  }
+  if (seconds === 0) checkSelectionDeadline();
+}
+
+function updateSelectionCountdown() {
+  const active = isSelectionPage && selectionState === 'pending' && !submitBusy;
+  for (const countdown of selectionCountdowns) countdown.hidden = !active;
+  if (!active) {
+    clearInterval(selectionCountdownInterval);
+    selectionCountdownInterval = undefined;
+    return;
+  }
+  selectionCountdownInterval ??= setInterval(renderSelectionCountdown, 1000);
+  renderSelectionCountdown();
 }
 
 function renderSelectionNotice() {
@@ -797,6 +823,7 @@ function updateSelectionPage() {
   $('#headerCount').disabled = !browsing;
   renderSelection();
   renderCatalog(false);
+  updateSelectionCountdown();
 }
 
 function applySelectionContext(data) {

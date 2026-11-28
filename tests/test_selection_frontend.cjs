@@ -21,7 +21,7 @@ async function main() {
   let socket;
   const wait = ms => new Promise(resolve=>setTimeout(resolve,ms));
   const modes = { context:'real', submit:'real' };
-  let submits=0, catalogRequests=0;
+  let submits=0, catalogRequests=0, contextRequests=0, heldSubmitResponse;
   const errors=[], headers=[], responsive=[];
   try {
     let tabs;
@@ -35,7 +35,11 @@ async function main() {
       const action=event.request.url.endsWith('/submit')?'submit':'context';
       const response=event.responseStatusCode!==undefined;
       if(!response&&action==='submit')submits++;
+      if(!response&&event.request.url.endsWith('/context'))contextRequests++;
       if(response){
+        if(action==='submit'&&modes.submit==='hold-response'){
+          heldSubmitResponse=event.requestId;return;
+        }
         if(action==='submit'&&modes.submit==='lose-response'){
           modes.submit='real';return send('Fetch.failRequest',{requestId:event.requestId,errorReason:'ConnectionReset'});
         }
@@ -71,6 +75,13 @@ async function main() {
     };
     const evaluate=async expression=>{const r=await send('Runtime.evaluate',{expression,awaitPromise:true,returnByValue:true});assert(!r.exceptionDetails,JSON.stringify(r.exceptionDetails));return r.result.value;};
     const until=async expression=>{for(let i=0;i<180;i++){try{if(await evaluate(expression))return;}catch{}await wait(100);}throw new Error('Timed out: '+expression);};
+    const countdown=()=>evaluate(`[...document.querySelectorAll('.selection-countdown')].map(el=>({
+      visible:el.getClientRects().length>0, text:el.querySelector('[role="timer"]').textContent, urgency:el.dataset.urgency
+    }))`);
+    const assertCountdownHidden=async()=>{
+      assert((await countdown()).every(timer=>!timer.visible));
+      assert(await evaluate('selectionCountdownInterval===undefined'));
+    };
     const click=async selector=>{
       const point=await evaluate(`(()=>{const el=document.querySelector(${JSON.stringify(selector)});el.scrollIntoView({block:'center',behavior:'instant'});const r=el.getBoundingClientRect();return{x:r.x+r.width/2,y:r.y+r.height/2};})()`);
       await send('Input.dispatchMouseEvent',{type:'mousePressed',...point,button:'left',clickCount:1});
@@ -82,7 +93,7 @@ async function main() {
       await until('typeof selectionState!=="undefined" && ["pending","submitted","error","preview","expired","awaiting_sms","review_required"].includes(selectionState)');
       await evaluate('document.fonts.ready.then(()=>true)');
     };
-    const screenshot=async name=>{const shot=await send('Page.captureScreenshot',{format:'png'});fs.writeFileSync(path.join(artifacts,name+'.png'),Buffer.from(shot.data,'base64'));};
+    const screenshot=async(name,clip)=>{const shot=await send('Page.captureScreenshot',{format:'png',clip});fs.writeFileSync(path.join(artifacts,name+'.png'),Buffer.from(shot.data,'base64'));};
     const chooseTesters=async()=>{
       await until('catalogState==="ready"');
       await evaluate('for(const item of PERFUMES.slice(0,MAX_TESTERS)){if(!selectedHas(item.pid))document.querySelector(`[data-toggle="${CSS.escape(item.pid)}"]`).click();}');
@@ -109,7 +120,7 @@ async function main() {
           && document.querySelectorAll('#submittedList li').length===${count}
           && [...document.querySelectorAll('[data-tester-count]')].every(el=>el.textContent===farsiNumber(${count}))
           && document.querySelector('#progressTrack').getAttribute('aria-valuemax')==='${count}'
-          && document.querySelector('#mobileProgress').style.getPropertyValue('--mobile-fill')==='100%'
+          && document.querySelector('#progressTrack').getAttribute('aria-valuenow')==='${count}'
           && !canEditSelection() && document.documentElement.scrollWidth<=innerWidth`));
         assert(await evaluate(`(async()=>{const result=await selectionApi('submit',{pids:selected});return result.selection.status==='submitted'&&result.order.tester_count===${count};})()`));
         assert(await evaluate(`(async()=>{const original=await selectionApi('context');
@@ -133,13 +144,46 @@ async function main() {
       assert.equal(await evaluate('getComputedStyle(document.querySelector("#orderPhone")).direction'),'ltr');
       assert.equal(await evaluate('document.querySelector("#orderCustomerName").textContent'),'مشتری آزمایشی');
       assert(await evaluate('!document.querySelector("#orderFields").hidden&&document.documentElement.scrollWidth<=innerWidth'));
+      const timers=await countdown();
+      assert.deepEqual(timers.map(timer=>timer.visible),[width>940,width<=940]);
+      assert.equal(timers[0].text,timers[1].text);
+      assert(await evaluate(`(()=>{
+        const desktop=innerWidth>940;
+        if(desktop)scrollTo({top:500,behavior:'instant'});
+        const container=document.querySelector(desktop?'.site-header':'#mobileSelectionBar');
+        const controls=desktop?['.selection-countdown-header','#headerCount']:['.mobile-selection-info','.selection-countdown-mobile','#openDrawer'];
+        const bounds=container.getBoundingClientRect();
+        const rects=controls.map(selector=>container.querySelector(selector).getBoundingClientRect());
+        const withinBar=rects.every(rect=>rect.left>=bounds.left&&rect.right<=bounds.right&&rect.top>=bounds.top&&rect.bottom<=bounds.bottom);
+        if(desktop)return withinBar&&scrollY>0&&bounds.top===0&&rects[1].right<=rects[0].left;
+        const [info,timer,action]=rects;
+        const [label,value]=[...container.querySelector('.selection-countdown-mobile').children].map(el=>el.getBoundingClientRect());
+        const content=container.querySelector('.mobile-selection-content').getBoundingClientRect();
+        return withinBar&&bounds.bottom===innerHeight&&timer.right<=info.left
+          && Math.max(timer.top,info.top)<Math.min(timer.bottom,info.bottom)
+          && Math.max(timer.bottom,info.bottom)<=action.top
+          && action.width===content.width&&action.height>=44
+          && value.right<=label.left&&Math.max(label.top,value.top)<Math.min(label.bottom,value.bottom);
+      })()`),`Countdown overlaps controls or scrolls away at ${width}px`);
       await evaluate('scrollTo(0,0)');await screenshot('order-'+width);
+      if(width===390){
+        const clip=await evaluate(`(()=>{
+          const sampleCount=Math.min(2,MAX_TESTERS);
+          PERFUMES.slice(0,sampleCount).forEach(item=>toggleProduct(item.pid));
+          if(selected.length!==sampleCount||document.querySelector('#mobileCount').textContent!==farsiNumber(sampleCount))
+            throw Error('Mobile count did not reflect the selected testers');
+          const {x,y,width,height}=document.querySelector('#mobileSelectionBar').getBoundingClientRect();
+          return {x,y:y+scrollY,width,height,scale:1};
+        })()`);
+        await screenshot('mobile-selection-bar',clip);
+      }
       responsive.push({width,orderVisible:true,fullPhone:true,overflow:false});
     }
     // A single changed letter must not authorize the original order.
     const changedCasePath=fixtures.success.path.replace(/[A-Za-z]/,char=>String.fromCharCode(char.charCodeAt(0)^32));
     await load(changedCasePath,320,740);
     assert(await evaluate('selectionState==="error"&&document.querySelector("#orderFields").hidden'));
+    await assertCountdownHidden();
     // Percent-encoding must preserve the exact token case when it is extracted.
     const token=fixtures.success.path.slice(1);
     await load('/%'+token.charCodeAt(0).toString(16)+token.slice(1),320,740);
@@ -160,6 +204,7 @@ async function main() {
       const catalogs=catalogRequests;
       await load(fixtures.success.path,width,height);
       assert(await evaluate('selectionState==="submitted"&&document.querySelectorAll("#submittedList li").length===MAX_TESTERS&&document.querySelector("#collection").hidden'));
+      await assertCountdownHidden();
       assert.equal(catalogRequests,catalogs,'Receipt unexpectedly fetched the live catalog');
       assert(await evaluate('document.querySelector("#submittedList").textContent.includes("Original Source Perfume")'));
       const selectedBefore=await evaluate('JSON.stringify(selected)');await evaluate('toggleProduct(selected[0])');
@@ -174,6 +219,7 @@ async function main() {
     // Both requests are unreachable. Lock choices until Context proves pending.
     await load(fixtures.uncertain.path);await chooseTesters();await review();
     modes.submit='drop';modes.context='error';await click('#modalDone');await until('selectionState==="uncertain"&&!submitBusy');
+    await assertCountdownHidden();
     assert(await evaluate('!canEditSelection()&&document.querySelector("#submissionMessage").textContent.includes("مشخص نیست")'));
     const frozen=await evaluate('JSON.stringify(selected)');await evaluate('toggleProduct(selected[0])');assert.equal(await evaluate('JSON.stringify(selected)'),frozen);
     await click('#closeModal');modes.context='real';modes.submit='real';await click('#retrySelectionContext');
@@ -188,15 +234,82 @@ async function main() {
     // No successful notification means no editable selection, independently of creation time.
     await load(fixtures.expiry_waiting.path);
     assert(await evaluate('selectionState==="awaiting_sms"&&!canEditSelection()&&document.querySelector("#collection").hidden'));
+    await assertCountdownHidden();
     assert(await evaluate('!document.querySelector("#selectionNotice").hidden&&document.querySelector("#selectionNoticeDefault").hidden'));
     const python=process.env.SELECTION_TEST_PYTHON || path.resolve(process.platform==='win32'?'.venv/Scripts/python.exe':'.venv/bin/python');
     const setWindow=(scenario,seconds)=>execFileSync(python,['-c',`import asyncio; from tests.selection_preview import set_preview_window; asyncio.run(set_preview_window(${JSON.stringify(scenario)}, ${seconds}))`],{windowsHide:true,stdio:'pipe'});
     setWindow('expiry_waiting',1800);
     await click('#refreshSelectionNotice');await until('selectionState==="pending"&&catalogState==="ready"');
 
+    // A real refresh reports elapsed time from the original server window.
+    const readSeconds=async()=>{
+      const {text}=(await countdown())[0];
+      const [minutes,seconds]=text.replace(/[۰-۹]/g,digit=>'۰۱۲۳۴۵۶۷۸۹'.indexOf(digit)).split(':').map(Number);
+      return minutes*60+seconds;
+    };
+    const initialSeconds=await readSeconds();
+    assert(initialSeconds>=1795&&initialSeconds<=1800, `Initial countdown was ${initialSeconds}s`);
+    const requestsBeforeTick=contextRequests;
+    await wait(2100);
+    const elapsedSeconds=await readSeconds();
+    assert(elapsedSeconds<initialSeconds, 'Countdown did not tick');
+    assert.equal(contextRequests,requestsBeforeTick,'Countdown tick fetched context');
+    await evaluate('window.beforeCountdownReload=true');
+    await send('Page.reload');
+    await until('!window.beforeCountdownReload&&typeof selectionState!=="undefined"&&selectionState==="pending"&&catalogState==="ready"');
+    assert((await readSeconds())<=elapsedSeconds,'Reload restarted the countdown');
+
+    // Returning to a visible page reconciles with the server even after skipped ticks.
+    await evaluate(`Object.defineProperty(document,'hidden',{configurable:true,value:true});
+      document.dispatchEvent(new Event('visibilitychange'));`);
+    setWindow('expiry_waiting',240);
+    assert(await evaluate(`delete document.hidden; document.dispatchEvent(new Event('visibilitychange'));
+      selectionState==='loading'&&selectionCountdowns.every(timer=>timer.hidden)&&selectionCountdownInterval===undefined;`));
+    await until('selectionState==="pending"&&document.querySelector(".selection-countdown").dataset.urgency==="warning"');
+    const synchronizedSeconds=await readSeconds();
+    assert(synchronizedSeconds<=240&&synchronizedSeconds>=235);
+
+    // Use a fixed monotonic clock to cover exact thresholds and a throttled tick.
+    await evaluate(`(async()=>{
+      const data=await selectionApi('context');
+      performance.now=()=>1000;
+      data.requestDurationMs=0;
+      data.selection.remaining_seconds=2701;
+      const interval=selectionCountdownInterval;
+      applySelectionContext(data);
+      applySelectionContext(data);
+      if(selectionCountdownInterval!==interval)throw Error('Context refresh replaced the countdown interval');
+    })()`);
+    assert.deepEqual((await countdown()).map(({text,urgency})=>[text,urgency]),[['۴۵:۰۱','normal'],['۴۵:۰۱','normal']]);
+    for(const [seconds,urgency] of [[301,'normal'],[300,'warning'],[61,'warning'],[60,'critical']]){
+      await evaluate(`performance.now=()=>selectionDeadline-${seconds*1000};renderSelectionCountdown();`);
+      assert.equal(await readSeconds(),seconds);
+      assert((await countdown()).every(timer=>timer.urgency===urgency));
+    }
+    await evaluate('performance.now=()=>selectionDeadline+1;renderSelectionCountdown();delete performance.now;');
+    assert(await evaluate('selectionState==="expired"&&!document.querySelector("#selectionNotice").hidden'));
+    assert.equal(await readSeconds(),0);
+    await assertCountdownHidden();
+
+    // The server accepts the picks before expiry and delivers the reply after it.
+    await load(fixtures.expiry_waiting.path);await chooseTesters();await review();
+    modes.submit='hold-response';
+    await evaluate('performance.now=()=>selectionDeadline-250;document.querySelector("#modalDone").click();');
+    for(let i=0;i<80&&!heldSubmitResponse;i++)await wait(100);
+    assert(heldSubmitResponse,'The submit response was not intercepted');
+    await assertCountdownHidden();
+    await evaluate('performance.now=()=>selectionDeadline+1;checkSelectionDeadline();');
+    assert(await evaluate('submitBusy&&selectionState==="submitting"&&document.querySelector("#demoModal").getAttribute("aria-hidden")==="false"'));
+    modes.submit='real';
+    await send('Fetch.continueRequest',{requestId:heldSubmitResponse});
+    await until('selectionState==="submitted"&&!submitBusy');
+    assert(await evaluate('document.querySelector("#modalTitle").textContent.includes("موفقیت")'));
+    await assertCountdownHidden();
+
     for(const [width,height] of [[1440,900],[390,844],[320,740]]){
       await load(fixtures.expiry_expired.path,width,height);
       assert(await evaluate('selectionState==="expired"&&document.querySelector("#collection").hidden&&document.querySelector("#mobileSelectionBar").hidden&&!canEditSelection()'));
+      await assertCountdownHidden();
       assert(await evaluate('document.querySelector("#selectionNoticeTitle").textContent==="مهلت انتخاب تسترهای شما به پایان رسیده است."'));
       assert(await evaluate('document.querySelector("#selectionNoticeDefault").textContent.includes("متناسب با جنسیتی")&&document.documentElement.scrollWidth<=innerWidth'));
       await evaluate('scrollTo({top:0,behavior:"instant"})');await screenshot('expired-'+width);
@@ -205,6 +318,7 @@ async function main() {
     for(const [width,height] of [[1440,900],[390,844]]){
       await load(fixtures.expiry_review.path,width,height);
       assert(await evaluate('selectionState==="review_required"&&!canEditSelection()&&document.querySelector("#collection").hidden&&document.querySelector("#mobileSelectionBar").hidden'));
+      await assertCountdownHidden();
       assert(await evaluate('document.querySelector("#selectionNoticeDefault").hidden&&!document.querySelector("#selectionNoticeSupport").hidden'));
       assert(await evaluate('document.querySelector("#selectionNoticeTitle").textContent.includes("بررسی")&&!document.querySelector("#selectionNotice").innerText.includes("پک تستر پیش‌فرض")'));
       assert(await evaluate('document.documentElement.scrollWidth<=innerWidth'));
@@ -219,6 +333,7 @@ async function main() {
     await evaluate('(async()=>{applySelectionContext(await selectionApi("context"));Date.now=()=>0;})()');
     assert(await evaluate('canEditSelection()&&document.querySelector("#demoModal").getAttribute("aria-hidden")==="false"'));
     await until('selectionState==="expired"');
+    await assertCountdownHidden();
     assert(await evaluate('selected.length===MAX_TESTERS&&!canEditSelection()&&document.querySelector("#demoModal").getAttribute("aria-hidden")==="true"&&document.querySelector("#collection").hidden'));
     const beforeExpiredClick=submits;
     await evaluate('document.querySelector("#modalDone").click();toggleProduct(selected[0]);');
@@ -232,10 +347,11 @@ async function main() {
     await screenshot('invalid-link-mobile');
     await load('/');await chooseTesters();
     assert(await evaluate('selectionState==="preview"&&document.querySelector("#finalizeButton").disabled&&document.querySelector("#orderFields").hidden'));
+    await assertCountdownHidden();
     assert.equal(errors.length,0,JSON.stringify(errors));
     assert(headers.length>0&&headers.every(h=>h.noStore&&h.noReferrer&&h.noIndex),'Missing privacy headers');
     fs.writeFileSync(path.join(artifacts,'browser-report.json'),JSON.stringify({responsive,privacyHeaders:headers.length,expiry:{responsiveWidths:[1440,390,320],liveModalLock:true,changedBrowserClock:true,directLateSubmit:410,awaitingAcceptance:true,expiredReviewNeedsSupport:true,noDefaultPackPromiseForReview:true},assertions:'passed'},null,2));
-    console.log('PASS: real isolated Context/Submit, full phone, responsive, final review, double-click guard, readonly reload, saved names, lost-response recovery, ambiguous-network lock, inventory error, invalid link, preview blocked, privacy headers, no referrer/token leak, expired responsive page, awaiting SMS, live deadline modal lock, changed browser clock, parallel direct late submissions rejected.');
+    console.log('PASS: real isolated Context/Submit, responsive countdown and controls, countdown refresh and visibility sync, warning thresholds, interval cleanup, submission across expiry, final review, readonly reload, lost-response recovery, ambiguous-network lock, inventory error, invalid link, preview, privacy headers, awaiting SMS, live deadline lock, and direct late submissions rejected.');
     await send('Browser.close');
   }finally{socket?.close();if(browser.exitCode===null)browser.kill();}
 }
